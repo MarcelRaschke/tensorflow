@@ -8,7 +8,7 @@
 #  --tag "gcr.io/tensorflow-testing/nosla-ubuntu16.04-manylinux2010" .
 # $ docker push gcr.io/tensorflow-testing/nosla-ubuntu16.04-manylinux2010
 
-FROM ubuntu:16.04 as devtoolset
+FROM ubuntu:xenial-20210114 as devtoolset
 
 ENV DEBIAN_FRONTEND=noninteractive
 RUN apt-get update && apt-get install -y \
@@ -37,7 +37,7 @@ RUN /build_devtoolset.sh devtoolset-7 /dt7
 RUN /build_devtoolset.sh devtoolset-8 /dt8
 
 # TODO(klimek): Split up into two different docker images.
-FROM ubuntu:16.04
+FROM ubuntu:xenial-20210114
 COPY --from=devtoolset /dt7 /dt7
 COPY --from=devtoolset /dt8 /dt8
 
