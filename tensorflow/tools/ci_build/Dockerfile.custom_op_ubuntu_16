@@ -1,6 +1,6 @@
 # Dockerfile for Ubuntu 16.04 manylinux2010 custom ops with CPU.
 
-FROM ubuntu:16.04 as devtoolset
+FROM ubuntu:xenial-20210114 as devtoolset
 
 LABEL maintainer="Amit Patankar <amitpatankar@google.com>"
 
@@ -31,7 +31,7 @@ RUN /build_devtoolset.sh devtoolset-7 /dt7
 RUN /build_devtoolset.sh devtoolset-8 /dt8
 
 # TODO(klimek): Split up into two different docker images.
-FROM ubuntu:16.04
+FROM ubuntu:xenial-20210114
 
 LABEL maintainer="Amit Patankar <amitpatankar@google.com>"
 
