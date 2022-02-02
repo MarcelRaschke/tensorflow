@@ -1,6 +1,6 @@
 # This Dockerfile provides a starting point for a ROCm installation of
 # MIOpen and tensorflow.
-FROM ubuntu:bionic
+FROM ubuntu:18.04
 MAINTAINER Jeff Poznanovic <jeffrey.poznanovic@amd.com>
 
 ARG ROCM_DEB_REPO=http://repo.radeon.com/rocm/apt/4.0.1/
