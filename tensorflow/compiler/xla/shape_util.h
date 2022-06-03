@@ -19,6 +19,7 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SHAPE_UTIL_H_
 #define TENSORFLOW_COMPILER_XLA_SHAPE_UTIL_H_
 
+#include <algorithm>
 #include <functional>
 #include <initializer_list>
 #include <string>
@@ -269,6 +270,7 @@ class ShapeUtil {
 
   // Creates a tuple shape from a slice of element shapes within the tuple.
   static Shape MakeTupleShape(absl::Span<const Shape> shapes);
+  static Shape MakeTupleShapeWithPtrs(absl::Span<const Shape* const> shapes);
 
   // Creates a tuple shape from a slice of element shapes within the tuple. If
   // only one shape is passed, returns that.
@@ -546,7 +548,7 @@ class ShapeUtil {
   //   return value = {1, 3}
   //
   // Precondition: input_dim_indices is sorted.
-  static absl::optional<std::vector<int64_t>> ReshapeLeavesDimensionsUnmodified(
+  static std::optional<std::vector<int64_t>> ReshapeLeavesDimensionsUnmodified(
       const Shape& from_shape, const Shape& to_shape,
       absl::Span<const int64_t> input_dim_indices);
 
@@ -572,8 +574,8 @@ class ShapeUtil {
   // layout). The layout of 'input_shape' is kept fixed. Returns
   // 'output_shape_with_layout' if such a layout can be found, and an error
   // otherwise.
-  static absl::optional<Shape> AlignLayouts(const Shape& input_shape,
-                                            const Shape& output_shape);
+  static std::optional<Shape> AlignLayouts(const Shape& input_shape,
+                                           const Shape& output_shape);
 
   // Returns a shape with the given dimension deleted.
   // For example:
@@ -611,7 +613,12 @@ class ShapeUtil {
                                        absl::Span<const int64_t> count,
                                        absl::Span<const int64_t> incr,
                                        const FnType& visitor_function) {
-    return ForEachIndexInternal(shape, base, count, incr, visitor_function);
+    return ForEachIndexInternal(
+        shape, base, count, incr,
+        [&visitor_function](absl::Span<const int64_t> indexes,
+                            int /*thread_id*/) {
+          return visitor_function(indexes);
+        });
   }
 
   // Simple ergonomic wrapper around ShapeUtil::ForEachIndexWithStatus.
@@ -667,7 +674,7 @@ class ShapeUtil {
   // matter.
   //
   // visitor_function must be a callable of type
-  // void(Span<int64_t>) or compatible.
+  // void(Span<int64_t>, int thread_id) or compatible.
   template <typename FnType>
   static void ForEachIndexParallel(const Shape& shape,
                                    absl::Span<const int64_t> base,
@@ -677,13 +684,24 @@ class ShapeUtil {
     // The parallel version of ForEachIndexInternal can never fail.
     CHECK(ForEachIndexInternal(
               shape, base, count, incr,
-              [&visitor_function](
-                  absl::Span<const int64_t> indexes) -> StatusOr<bool> {
-                visitor_function(indexes);
+              [&visitor_function](absl::Span<const int64_t> indexes,
+                                  int thread_id) -> StatusOr<bool> {
+                visitor_function(indexes, thread_id);
                 return true;
               },
               /*parallel=*/true)
               .ok());
+  }
+  // Convenience wrapper which doesn't take `base`, `count` and `incr`
+  // explicitly, but iterates over every element in `shape` instead.
+  template <typename FnType>
+  static void ForEachIndexParallel(const Shape& shape,
+                                   const FnType& visitor_function) {
+    std::vector<int64_t> base(shape.dimensions_size());
+    std::vector<int64_t> incr(shape.dimensions_size(), 1);
+    return ForEachIndexParallel(shape, base,
+                                /*count=*/shape.dimensions(), incr,
+                                visitor_function);
   }
 
   // About 0-2-1 transpose:
@@ -698,8 +716,8 @@ class ShapeUtil {
   //
   // If `b` is a 0-2-1 transpose of `a` in 0-1-2, return the dimensions for the
   // normalized shape of `b` or the 0-2-1 shape.
-  static absl::optional<std::vector<int64_t>> FindTranspose021(const Shape& a,
-                                                               const Shape& b);
+  static std::optional<std::vector<int64_t>> FindTranspose021(const Shape& a,
+                                                              const Shape& b);
 
   // Strips device-specific information, namely tiling and memory-space
   // information, from a shape.
@@ -744,7 +762,7 @@ class ShapeUtil {
                                      const FnType& visitor_function,
                                      bool parallel = false) {
     if (ShapeUtil::IsZeroElementArray(shape)) {
-      return Status::OK();
+      return ::tensorflow::OkStatus();
     }
     CHECK_EQ(shape.rank(), base.size());
     CHECK_EQ(incr.size(), base.size());
@@ -755,7 +773,7 @@ class ShapeUtil {
     int64_t n = -1;
     std::vector<int64_t> indexes(base.begin(), base.end());
     const int kNumThreads = tensorflow::port::MaxParallelism();
-    absl::optional<tensorflow::thread::ThreadPool> pool;
+    std::optional<tensorflow::thread::ThreadPool> pool;
     if (parallel) {
       pool.emplace(tensorflow::Env::Default(), "foreach", kNumThreads);
     }
@@ -764,16 +782,18 @@ class ShapeUtil {
     Status status;  // Guarded by mu
 
     while (n < rank) {
-      if (pool != absl::nullopt) {
-        pool->Schedule([indexes, &visitor_function, &mu, &status] {
-          StatusOr<bool> result = visitor_function(indexes);
+      if (pool != std::nullopt) {
+        pool->Schedule([indexes, &visitor_function, &mu, &status, &pool] {
+          const int thread_id = pool->CurrentThreadId();
+          StatusOr<bool> result = visitor_function(indexes, thread_id);
           if (!result.ok()) {
             absl::MutexLock lock(&mu);
             status = status.ok() ? result.status() : status;
           }
         });
       } else {
-        TF_ASSIGN_OR_RETURN(bool should_continue, visitor_function(indexes));
+        TF_ASSIGN_OR_RETURN(bool should_continue,
+                            visitor_function(indexes, /*thread_id=*/-1));
         if (!should_continue) {
           break;
         }

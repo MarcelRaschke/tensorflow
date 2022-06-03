@@ -44,7 +44,6 @@ class ShapeVerifier : public DfsHloVisitor {
   Status HandleElementwiseBinary(HloInstruction* hlo) override;
   Status HandleClamp(HloInstruction* clamp) override;
   Status HandleSelect(HloInstruction* select) override;
-  Status HandleTupleSelect(HloInstruction* tuple_select) override;
   Status HandleConcatenate(HloInstruction* concatenate) override;
   Status HandleIota(HloInstruction* hlo) override;
   Status HandleConvert(HloInstruction* convert) override;
@@ -120,7 +119,7 @@ class ShapeVerifier : public DfsHloVisitor {
   Status HandleSetDimensionSize(HloInstruction* set_size) override;
   Status HandleAddDependency(HloInstruction* add_dependency) override;
 
-  Status FinishVisit(HloInstruction*) override { return Status::OK(); }
+  Status FinishVisit(HloInstruction*) override { return OkStatus(); }
 
  protected:
   // Check the instruction's shape against the shape given by ShapeInference
@@ -297,7 +296,7 @@ class HloVerifier : public HloModulePass {
       : target_metadata_(std::move(target_metadata)), context_(context) {}
 
   ~HloVerifier() override = default;
-  absl::string_view name() const override { return "verifier"; }
+  absl::string_view name() const override { return "hlo-verifier"; }
 
   // Never returns true; no instructions are ever modified by this pass.
   StatusOr<bool> Run(HloModule* module) override;

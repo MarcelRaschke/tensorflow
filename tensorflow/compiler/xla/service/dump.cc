@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/dump.h"
 
+#include <functional>
 #include <memory>
 #include <queue>
 #include <utility>
@@ -30,7 +31,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_proto_util.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/io/path.h"
 #include "tensorflow/core/lib/io/zlib_compression_options.h"
 #include "tensorflow/core/lib/io/zlib_outputbuffer.h"
 #include "tensorflow/core/lib/strings/proto_serialization.h"
@@ -239,16 +239,16 @@ static Status WriteStringToFile(tensorflow::Env* env, const std::string& fname,
   return gz_file.Close();
 }
 
-static absl::optional<std::string> GetDumpFilePath(
+static std::optional<std::string> GetDumpFilePath(
     string_view filename, const CanonicalDebugOptions& opts) {
   if (opts.dumping_to_stdout()) {
     LOG(ERROR) << "Refusing to write " << filename
                << " to stdout.  Pass --xla_dump_to=<path> to write to a file.";
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   if (opts.dump_to.empty()) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   const std::string& dir = opts.dump_to;
@@ -264,7 +264,7 @@ static absl::optional<std::string> GetDumpFilePath(
     if (!status.ok() && !env->IsDirectory(dir).ok()) {
       LOG(ERROR) << "Could not create directory " << dir
                  << " for dumping XLA debug data: " << status;
-      return absl::nullopt;
+      return std::nullopt;
     }
   }
 
@@ -292,7 +292,7 @@ static absl::optional<std::string> GetDumpFilePath(
         LOG(ERROR) << "Have already dumped " << dumped_module_ids.size()
                    << " modules, more than the limit of "
                    << opts.dump_max_hlo_modules;
-        return absl::nullopt;
+        return std::nullopt;
       }
     }
   }
@@ -300,55 +300,55 @@ static absl::optional<std::string> GetDumpFilePath(
   return tensorflow::io::JoinPath(dir, SanitizeFileName(std::string(filename)));
 }
 
-static absl::optional<std::string> DumpToFileInDirImpl(
+static std::optional<std::string> DumpToFileInDirImpl(
     string_view filename, string_view contents,
     const CanonicalDebugOptions& opts, bool compress = false) {
   auto file_path = GetDumpFilePath(filename, opts);
-  if (!file_path) return absl::nullopt;
+  if (!file_path) return std::nullopt;
 
   auto status = WriteStringToFile(tensorflow::Env::Default(), *file_path,
                                   contents, compress);
   if (!status.ok()) {
     LOG(ERROR) << "Could not write XLA debug data to " << *file_path << ": "
                << status;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return file_path;
 }
 
-static absl::optional<std::string> DumpToFileInDirImpl(
+static std::optional<std::string> DumpToFileInDirImpl(
     string_view filename, DataProducer& data_producer,
     const CanonicalDebugOptions& opts, bool compress = false) {
   auto file_path = GetDumpFilePath(filename, opts);
-  if (!file_path) return absl::nullopt;
+  if (!file_path) return std::nullopt;
 
   auto status = WriteStringToFile(tensorflow::Env::Default(), *file_path,
                                   data_producer, compress);
   if (!status.ok()) {
     LOG(ERROR) << "Could not write XLA debug data to " << *file_path << ": "
                << status;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   return file_path;
 }
 
-static absl::optional<std::string> DumpToFileInDirOrStdoutImpl(
+static std::optional<std::string> DumpToFileInDirOrStdoutImpl(
     string_view filename, string_view contents,
     const CanonicalDebugOptions& opts) {
   // Dump to stdout if that's called for.
   if (opts.dumping_to_stdout()) {
     std::cout << "*** Begin " << filename << " ***\n"
               << contents << "\n*** End " << filename << " ***" << std::endl;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Otherwise, dump to a file.
   return DumpToFileInDirImpl(filename, contents, opts);
 }
 
-static absl::optional<std::string> DumpToFileInDirOrStdoutImpl(
+static std::optional<std::string> DumpToFileInDirOrStdoutImpl(
     string_view filename, DataProducer& data_producer,
     const CanonicalDebugOptions& opts) {
   // Dump to stdout if that's called for.
@@ -358,7 +358,7 @@ static absl::optional<std::string> DumpToFileInDirOrStdoutImpl(
       std::cout << next_producer();
     }
     std::cout << "\n*** End " << filename << " ***" << std::endl;
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   // Otherwise, dump to a file.
@@ -384,7 +384,7 @@ static std::vector<std::string> DumpHloModuleImpl(
     const CanonicalDebugOptions& opts) {
   std::string filename = FilenameFor(module, prefix, suffix);
 
-  std::vector<absl::optional<std::string>> file_paths;
+  std::vector<std::optional<std::string>> file_paths;
 
   if (opts.dump_as_text) {
     auto print_options = opts.dump_as_long_text
@@ -392,6 +392,7 @@ static std::vector<std::string> DumpHloModuleImpl(
                              : HloPrintOptions::ShortParsable();
     print_options.set_print_large_constants(false);
     print_options.set_print_control_dependencies(true);
+    print_options.set_print_operand_index_annotation_interval(5);
     print_options.set_print_backend_config(true);
     print_options.set_print_metadata(opts.dump_hlo_metadata);
     file_paths.push_back(DumpToFileInDirOrStdoutImpl(
@@ -476,7 +477,7 @@ static std::vector<std::string> DumpHloModuleImpl(
   }
 
   std::vector<std::string> dumped_file_paths;
-  for (const absl::optional<std::string>& path : file_paths) {
+  for (const std::optional<std::string>& path : file_paths) {
     if (path.has_value()) {
       dumped_file_paths.push_back(*path);
     }
@@ -615,8 +616,9 @@ void DumpToFileInDirOrStdout(const HloModule& module, string_view file_prefix,
   outputFile->keep();
 }
 
-void DumpExecutionOptions(const ExecutionOptions& execution_options,
-                          const DebugOptions& debug_options) {
+void DumpProtobufToFile(const tensorflow::protobuf::Message& proto,
+                        const DebugOptions& debug_options,
+                        absl::string_view filename) {
   CanonicalDebugOptions opts(debug_options);
   tensorflow::Env* env = tensorflow::Env::Default();
   const std::string& dir = opts.dump_to;
@@ -629,20 +631,28 @@ void DumpExecutionOptions(const ExecutionOptions& execution_options,
     }
   }
   if (env->IsDirectory(dir).ok()) {
-    std::string filename = tensorflow::io::JoinPath(dir, "execution_options");
+    const std::string path = tensorflow::io::JoinPath(dir, filename);
     Status status;
     if (opts.dump_as_text) {
-      status = tensorflow::WriteTextProto(env, absl::StrCat(filename, ".txt"),
-                                          execution_options);
+      status =
+          tensorflow::WriteTextProto(env, absl::StrCat(path, ".txt"), proto);
     } else {
-      status = tensorflow::WriteBinaryProto(env, absl::StrCat(filename, ".pb"),
-                                            execution_options);
+      status =
+          tensorflow::WriteBinaryProto(env, absl::StrCat(path, ".pb"), proto);
     }
     if (!status.ok()) {
       LOG(ERROR) << "Could not write XLA debug data to " << filename << ": "
                  << status;
     }
   }
+}
+
+void DumpPerModuleProtobufToFile(const HloModule& module,
+                                 const tensorflow::protobuf::Message& proto,
+                                 const DebugOptions& debug_options,
+                                 absl::string_view name) {
+  const std::string filename = FilenameFor(module, TimestampFor(module), name);
+  DumpProtobufToFile(proto, debug_options, filename);
 }
 
 void DumpHloModuleIfEnabled(const HloModule& module, string_view name) {
@@ -800,7 +810,7 @@ void DumpHloModuleMetadataIfEnabled(const std::vector<HloModule*>& modules) {
       continue;
     }
     DumpHloModuleMetadata(module->metadata().proto(), opts, &dumped_module_ids);
-    const absl::optional<HloModuleMetadataProto>& prepartitioning_metadata =
+    const std::optional<HloModuleMetadataProto>& prepartitioning_metadata =
         module->metadata().prepartitioning_metadata();
     if (prepartitioning_metadata.has_value()) {
       DumpHloModuleMetadata(*prepartitioning_metadata, opts,

@@ -17,6 +17,7 @@ limitations under the License.
 #define TENSORFLOW_COMPILER_XLA_SERVICE_HLO_MODULE_H_
 
 #include <atomic>
+#include <functional>
 #include <list>
 #include <memory>
 #include <random>
@@ -44,6 +45,10 @@ limitations under the License.
 #include "tensorflow/core/platform/logging.h"
 
 namespace xla {
+
+using LayoutCanonicalizationCallback =
+    std::function<StatusOr<std::pair<std::vector<Shape>, Shape>>(
+        const HloModule& module)>;
 
 // Describes a compilation unit at the HLO level.
 //
@@ -148,6 +153,21 @@ class HloModule {
 
   const ComputationLayout& entry_computation_layout() const {
     return config_.entry_computation_layout();
+  }
+
+  // Based on module's entry_computation sharded shapes,
+  // layout_canonicalization_callback_ computes and
+  // returns <argument_layouts, result_layout> for module's entry computation.
+  // argument_layouts is std::vector<Shape> and results_layout is Shape.
+  // layout_canonicalization_callback_ is used only when
+  // use_auto_spmd_partitioning_ = true.
+  void set_layout_canonicalization_callback(
+      LayoutCanonicalizationCallback callback) {
+    layout_canonicalization_callback_ = std::move(callback);
+  }
+
+  LayoutCanonicalizationCallback layout_canonicalization_callback() const {
+    return layout_canonicalization_callback_;
   }
 
   // Generates a hash value of an HLO module. Hash considers
@@ -408,9 +428,11 @@ class HloModule {
     module->metadata_ = std::move(metadata_);
   }
 
-  uint64_t session_id() const { return session_id_; }
+  int64_t profile_version() const { return profile_version_; }
 
-  void set_session_id(uint64_t session_id) { session_id_ = session_id; }
+  void set_profile_version(int64_t profile_version) {
+    profile_version_ = profile_version;
+  }
 
   void add_profile_info(const HloModuleProto::ProfileInfo& profile_info) {
     profile_info_list_.push_back(profile_info);
@@ -468,7 +490,7 @@ class HloModule {
   // The HloSchedule of the module. The schedule if it exists contains a
   // sequential order of instructions for each non-fusion computation in the
   // module.
-  absl::optional<HloSchedule> schedule_;
+  std::optional<HloSchedule> schedule_;
 
   // alias_config indicates the alias information of input/output buffers that
   // are expected from the module.
@@ -479,11 +501,11 @@ class HloModule {
 
   // The HLO shardings of the entry computation's parameters for
   // SPMD-partitioned programs.
-  absl::optional<std::vector<HloSharding>> spmd_parameters_shardings_;
+  std::optional<std::vector<HloSharding>> spmd_parameters_shardings_;
 
   // The HLO sharding of the entry computation's output (root) for
   // SPMD-partitioned programs.
-  absl::optional<HloSharding> spmd_output_sharding_;
+  std::optional<HloSharding> spmd_output_sharding_;
 
   // Arguments to be prefetched across programs.
   std::vector<std::pair<int64_t, ShapeIndex>> cross_program_prefetches_;
@@ -494,8 +516,8 @@ class HloModule {
   // True if the module contains dynamic computation.
   bool is_dynamic_ = false;
 
-  // A compilation session id.
-  uint64_t session_id_ = 0;
+  // Optional compilation profile handle.
+  int64_t profile_version_ = 0;
 
   // An array of ProfileInfo specifying what optimization profiles this module
   // contains, along with the relative speedups.
@@ -506,6 +528,10 @@ class HloModule {
 
   // The unoptimized module fingerprint.
   std::string autofdo_fingerprint_;
+
+  // Layout canonicalization callback, used only when
+  // use_auto_spmd_partitioning_ = true.
+  LayoutCanonicalizationCallback layout_canonicalization_callback_;
 };
 
 }  // namespace xla

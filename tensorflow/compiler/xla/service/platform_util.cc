@@ -37,9 +37,6 @@ namespace xla {
 constexpr int kMinCudaComputeCapabilityMajor = 3;
 constexpr int kMinCudaComputeCapabilityMinor = 5;
 
-// Minimum supported AMDGPU ISA version is 803.
-constexpr int kMinAMDGPUISAVersion = 803;
-
 // The name of the interpreter platform.
 constexpr char kInterpreter[] = "interpreter";
 
@@ -143,16 +140,14 @@ static bool IsDeviceSupported(se::StreamExecutor* executor) {
       return false;
     }
   } else if (executor->platform()->id() == se::rocm::kROCmPlatformId) {
-    int isa_version = 0;
-    if (description.rocm_amdgpu_isa_version(&isa_version)) {
-      if (isa_version < kMinAMDGPUISAVersion) {
-        LOG(INFO) << "StreamExecutor ROCM device ("
-                  << executor->device_ordinal() << ") is of "
-                  << "obsolete AMDGPU ISA version: "
-                  << "gfx" << kMinAMDGPUISAVersion << " required, "
-                  << "device is gfx" << isa_version;
-        return false;
-      }
+    auto rocm_compute_capability = description.rocm_compute_capability();
+    if (!rocm_compute_capability.is_supported_gfx_version()) {
+      LOG(INFO) << "StreamExecutor ROCM device (" << executor->device_ordinal()
+                << ") is of unsupported "
+                << "AMDGPU version : " << rocm_compute_capability.gfx_version()
+                << ". The supported AMDGPU versions are "
+                << rocm_compute_capability.supported_gfx_versions_str() << ".";
+      return false;
     }
   }
   return true;
@@ -161,7 +156,7 @@ static bool IsDeviceSupported(se::StreamExecutor* executor) {
 /* static */ StatusOr<std::vector<se::StreamExecutor*>>
 PlatformUtil::GetStreamExecutors(
     se::Platform* platform,
-    const absl::optional<std::set<int>>& allowed_devices) {
+    const std::optional<std::set<int>>& allowed_devices) {
   int device_count = platform->VisibleDeviceCount();
   if (device_count <= 0) {
     return NotFound("no %s devices found", platform->Name());

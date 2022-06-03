@@ -57,7 +57,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/status.h"
 #include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/platform/tracing.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/stream_executor/cuda/cuda_diagnostics.h"
 #include "tensorflow/stream_executor/gpu/asm_compiler.h"
@@ -112,7 +111,7 @@ Status NVPTXCompiler::OptimizeHloConvolutionCanonicalization(
   pipeline.AddPass<HloConstantFolding>();
   TF_RETURN_IF_ERROR(pipeline.Run(hlo_module).status());
 
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 Status NVPTXCompiler::OptimizeHloPostLayoutAssignment(
@@ -147,8 +146,12 @@ Status NVPTXCompiler::OptimizeHloPostLayoutAssignment(
 
   HloPassPipeline post_pipeline("nvptx post-layout_assignment part 2");
 
-  // Find the fastest algorithm for GEMMs.
-  post_pipeline.AddPass<GemmAlgorithmPicker>(stream_exec, device_allocator);
+  // Find the fastest algorithm for GEMMs. Skip on Ampere and later as the
+  // algorithm goes unused.
+  if (!stream_exec->GetDeviceDescription().cuda_compute_capability().IsAtLeast(
+          se::CudaComputeCapability::AMPERE)) {
+    post_pipeline.AddPass<GemmAlgorithmPicker>(stream_exec, device_allocator);
+  }
 
   if (!IsBefEnabled(hlo_module->config())) {
     // Transform TriangularSolve ops into custom-calls, so we can add temp
@@ -159,13 +162,13 @@ Status NVPTXCompiler::OptimizeHloPostLayoutAssignment(
 
   TF_RETURN_IF_ERROR(post_pipeline.Run(hlo_module).status());
 
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 namespace {
-absl::optional<bool> CanShareBufferHint(const HloInstruction* user,
-                                        const HloInstruction* operand,
-                                        const ShapeIndex& user_index) {
+std::optional<bool> CanShareBufferHint(const HloInstruction* user,
+                                       const HloInstruction* operand,
+                                       const ShapeIndex& user_index) {
   switch (user->opcode()) {
     case HloOpcode::kAllReduce:
       // NCCL all-reduce can be performed in-place.
@@ -183,7 +186,7 @@ absl::optional<bool> CanShareBufferHint(const HloInstruction* user,
       }
       return false;
     default:
-      return absl::nullopt;
+      return std::nullopt;
   }
 }
 

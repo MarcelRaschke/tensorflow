@@ -4110,6 +4110,57 @@ ENTRY main {
                                    {&operand, &scatter_indices, &updates})));
 }
 
+TEST_F(HloEvaluatorTest, EvaluateScatter_Multioutput) {
+  const char* hlo_text = R"(
+HloModule MultioutputScatter
+
+update {
+  lhs0 = s32[] parameter(0)
+  lhs1 = f32[] parameter(1)
+  rhs0 = s32[] parameter(2)
+  rhs1 = f32[] parameter(3)
+  ROOT tuple = (s32[], f32[]) tuple(rhs0, rhs1)
+}
+
+ENTRY main {
+  operand0 = s32[3,3,2] parameter(0)
+  operand1 = f32[3,3,2] parameter(1)
+  indices = s32[2,2] parameter(2)
+  updates0 = s32[2,2] parameter(3)
+  updates1 = f32[2,2] parameter(4)
+  ROOT scatter = (s32[3,3,2], f32[3,3,2]) scatter(operand0, operand1, indices, updates0, updates1),
+      to_apply=update,
+      update_window_dims={1},
+      inserted_window_dims={0,1},
+      scatter_dims_to_operand_dims={0,1},
+      index_vector_dim=1
+}
+)";
+  TF_ASSERT_OK_AND_ASSIGN(m_, ParseAndReturnVerifiedModule(hlo_text));
+  Literal operand0 =
+      LiteralUtil::CreateR3<int32_t>({{{-1, 1}, {-2, 2}, {-3, 3}},  //
+                                      {{-4, 4}, {-5, 5}, {-6, 6}},  //
+                                      {{-7, 7}, {-8, 8}, {-9, 9}}});
+  Literal operand1 =
+      LiteralUtil::CreateR3<float>({{{-2, 2}, {-3, 3}, {-4, 4}},  //
+                                    {{-5, 5}, {-6, 6}, {-7, 7}},  //
+                                    {{-8, 8}, {-9, 9}, {-10, 10}}});
+  Literal scatter_indices = LiteralUtil::CreateR2<int32_t>({{0, 0}, {1, 0}});
+  Literal updates0 = LiteralUtil::CreateR2<int32_t>({{-10, 10}, {-40, 40}});
+  Literal updates1 = LiteralUtil::CreateR2<float>({{-11, 11}, {-41, 41}});
+  Literal expected = LiteralUtil::MakeTupleOwned(
+      LiteralUtil::CreateR3<int32_t>({{{-10, 10}, {-2, 2}, {-3, 3}},  //
+                                      {{-40, 40}, {-5, 5}, {-6, 6}},  //
+                                      {{-7, 7}, {-8, 8}, {-9, 9}}}),
+      LiteralUtil::CreateR3<float>({{{-11, 11}, {-3, 3}, {-4, 4}},  //
+                                    {{-41, 41}, {-6, 6}, {-7, 7}},  //
+                                    {{-8, 8}, {-9, 9}, {-10, 10}}}));
+  TF_ASSERT_OK_AND_ASSIGN(
+      Literal result,
+      Evaluate({&operand0, &operand1, &scatter_indices, &updates0, &updates1}));
+  EXPECT_TRUE(LiteralTestUtil::Equal(expected, result));
+}
+
 // Verifies that HloEvaluator evaluates a HLO instruction that performs
 // element-wise comparison with 2 bfloat16 operands.
 TEST_F(HloEvaluatorTest, DoesCompareBF16) {
@@ -4677,6 +4728,30 @@ TEST_F(HloEvaluatorTest, MapU16) {
   EXPECT_TRUE(LiteralTestUtil::Equal(expected, result));
 }
 
+TEST_F(HloEvaluatorTest, MapMixed) {
+  const absl::string_view hlo_text = R"(
+  HloModule test
+
+  map_computation {
+    p0 = u16[] parameter(0)
+    p1 = f32[] parameter(1)
+    c0 = f32[] convert(p0)
+    ROOT add = f32[] add(c0, p1)
+  }
+
+  ENTRY CopyStartCopyDone {
+    c0 = u16[3] constant({1, 2, 3})
+    c1 = f32[3] constant({1.5, 2.5, 3.5})
+    ROOT map = f32[3] map(c0, c1), to_apply=map_computation
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(m_, ParseAndReturnVerifiedModule(hlo_text));
+  Literal expected = LiteralUtil::CreateR1<float>({2.5f, 4.5f, 6.5f});
+  TF_ASSERT_OK_AND_ASSIGN(
+      Literal result, HloEvaluator().Evaluate(*m_->entry_computation(), {}));
+  EXPECT_TRUE(LiteralTestUtil::Equal(expected, result));
+}
+
 TEST_F(HloEvaluatorTest, DotUpcast) {
   const absl::string_view hlo_text = R"(
   HloModule test
@@ -4929,7 +5004,7 @@ TEST_F(PatternMatchParseWhileLoopTest, LoopBoundDefinedInsideOfCond) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());
@@ -4978,7 +5053,7 @@ TEST_F(PatternMatchParseWhileLoopTest, LoopBoundDefinedOutsideOfCond) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());
@@ -5029,7 +5104,7 @@ TEST_F(PatternMatchParseWhileLoopTest, LoopBoundComputedOutsideOfCond) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());
@@ -5080,7 +5155,7 @@ TEST_F(PatternMatchParseWhileLoopTest, StepSizeNotOne) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());
@@ -5137,7 +5212,7 @@ TEST_F(PatternMatchParseWhileLoopTest, RecursiveCond) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());
@@ -5202,7 +5277,7 @@ TEST_F(PatternMatchParseWhileLoopTest, RecursiveCondGetTupleElement) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());
@@ -5289,7 +5364,7 @@ TEST_F(PatternMatchParseWhileLoopTest, LoopBoundDependsOnAnotherLoop) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());
@@ -5338,7 +5413,7 @@ TEST_F(PatternMatchParseWhileLoopTest, DynamicLoop) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_TRUE(parsed_while_loop->is_dynamic());
@@ -5377,7 +5452,7 @@ TEST_F(PatternMatchParseWhileLoopTest, BooleanCond) {
                           ParseAndReturnVerifiedModule(kHloModule));
   HloInstruction* while_op =
       hlo_module->entry_computation()->root_instruction()->mutable_operand(0);
-  absl::optional<ParsedWhileLoop> parsed_while_loop =
+  std::optional<ParsedWhileLoop> parsed_while_loop =
       PatternMatchParseWhileLoop(while_op);
   ASSERT_TRUE(parsed_while_loop.has_value());
   EXPECT_FALSE(parsed_while_loop->is_dynamic());

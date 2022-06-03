@@ -88,6 +88,9 @@ Status LocalDeviceState::SynchronizeAllActivity() {
       status.Update(callback_stream.second->BlockHostUntilDone());
     }
   }
+  for (auto& stream : device_to_host_streams_) {
+    status.Update(stream->BlockHostUntilDone());
+  }
   bool ok = compute_stream_->parent()->SynchronizeAllActivity();
   if (!ok) {
     status.Update(Unknown("SynchronizeAllActivity failed."));
@@ -102,7 +105,7 @@ Status LocalDeviceState::ThenMemcpyDeviceToDevice(
   // the buffer addresses identify the devices. This does not work
   // on all platforms; this method is virtual so it can be overridden.
   transfer_stream->ThenMemcpyD2D(&dst_buffer, src_buffer, dst_buffer.size());
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 void LocalDeviceState::ThenExecuteCallback(se::Stream* stream,

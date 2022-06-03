@@ -225,7 +225,7 @@ HloAsyncInstruction::HloAsyncInstruction(
   AppendComputation(async_computation);
   CHECK(!async_computation->IsCustomCallComputation());
   CHECK(!async_computation->IsFusionComputation());
-  async_computation->SetAsyncInstruction(this);
+  async_computation->AddAsyncInstruction(this);
 }
 
 HloAsyncInstruction::HloAsyncInstruction(HloOpcode opcode, const Shape& shape,
@@ -236,7 +236,26 @@ HloAsyncInstruction::HloAsyncInstruction(HloOpcode opcode, const Shape& shape,
   AppendComputation(async_computation);
   CHECK(!async_computation->IsCustomCallComputation());
   CHECK(!async_computation->IsFusionComputation());
-  async_computation->SetAsyncInstruction(this);
+  async_computation->AddAsyncInstruction(this);
+}
+
+HloAsyncInstruction::~HloAsyncInstruction() {
+  ClearAsyncComputationInstruction();
+  ClearCalledComputations();
+}
+
+void HloAsyncInstruction::ClearAsyncComputationInstruction() {
+  // Each async instruction calls a single computation, but we use
+  // called_computations() instead of async_wrapped_instruction(), because the
+  // order in which things get destructed can vary; the async computation's
+  // back-pointer may already be null, which violates a check in
+  // async_wrapped_instruction.
+  for (HloComputation* computation : called_computations()) {
+    CHECK(computation != nullptr);
+    if (computation->IsAsyncComputation()) {
+      computation->RemoveAsyncInstruction(this);
+    }
+  }
 }
 
 HloInstruction* HloAsyncInstruction::async_wrapped_instruction() const {
@@ -325,11 +344,11 @@ HloCopyStartInstruction::CloneWithNewOperandsImpl(
 
 HloCompareInstruction::HloCompareInstruction(
     const Shape& shape, HloInstruction* lhs, HloInstruction* rhs,
-    ComparisonDirection direction, absl::optional<Comparison::Type> type)
+    ComparisonDirection direction, std::optional<Comparison::Type> type)
     : HloInstruction(HloOpcode::kCompare, shape),
-      compare_(direction, type ? (*type)
-                               : Comparison::DefaultComparisonType(
-                                     lhs->shape().element_type())) {
+      compare_(type.has_value()
+                   ? Comparison(direction, *type)
+                   : Comparison(direction, lhs->shape().element_type())) {
   AppendOperand(lhs);
   AppendOperand(rhs);
 }
@@ -496,11 +515,11 @@ HloCholeskyInstruction::CloneWithNewOperandsImpl(
 
 HloChannelInstruction::HloChannelInstruction(
     HloOpcode opcode, const Shape& shape,
-    const absl::optional<int64_t>& channel_id)
+    const std::optional<int64_t>& channel_id)
     : HloInstruction(opcode, shape), channel_id_(channel_id) {}
 
 void HloChannelInstruction::set_channel_id(
-    const absl::optional<int64_t>& channel_id) {
+    const std::optional<int64_t>& channel_id) {
   channel_id_ = channel_id;
 }
 
@@ -651,7 +670,7 @@ HloCollectiveInstruction::HloCollectiveInstruction(
     HloOpcode opcode, const Shape& shape,
     absl::Span<HloInstruction* const> operands,
     absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
-    const absl::optional<int64_t>& channel_id)
+    const std::optional<int64_t>& channel_id)
     : HloChannelInstruction(opcode, shape, channel_id),
       replica_groups_(SpanToVector(replica_groups)),
       constrain_layout_(constrain_layout) {
@@ -699,7 +718,7 @@ HloAllGatherInstruction::HloAllGatherInstruction(
     HloOpcode opcode, const Shape& shape,
     absl::Span<HloInstruction* const> operands, int64_t all_gather_dimension,
     absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
-    const absl::optional<int64_t>& channel_id, bool use_global_device_ids)
+    const std::optional<int64_t>& channel_id, bool use_global_device_ids)
     : HloCollectiveInstruction(opcode, shape, operands, replica_groups,
                                constrain_layout, channel_id),
       all_gather_dimension_(all_gather_dimension),
@@ -748,7 +767,7 @@ HloAllReduceInstructionBase::HloAllReduceInstructionBase(
     absl::Span<HloInstruction* const> operands,
     HloComputation* reduce_computation,
     absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
-    const absl::optional<int64_t>& channel_id, bool use_global_device_ids)
+    const std::optional<int64_t>& channel_id, bool use_global_device_ids)
     : HloCollectiveInstruction(opcode, shape, operands, replica_groups,
                                constrain_layout, channel_id),
       use_global_device_ids_(use_global_device_ids) {
@@ -810,7 +829,7 @@ HloReduceScatterInstruction::HloReduceScatterInstruction(
     const Shape& shape, absl::Span<HloInstruction* const> operands,
     HloComputation* reduce_computation,
     absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
-    const absl::optional<int64_t>& channel_id, bool use_global_device_ids,
+    const std::optional<int64_t>& channel_id, bool use_global_device_ids,
     int64_t scatter_dimension)
     : HloAllReduceInstructionBase(
           HloOpcode::kReduceScatter, shape, operands, reduce_computation,
@@ -855,8 +874,8 @@ HloReduceScatterInstruction::CloneWithNewOperandsImpl(
 HloAllToAllInstruction::HloAllToAllInstruction(
     const Shape& shape, absl::Span<HloInstruction* const> operands,
     absl::Span<const ReplicaGroup> replica_groups, bool constrain_layout,
-    const absl::optional<int64_t>& channel_id,
-    const absl::optional<int64_t>& split_dimension)
+    const std::optional<int64_t>& channel_id,
+    const std::optional<int64_t>& split_dimension)
     : HloCollectiveInstruction(HloOpcode::kAllToAll, shape, operands,
                                replica_groups, constrain_layout, channel_id),
       split_dimension_(split_dimension) {}
@@ -901,7 +920,7 @@ bool HloAllToAllInstruction::IdenticalSlowPathIgnoringChannelIdValues(
 HloCollectivePermuteInstruction::HloCollectivePermuteInstruction(
     HloOpcode opcode, const Shape& shape, HloInstruction* operand,
     const std::vector<std::pair<int64_t, int64_t>>& source_target_pairs,
-    const absl::optional<int64_t>& channel_id)
+    const std::optional<int64_t>& channel_id)
     : HloChannelInstruction(opcode, shape, channel_id),
       source_target_pairs_(source_target_pairs) {
   AppendOperand(operand);
@@ -913,7 +932,7 @@ HloCollectivePermuteInstruction::HloCollectivePermuteInstruction(
     HloInstruction* output_start_indices,
     absl::Span<const std::pair<int64_t, int64_t>> source_target_pairs,
     absl::Span<const std::vector<int64_t>> slice_sizes,
-    const absl::optional<int64_t>& channel_id)
+    const std::optional<int64_t>& channel_id)
     : HloChannelInstruction(opcode, shape, channel_id),
       source_target_pairs_(source_target_pairs.begin(),
                            source_target_pairs.end()),
@@ -1262,7 +1281,7 @@ HloInstructionProto HloMapInstruction::ToProto() const {
 }
 
 bool HloMapInstruction::IsElementwiseImpl(
-    const absl::optional<int64_t>& operand_idx) const {
+    const std::optional<int64_t>& operand_idx) const {
   if (!dimensions().empty()) {
     // Check that the map is executed in elementwise compatible dimensions.
     if (dimensions().size() != shape().dimensions_size()) {
@@ -1378,7 +1397,7 @@ HloInstructionProto HloConstantInstruction::ToProto() const {
 }
 
 bool HloConstantInstruction::IsElementwiseImpl(
-    const absl::optional<int64_t>& operand_idx) const {
+    const std::optional<int64_t>& operand_idx) const {
   return true;
 }
 
@@ -1452,33 +1471,6 @@ std::string HloConstantInstruction::OperandsToStringWithCanonicalNameMap(
     // Do not show large constants or tuples.
     return "{...}";
   }
-}
-
-HloTraceInstruction::HloTraceInstruction(const std::string& tag,
-                                         HloInstruction* operand)
-    : HloInstruction(HloOpcode::kTrace, ShapeUtil::MakeNil()),
-      literal_(LiteralUtil::CreateR1U8(tag)) {
-  AppendOperand(operand);
-  operand->set_tracing(this);
-}
-
-HloInstructionProto HloTraceInstruction::ToProto() const {
-  HloInstructionProto proto = HloInstruction::ToProto();
-  *proto.mutable_literal() = literal_.ToProto();
-  return proto;
-}
-
-bool HloTraceInstruction::IdenticalSlowPath(
-    const HloInstruction& other,
-    const std::function<bool(const HloComputation*, const HloComputation*)>&
-        eq_computations) const {
-  return false;
-}
-
-std::unique_ptr<HloInstruction> HloTraceInstruction::CloneWithNewOperandsImpl(
-    const Shape& shape, absl::Span<HloInstruction* const> new_operands,
-    HloCloneContext* context) const {
-  LOG(FATAL) << "Not yet implemented, clone: " << ToString();
 }
 
 HloFusionInstruction::HloFusionInstruction(const Shape& shape,
@@ -1559,7 +1551,7 @@ HloInstructionProto HloFusionInstruction::ToProto() const {
 }
 
 bool HloFusionInstruction::IsElementwiseImpl(
-    const absl::optional<int64_t>& operand_idx) const {
+    const std::optional<int64_t>& operand_idx) const {
   if (!operand_idx.has_value()) {
     for (auto* fused : fused_instructions()) {
       if (fused->opcode() != HloOpcode::kParameter && !fused->IsElementwise()) {
@@ -1999,7 +1991,7 @@ std::unique_ptr<HloInstruction> HloFusionInstruction::CloneWithNewOperandsImpl(
 
 Status HloFusionInstruction::DeduplicateFusionOperands() {
   if (IsCustomFusion()) {
-    return Status::OK();
+    return OkStatus();
   }
   absl::flat_hash_map<const HloInstruction*, int> operand_indices;
   std::vector<int> operands_to_remove;
@@ -2014,12 +2006,12 @@ Status HloFusionInstruction::DeduplicateFusionOperands() {
     }
   }
   if (operands_to_remove.empty()) {
-    return Status::OK();
+    return OkStatus();
   }
   TF_RETURN_IF_ERROR(fused_instructions_computation()
                          ->RemoveUnusedParametersFromFusedComputation());
   RemoveOperandsAtAscendingIndices(operands_to_remove);
-  return Status::OK();
+  return OkStatus();
 }
 
 HloRngInstruction::HloRngInstruction(
@@ -2043,7 +2035,7 @@ std::vector<std::string> HloRngInstruction::ExtraAttributesToStringImpl(
 }
 
 bool HloRngInstruction::IsElementwiseImpl(
-    const absl::optional<int64_t>& operand_idx) const {
+    const std::optional<int64_t>& operand_idx) const {
   return true;
 }
 
@@ -2760,12 +2752,14 @@ bool HloCustomCallInstruction::IdenticalSlowPath(
   if (custom_call_schedule_ != casted_other.custom_call_schedule()) {
     return false;
   }
-  if (HasLiteral() == casted_other.HasLiteral()) {
-    if (HasLiteral() && literal() == casted_other.literal()) {
-      return false;
-    }
-  } else {
-    return true;
+  if (HasLiteral() != casted_other.HasLiteral()) {
+    return false;
+  }
+  if (HasLiteral() && literal() != casted_other.literal()) {
+    return false;
+  }
+  if (api_version_ != casted_other.api_version_) {
+    return false;
   }
   // Note: backend_config comparison is done in Identical, which is the
   // intended/exposed way to compare computations, and so not repeated here.
@@ -3011,17 +3005,17 @@ std::unique_ptr<HloInstruction> HloGatherInstruction::CloneWithNewOperandsImpl(
 }
 
 HloScatterInstruction::HloScatterInstruction(
-    const Shape& shape, HloInstruction* operand,
-    HloInstruction* scatter_indices, HloInstruction* updates,
+    const Shape& shape, absl::Span<HloInstruction* const> args,
     HloComputation* update_computation,
     const ScatterDimensionNumbers& scatter_dim_numbers, bool indices_are_sorted,
     bool unique_indices)
     : HloInstruction(HloOpcode::kScatter, shape),
       indices_are_sorted_(indices_are_sorted),
       unique_indices_(unique_indices) {
-  AppendOperand(operand);
-  AppendOperand(scatter_indices);
-  AppendOperand(updates);
+  mutable_operands().reserve(args.size());
+  for (HloInstruction* arg : args) {
+    AppendOperand(arg);
+  }
   AppendComputation(update_computation);
   scatter_dimension_numbers_ =
       absl::make_unique<ScatterDimensionNumbers>(scatter_dim_numbers);
@@ -3106,10 +3100,9 @@ bool HloScatterInstruction::IdenticalSlowPath(
 std::unique_ptr<HloInstruction> HloScatterInstruction::CloneWithNewOperandsImpl(
     const Shape& shape, absl::Span<HloInstruction* const> new_operands,
     HloCloneContext* context) const {
-  CHECK_EQ(new_operands.size(), 3);
   return absl::make_unique<HloScatterInstruction>(
-      shape, new_operands[0], new_operands[1], new_operands[2], to_apply(),
-      scatter_dimension_numbers(), indices_are_sorted(), unique_indices());
+      shape, new_operands, to_apply(), scatter_dimension_numbers(),
+      indices_are_sorted(), unique_indices());
 }
 
 HloIotaInstruction::HloIotaInstruction(const Shape& shape,

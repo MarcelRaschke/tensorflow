@@ -62,7 +62,7 @@ class InstructionListVisitor : public DfsHloVisitorWithDefault {
     // operands.
     instructions_.push_back(hlo);
     VLOG(0) << "List instruction " << hlo->ToString();
-    return Status::OK();
+    return OkStatus();
   }
 
   std::vector<const HloInstruction*> GetInstructions() { return instructions_; }
@@ -169,7 +169,7 @@ class BufferAssignmentTest : public HloTestBase {
                [alignment](LogicalBuffer::Color) { return alignment; },
                /*allocate_buffers_for_constants=*/true,
                BufferAssigner::DefaultColorer(),
-               /*must_not_live_out=*/absl::nullopt,
+               /*must_not_live_out=*/std::nullopt,
                /*can_share_buffer=*/nullptr, std::move(preset_assignments))
         .ConsumeValueOrDie();
   }
@@ -608,7 +608,7 @@ TEST_F(BufferAssignmentTest, BasicUniquelyColored) {
       auto& value = alias_analysis->dataflow_analysis().GetValue(id);
       value.set_color(BufferValue::Color(color++));
     }
-    return Status::OK();
+    return OkStatus();
   };
 
   auto buffers = RunColoredBufferAssignment(module.get(), colorer);
@@ -682,7 +682,7 @@ TEST_F(BufferAssignmentTest, BasicPartiallyColored) {
         value.set_color(LogicalBuffer::Color(0));
       }
     }
-    return Status::OK();
+    return OkStatus();
   };
 
   auto buffers = RunColoredBufferAssignment(module.get(), colorer);
@@ -1753,47 +1753,6 @@ TEST_F(BufferAssignmentTest, BitcastAsOutput) {
   EXPECT_EQ(1, assignment->Allocations().size());
   EXPECT_EQ(GetTopLevelAllocation(*assignment, param),
             GetTopLevelAllocation(*assignment, bitcast));
-}
-
-TEST_F(BufferAssignmentTest, AmbiguousBufferAsOutput) {
-  // Test a computation with an output that has an ambiguous points-to set.
-  // This is constructed using a select among tuple shapes.
-  auto builder = HloComputation::Builder(TestName());
-  auto tuple_shape =
-      ShapeUtil::MakeTupleShape({ShapeUtil::MakeShape(PRED, {1, 2, 3, 4})});
-
-  auto tuple_param0 = builder.AddInstruction(
-      HloInstruction::CreateParameter(0, tuple_shape, "param0"));
-  auto tuple_param1 = builder.AddInstruction(
-      HloInstruction::CreateParameter(1, tuple_shape, "param1"));
-  auto pred_param = builder.AddInstruction(HloInstruction::CreateParameter(
-      2, ShapeUtil::MakeShape(PRED, {}), "param1"));
-  auto select = builder.AddInstruction(
-      HloInstruction::CreateTernary(tuple_shape, HloOpcode::kTupleSelect,
-                                    pred_param, tuple_param0, tuple_param1));
-
-  auto module = CreateNewVerifiedModule();
-  module->AddEntryComputation(builder.Build());
-  auto assignment = RunBufferAssignment(module.get());
-
-  // Select shallow copies one of its operands so it defines its own top-level
-  // buffer and receives its own allocation.
-  auto select_alloc = GetTopLevelAllocation(*assignment, select);
-  EXPECT_EQ(1, select_alloc.assigned_buffers().size());
-  EXPECT_EQ(select,
-            select_alloc.assigned_buffers().begin()->first->instruction());
-
-  // The buffer for the tuple element of the select is forwarded from one its
-  // operands which cannot be determined statically. Therefore its slices
-  // should include the slices of both of the elements in the parameters.
-  auto element_slices = assignment->GetAllSlices(select, /*index=*/{0});
-  EXPECT_EQ(2, element_slices.size());
-  EXPECT_THAT(element_slices,
-              UnorderedElementsAre(
-                  assignment->GetUniqueSlice(tuple_param0, /*index=*/{0})
-                      .ConsumeValueOrDie(),
-                  assignment->GetUniqueSlice(tuple_param1, /*index=*/{0})
-                      .ConsumeValueOrDie()));
 }
 
 // TODO(b/34669761): Remove this test when buffers are allowed to share

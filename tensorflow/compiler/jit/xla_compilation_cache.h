@@ -55,9 +55,11 @@ class XlaCompilationCache : public ResourceBase {
   struct Config {
     Config() {}
     explicit Config(absl::string_view persistent_cache_directory,
-                    bool disable_strict_signature_checks)
+                    bool disable_strict_signature_checks,
+                    absl::string_view persistance_prefix)
         : persistent_cache_directory(persistent_cache_directory),
-          disable_strict_signature_checks(disable_strict_signature_checks) {}
+          disable_strict_signature_checks(disable_strict_signature_checks),
+          persistance_prefix(persistance_prefix) {}
 
     // If non-empty, JIT-compiled executables are saved to and loaded from the
     // specified file system directory path.
@@ -66,6 +68,9 @@ class XlaCompilationCache : public ResourceBase {
     // Disable strict signature checks for entries loaded into the cache from
     // external sources.
     bool disable_strict_signature_checks = false;
+
+    // The cache persistence prefix to use if serializing/deserialzing entries.
+    std::string persistance_prefix;
   };
   XlaCompilationCache(Config config, xla::LocalClient* client,
                       DeviceType device_type);
@@ -194,6 +199,7 @@ class XlaCompilationCache : public ResourceBase {
   xla::LocalClient* const client_;
   const DeviceType device_type_;
   bool disable_strict_signature_checks_;
+  std::string persistance_prefix_;
 
   // The value associated with a cache entry.
   struct Entry {
@@ -250,9 +256,9 @@ class XlaCompilationCache : public ResourceBase {
   Status SaveSerializedEntry(const XlaSerializedCacheEntry& entry);
 
   // Tries to load a cache entry given a `key` by searching the file directory
-  // supplied during the construction of this class. Returns absl::nullopt if no
+  // supplied during the construction of this class. Returns std::nullopt if no
   // cache entry is found.
-  StatusOr<absl::optional<XlaSerializedCacheEntry>> TryLoadSerializedEntry(
+  StatusOr<std::optional<XlaSerializedCacheEntry>> TryLoadSerializedEntry(
       const XlaSerializedCacheKey& key);
 
   mutex compile_cache_mu_;
@@ -323,12 +329,12 @@ StatusOr<std::unique_ptr<Graph>> CreateGraph(
     absl::Span<const DataType> result_types);
 
 // Use XlaCompiler to compile a single op into HLO.
-Status XlaSingleOpToHlo(XlaCompiler* compiler,
-                        const XlaCompiler::Options& options,
-                        const std::vector<XlaCompiler::Argument>& args,
-                        OpKernelContext* ctx,
-                        const XlaCompiler::CompileOptions& compile_options,
-                        XlaCompiler::CompilationResult* compilation_result);
+Status XlaSingleOpToHlo(
+    XlaCompiler* compiler, const XlaCompiler::Options& options,
+    const std::vector<XlaCompiler::Argument>& args,
+    const XlaCompiler::SingleOpCompileArgument& single_op_compile_argument,
+    const XlaCompiler::CompileOptions& compile_options,
+    XlaCompiler::CompilationResult* compilation_result);
 
 }  // namespace tensorflow
 

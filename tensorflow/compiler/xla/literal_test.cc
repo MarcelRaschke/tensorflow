@@ -1295,7 +1295,8 @@ TEST_F(LiteralUtilTest, PopulateParallel) {
         primitive_util::NativeToPrimitiveType<uint32_t>(), data.dimensions,
         data.layout);
     Literal literal(shape);
-    auto generator = [&](absl::Span<const int64_t> indexes) -> uint32_t {
+    auto generator = [&](absl::Span<const int64_t> indexes,
+                         int /*thread_id*/) -> uint32_t {
       // Offsets from linear index just to avoid R0 literals to be initialized
       // with zero.
       return IndexUtil::MultidimensionalIndexToLinearIndex(literal.shape(),
@@ -1309,7 +1310,7 @@ TEST_F(LiteralUtilTest, PopulateParallel) {
     bool matched = true;
     auto check_function = [&](absl::Span<const int64_t> indexes) {
       auto value = literal.Get<uint32_t>(indexes);
-      matched = matched && (value == generator(indexes));
+      matched = matched && (value == generator(indexes, /*thread_id=*/-1));
       return matched;
     };
     ShapeUtil::ForEachIndex(literal.shape(), zero_base, data.dimensions, step,
@@ -1516,7 +1517,7 @@ TEST_F(LiteralUtilTest, BitcastConvertBetweenInvalidTypes) {
   Status status =
       literal.BitcastConvert(ShapeUtil::ChangeElementType(literal.shape(), F64))
           .status();
-  EXPECT_NE(Status::OK(), status);
+  EXPECT_NE(::tensorflow::OkStatus(), status);
   EXPECT_TRUE(absl::StrContains(status.error_message(),
                                 "to a shape of different size"));
 }

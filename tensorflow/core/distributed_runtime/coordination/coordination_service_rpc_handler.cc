@@ -24,12 +24,14 @@ limitations under the License.
 #include "tensorflow/core/distributed_runtime/coordination/coordination_service_error_util.h"
 #include "tensorflow/core/platform/casts.h"
 #include "tensorflow/core/platform/errors.h"
+#include "tensorflow/core/platform/mutex.h"
 #include "tensorflow/core/protobuf/coordination_service.pb.h"
 
 namespace tensorflow {
 
 void CoordinationServiceRpcHandler::SetAgentInstance(
     CoordinationServiceAgent* agent) {
+  mutex_lock l(agent_mu_);
   agent_ = agent;
 }
 
@@ -69,7 +71,7 @@ void CoordinationServiceRpcHandler::HeartbeatAsync(
     return;
   }
   response->set_leader_incarnation(leader_incarnation);
-  done(Status::OK());
+  done(OkStatus());
 }
 
 void CoordinationServiceRpcHandler::WaitForAllTasksAsync(
@@ -123,6 +125,12 @@ void CoordinationServiceRpcHandler::ResetTaskAsync(
 void CoordinationServiceRpcHandler::ReportErrorToTaskAsync(
     const ReportErrorToTaskRequest* request,
     ReportErrorToTaskResponse* response, StatusCallback done) {
+  tf_shared_lock l(agent_mu_);
+  if (agent_ == nullptr) {
+    done(MakeCoordinationError(errors::Internal(
+        "CoordinationServiceAgent is uninitialized or has already shutdown.")));
+    return;
+  }
   const CoordinationServiceError& error_payload = request->error_payload();
   Status error(static_cast<error::Code>(request->error_code()),
                strings::StrCat("Error reported from /job:",
@@ -131,7 +139,7 @@ void CoordinationServiceRpcHandler::ReportErrorToTaskAsync(
                                ": ", request->error_message()));
   error = MakeCoordinationError(error, error_payload);
   agent_->SetError(error);
-  done(Status::OK());
+  done(OkStatus());
 }
 
 void CoordinationServiceRpcHandler::ReportErrorToServiceAsync(
@@ -185,6 +193,43 @@ void CoordinationServiceRpcHandler::GetKeyValueAsync(
         }
         done(status_or_value.status());
       });
+}
+
+void CoordinationServiceRpcHandler::TryGetKeyValueAsync(
+    const TryGetKeyValueRequest* request, TryGetKeyValueResponse* response,
+    StatusCallback done) {
+  CoordinationServiceInterface* service =
+      CoordinationServiceInterface::GetCoordinationServiceInstance();
+  if (service == nullptr) {
+    done(MakeCoordinationError(
+        errors::Internal("Coordination service is not enabled.")));
+    return;
+  }
+  auto result = service->TryGetKeyValue(request->key());
+  if (!result.ok()) {
+    done(MakeCoordinationError(result.status()));
+    return;
+  }
+  response->mutable_kv()->set_key(request->key());
+  response->mutable_kv()->set_value(result.ValueOrDie());
+  done(Status::OK());
+}
+
+void CoordinationServiceRpcHandler::GetKeyValueDirAsync(
+    const GetKeyValueDirRequest* request, GetKeyValueDirResponse* response,
+    StatusCallback done) {
+  CoordinationServiceInterface* service =
+      CoordinationServiceInterface::GetCoordinationServiceInstance();
+  if (service == nullptr) {
+    done(MakeCoordinationError(
+        errors::Internal("Coordination service is not enabled.")));
+    return;
+  }
+  std::vector<KeyValueEntry> results =
+      service->GetKeyValueDir(request->directory_key());
+  *response->mutable_kv() = {std::make_move_iterator(results.begin()),
+                             std::make_move_iterator(results.end())};
+  done(OkStatus());
 }
 
 void CoordinationServiceRpcHandler::DeleteKeyValueAsync(

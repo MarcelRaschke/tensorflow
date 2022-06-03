@@ -224,7 +224,7 @@ SavedModelSignatureDefsToMlirImportLite(
     return status;
   }
 
-  absl::optional<absl::Span<const std::string>> optional_exported_names;
+  std::optional<absl::Span<const std::string>> optional_exported_names;
   if (!exported_names.empty()) optional_exported_names = exported_names;
 
   // TODO(b/186898924): debug info in the savedmodel should not be ignored and
@@ -260,7 +260,7 @@ GraphdefToSplattedMlirTranslateFunction(
   }
   auto& module = module_or.ValueOrDie();
   std::srand(0);
-  for (auto fn : module->getOps<mlir::FuncOp>()) {
+  for (auto fn : module->getOps<mlir::func::FuncOp>()) {
     for (auto& bb : fn) {
       for (auto& inst : bb) {
         auto attr_id = mlir::StringAttr::get(context, "value");

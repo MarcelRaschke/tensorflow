@@ -59,6 +59,7 @@ limitations under the License.
 #include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"  // from @llvm-project
 #include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"  // from @llvm-project
 #include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"  // from @llvm-project
+#include "mlir/Conversion/TensorToLinalg/TensorToLinalgPass.h"  // from @llvm-project
 #include "mlir/Conversion/VectorToSCF/VectorToSCF.h"  // from @llvm-project
 #include "mlir/Dialect/Affine/IR/AffineOps.h"  // from @llvm-project
 #include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"  // from @llvm-project
@@ -79,14 +80,14 @@ limitations under the License.
 #include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/ImplicitLocOpBuilder.h"  // from @llvm-project
-#include "mlir/InitAllDialects.h"  // from @llvm-project
 #include "mlir/Pass/PassManager.h"  // from @llvm-project
 #include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"  // from @llvm-project
 #include "mlir/Target/LLVMIR/Export.h"  // from @llvm-project
 #include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"  // from @llvm-project
 #include "mlir/Transforms/Passes.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/gml_st/transforms/passes.h"
 #include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Dialect/mhlo/transforms/passes.h"
-#include "tensorflow/compiler/mlir/tools/kernel_gen/transforms/passes.h"
+#include "tensorflow/compiler/mlir/hlo/include/mlir-hlo/Transforms/passes.h"
 #include "tensorflow/compiler/mlir/xla/hlo_to_mlir_hlo.h"
 #include "tensorflow/compiler/mlir/xla/ir/xla_framework.h"
 #include "tensorflow/compiler/mlir/xla/transforms/xla_passes.h"
@@ -234,7 +235,7 @@ ModuleComputationsTransitivelyContainCustomCall(const HloModule& module) {
       // The computation contains a custom-call instruction directly.
       if (DynCast<HloCustomCallInstruction>(instruction)) {
         custom_call_map[computation] = true;
-        return Status::OK();
+        return ::tensorflow::OkStatus();
       }
       // The computation calls something that contains a custom-call
       // instruction (directly or indirectly). This lookup relies on the call
@@ -244,13 +245,13 @@ ModuleComputationsTransitivelyContainCustomCall(const HloModule& module) {
         bool callee_contains_custom_call = FindOrDie(custom_call_map, callee);
         if (callee_contains_custom_call) {
           custom_call_map[computation] = true;
-          return Status::OK();
+          return ::tensorflow::OkStatus();
         }
       }
     }
 
     custom_call_map[computation] = false;
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }));
 
   return custom_call_map;
@@ -352,7 +353,7 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
   Status DefaultAction(HloInstruction* hlo_instruction) override {
     hlo_to_profile_idx_->insert(
         {hlo_instruction, FindOrDie(assigned_indices_, hlo_instruction)});
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   Status HandleCall(HloInstruction* call) override {
@@ -360,7 +361,7 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
     CollectProfileCandidates candidates_for_call(hlo_to_profile_idx_,
                                                  assigned_indices_);
     TF_RETURN_IF_ERROR(call->to_apply()->Accept(&candidates_for_call));
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
   // Recurse into "conditional" so we can profile inside of it.
   Status HandleConditional(HloInstruction* conditional) override {
@@ -376,13 +377,17 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
     TF_RETURN_IF_ERROR(
         conditional->false_computation()->Accept(&candidates_for_false));
 
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   // Skip constants, there is nothing to profile.
-  Status HandleConstant(HloInstruction*) override { return Status::OK(); }
+  Status HandleConstant(HloInstruction*) override {
+    return ::tensorflow::OkStatus();
+  }
   // Skip parameters, they are a simple load.
-  Status HandleParameter(HloInstruction*) override { return Status::OK(); }
+  Status HandleParameter(HloInstruction*) override {
+    return ::tensorflow::OkStatus();
+  }
   // It is important to recurse for "while" or else we risk overly coarse
   // profiling information.
   Status HandleWhile(HloInstruction* xla_while) override {
@@ -397,7 +402,7 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
                                                  assigned_indices_);
     TF_RETURN_IF_ERROR(xla_while->while_body()->Accept(&candidates_for_body));
 
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   absl::flat_hash_map<const HloInstruction*, int64_t>* hlo_to_profile_idx_;
@@ -408,7 +413,7 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
 
 Status CpuCompiler::RunHloPassesThroughLayoutAssn(
     HloModule* module, bool /*is_aot_compile*/,
-    LLVMTargetMachineFeatures* target_machine_features) {
+    LLVMTargetMachineFeatures* target_machine_features, bool is_mlir_compile) {
   if (module->config().use_spmd_partitioning()) {
     HloPassPipeline spmd_pipeline("spmd-partitioner");
     const int64_t num_partitions = module->config().num_partitions();
@@ -547,17 +552,21 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   }();
   pipeline.AddPass<BitcastDtypesExpander>();
 
-  pipeline.AddPass<TopkRewriter>([](const HloSortInstruction* sort, int64_t) {
-    return sort->operand(0)->shape().element_type() == F32;
-  });
+  // XLA lowers topk to a libcall while the MLIR based pipeline does not yet
+  // support libcalls. Disable this for now.
+  if (!is_mlir_compile) {
+    pipeline.AddPass<TopkRewriter>([](const HloSortInstruction* sort, int64_t) {
+      return sort->operand(0)->shape().element_type() == F32;
+    });
+  }
   pipeline.AddPass<IndexedArrayAnalysisPrinterPass>();
   pipeline.AddPass<TransposeFolding>(
-      [&](const HloInstruction& dot,
-          const TransposeFolding::OperandIndices& candidate_operands) {
-        return DotImplementationCanHandleTranspose(dot,
-                                                   *target_machine_features)
-                   ? candidate_operands
-                   : TransposeFolding::OperandIndices{};
+      [&](const HloInstruction& dot, int64_t operand) -> StatusOr<bool> {
+        if (DotImplementationCanHandleTranspose(dot,
+                                                *target_machine_features)) {
+          return TransposeFolding::IsRowColumnTransposeDotOperand(dot, operand);
+        }
+        return false;
       },
       TransposeFolding::NeverFoldTranspose);
   pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
@@ -653,8 +662,8 @@ Status CpuCompiler::RunHloPasses(HloModule* module, bool is_aot_compile,
   }
 
   LLVMTargetMachineFeatures target_machine_features(target_machine);
-  TF_RETURN_IF_ERROR(RunHloPassesThroughLayoutAssn(module, is_aot_compile,
-                                                   &target_machine_features));
+  TF_RETURN_IF_ERROR(RunHloPassesThroughLayoutAssn(
+      module, is_aot_compile, &target_machine_features, is_mlir_compile));
 
   return RunHloPassesAfterLayoutAssn(
       module, is_aot_compile, &target_machine_features,
@@ -731,7 +740,7 @@ Status VerifyLlvmModule(const llvm::Module& llvm_module) {
       << err_stream.str()
       << "\nThis probably indicates a bug in the HLO -> LLVM IR lowering. "
          "Rerun with --xla_dump_to to get the IR. ";
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 Status CreateHloProfilingArtifacts(
@@ -766,7 +775,7 @@ Status CreateHloProfilingArtifacts(
   *computation_to_profile_idx =
       (*hlo_profile_index_map)->computation_to_profile_idx();
 
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 }  // namespace
@@ -853,93 +862,84 @@ Status LowerMLIRModule(mlir::ModuleOp mlir_module,
   // proved statically and changed to const witness) early to allow more
   // efficient broadcast operations moving.
   // Move up broadcasting operations to allow for more fusion opportunities.
+  pm.addPass(mlir::createInlinerPass());
   pm.addPass(mlir::mhlo::CreateExpandHloTuplesPass("main"));
-  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createLegalizeGeneralDotPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createBroadcastPropagationPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createLegalizeGeneralDotPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createBroadcastPropagationPass());
   pm.addPass(mlir::createCSEPass());
   pm.addPass(mlir::createCanonicalizerPass());
 
   // Transform HLO operations to Linalg.
   pm.addPass(mlir::mhlo::createLegalizeToMemrefPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createLegalizeControlFlowPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::mhlo::createLegalizeHloToLinalgPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createLegalizeControlFlowPass());
+  pm.addPass(::mlir::mhlo::createLegalizeToArithmeticPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createLegalizeHloToLinalgPass());
 
   // Lower index cast on tensors to tensor.generate.
-  pm.addNestedPass<mlir::FuncOp>(
-      mlir::kernel_gen::transforms::CreateLowerIndexCastPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::CreateLowerIndexCastPass());
 
   // Lower shape dialect to standard to enable linalg canonicalizations (e.g.
   // use linalg inputs instead of outputs for memref.dim operations).
-  pm.addNestedPass<mlir::FuncOp>(
-      mlir::kernel_gen::transforms::CreateShapeSimplification());
-  pm.addNestedPass<mlir::FuncOp>(mlir::createShapeToShapeLowering());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::CreateShapeSimplification());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createShapeToShapeLowering());
   pm.addPass(mlir::createConvertShapeToStandardPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::createConvertShapeConstraintsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createConvertShapeConstraintsPass());
 
   // Fuse Linalg on tensors operations.
   pm.addPass(mlir::createCSEPass());
   pm.addPass(mlir::memref::createResolveShapedTypeResultDimsPass());
   pm.addPass(mlir::createCanonicalizerPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::createLinalgElementwiseOpFusionPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createLinalgElementwiseOpFusionPass());
   pm.addPass(mlir::createReconcileUnrealizedCastsPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::createLinalgBufferizePass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::createConvertLinalgToLoopsPass());
-  pm.addPass(mlir::createInlinerPass());
+  pm.addPass(mlir::createConvertTensorToLinalgPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createLinalgInitTensorToAllocTensorPass());
 
-  // Bufferize Linalg on tensors program.
   // Always run canonicalizer (which does dead code removal) before
   // bufferizing anything.
   pm.addPass(mlir::createCanonicalizerPass());
-  // Now bufferize all the compute operations (hlo + linalg) and func
-  // signature.
-  pm.addPass(
-      mlir::kernel_gen::transforms::CreateComputeOpAndFuncBufferizePass());
-  pm.addNestedPass<mlir::FuncOp>(
-      mlir::kernel_gen::transforms::CreateTiledLoopBufferizePass());
-  // Turn tensor constants into global memrefs.
-  // TODO(kramerb): Expose the patterns and add them to the bufferize passes.
-  // pm.addPass(mlir::createTensorConstantBufferizePass());
-  // Always run canonicalizer (which does dead code removal) before
-  // bufferizing anything.
-  pm.addPass(mlir::createCanonicalizerPass());
-  pm.addPass(mlir::kernel_gen::transforms::CreateFinalBufferizePass(
-      /*alignment=*/xla::cpu_function_runtime::Align()));
+  pm.addPass(mlir::hlo::CreateOneShotBufferizePass());
+
+  // Handle framework specific requirements for buffers and then insert
+  // deallocations for temporary buffers.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertLinalgToLoopsPass());
   pm.addPass(mlir::createCSEPass());
   pm.addPass(mlir::createCanonicalizerPass());
   pm.addPass(mlir::bufferization::createBufferResultsToOutParamsPass());
   pm.addPass(mlir::mhlo::CreateOutlineWithXLAFrameworkPass());
-
-  // Deallocate all temporary buffers.
-  pm.addNestedPass<mlir::FuncOp>(
+  pm.addPass(mlir::createInlinerPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
       mlir::bufferization::createBufferDeallocationPass());
 
   pm.addPass(mlir::createBufferizationToMemRefPass());
 
   // Specilize linalg.matmul to linalg.dot, linalg.matvec or linalg.vecmat,
   // and immediately canonicalize to clean up not taken branches.
-  // pm.addNestedPass<mlir::FuncOp>(CreateLinalgMatmulSpecializationPass());
+  // pm.addNestedPass<mlir::func::FuncOp>(CreateLinalgMatmulSpecializationPass());
   pm.addPass(mlir::createCanonicalizerPass());
 
   // Tile and vectorize linalg operation using Linalg Codegen Strategy.
-  // pm.addNestedPass<mlir::FuncOp>(CreateCodegenStrategyForMatMulPass());
+  // pm.addNestedPass<mlir::func::FuncOp>(CreateCodegenStrategyForMatMulPass());
 
   pm.addPass(mlir::createCSEPass());
   pm.addPass(mlir::createCanonicalizerPass());
 
   mlir::VectorTransferToSCFOptions vec_to_scf_options;
   vec_to_scf_options.unroll = true;
-  pm.addNestedPass<mlir::FuncOp>(
+  pm.addNestedPass<mlir::func::FuncOp>(
       mlir::createConvertVectorToSCFPass(vec_to_scf_options));
-  pm.addNestedPass<mlir::FuncOp>(mlir::arith::createArithmeticExpandOpsPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::memref::createExpandOpsPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::createLowerAffinePass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::arith::createArithmeticExpandOpsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::memref::createExpandOpsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createLowerAffinePass());
   pm.addPass(mlir::mhlo::CreateLegalizeXLAFrameworkToLLVMPass());
-  pm.addPass(mlir::createMemRefToLLVMPass());
-  pm.addPass(mlir::createConvertSCFToCFPass());
-  pm.addNestedPass<mlir::FuncOp>(mlir::createConvertMathToLLVMPass());
-  pm.addNestedPass<mlir::FuncOp>(
-      mlir::arith::createConvertArithmeticToLLVMPass());
-  pm.addPass(mlir::createConvertFuncToLLVMPass());
+  pm.addPass(mlir::hlo::createGenericHostToLLVMPass());
   pm.addPass(mlir::createReconcileUnrealizedCastsPass());
   if (pm.run(mlir_module).failed()) {
     mlir_module->dump();
@@ -947,31 +947,26 @@ Status LowerMLIRModule(mlir::ModuleOp mlir_module,
         "Failed to compile through MLIR pipeline");
   }
 
-  // Make @main private so it doesn't clash with other modules.
-  mlir_module->walk([&](mlir::LLVM::LLVMFuncOp f) {
-    if (f.getName() == "main") {
-      f.setLinkageAttr(mlir::LLVM::LinkageAttr::get(
-          f.getContext(), mlir::LLVM::Linkage::Private));
-    }
-  });
-
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
-StatusOr<mlir::ModuleOp> createMLIRModule(HloModule* module,
-                                          mlir::MLIRContext& mlir_context,
-                                          BufferAssignment* assignment) {
+StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> createMLIRModule(
+    HloModule* module, mlir::MLIRContext& mlir_context,
+    BufferAssignment* assignment) {
   LoadMLIRDialects(mlir_context);
   mlir::OpBuilder builder(&mlir_context);
   auto mlir_module = builder.create<mlir::ModuleOp>(builder.getUnknownLoc());
   TF_RETURN_IF_ERROR(ConvertHloToMlirHlo(mlir_module, module));
 
-  // Add buffer mappings
-  llvm::SmallVector<mlir::Attribute> operand_mapping;
+  // Add buffer mappings. The first attribute is the index of the slice, the
+  // second is a boolean attribute on whether the allocation is writeable.
+  llvm::SmallVector<std::pair<mlir::Attribute, mlir::Attribute>>
+      operand_mapping;
   for (auto i : module->entry_computation()->parameter_instructions()) {
     auto slice = assignment->GetUniqueTopLevelSlice(i);
-    operand_mapping.push_back(
-        builder.getI32IntegerAttr(static_cast<int32_t>(slice->index())));
+    operand_mapping.emplace_back(
+        builder.getI32IntegerAttr(static_cast<int32_t>(slice->index())),
+        builder.getBoolAttr(!slice->allocation()->is_readonly()));
   }
 
   auto root_instr = module->entry_computation()->root_instruction();
@@ -989,10 +984,13 @@ StatusOr<mlir::ModuleOp> createMLIRModule(HloModule* module,
 
   auto result_mapping = builder.getI32IntegerAttr(
       static_cast<int32_t>(output_allocation->index()));
-  mlir_module->walk([&](mlir::FuncOp f) {
+  mlir_module->walk([&](mlir::func::FuncOp f) {
     if (f.getSymName() == "main") {
       for (auto& p : llvm::enumerate(operand_mapping)) {
-        f.setArgAttr(p.index(), "xla_framework.input_mapping", p.value());
+        f.setArgAttr(p.index(), "xla_framework.input_mapping", p.value().first);
+        // Mark argument as (non-)writeable for bufferization. This ensures that
+        // entry parameters are not overwritten.
+        f.setArgAttr(p.index(), "bufferization.writable", p.value().second);
       }
       f->setAttr("xla_framework.result_mapping", result_mapping);
     }
@@ -1002,7 +1000,7 @@ StatusOr<mlir::ModuleOp> createMLIRModule(HloModule* module,
                  mlir::ArrayAttr::get(f.getContext(), result_inner_mapping));
     }
   });
-  return mlir_module;
+  return {mlir_module};
 }
 
 struct ComputationToEmit {
@@ -1382,13 +1380,13 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
       TF_ASSIGN_OR_RETURN(
           auto mlir_module,
           createMLIRModule(module, mlir_context, assignment.get()));
-      TF_RETURN_IF_ERROR(LowerMLIRModule(mlir_module, mlir_context));
+      TF_RETURN_IF_ERROR(LowerMLIRModule(*mlir_module, mlir_context));
 
       llvm::cast<mlir::LLVM::LLVMFuncOp>(
-          mlir_module.lookupSymbol("main_xla_framework"))
+          mlir_module->lookupSymbol("main_xla_framework"))
           .setName(options.entry_point_name());
 
-      llvm_module = mlir::translateModuleToLLVMIR(mlir_module, llvm_context);
+      llvm_module = mlir::translateModuleToLLVMIR(*mlir_module, llvm_context);
       // Set missing information
       llvm_module->setDataLayout(target_machine->createDataLayout());
       llvm_module->setTargetTriple(triple.getTriple());
@@ -1471,12 +1469,15 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
                       absl::string_view(obj_file.getData().data(),
                                         obj_file.getData().size()));
     };
+
     CompilerFunctor compiler_functor(
         target_machine.get(), opt_level,
         options::OptimizeForSizeRequested(module->config()),
         module->config().debug_options().xla_llvm_disable_expensive_passes(),
         llvm_ir::GetCpuFastMathFlags(module->config()),
-        pre_optimization_ir_hook, post_optimization_ir_hook, post_codegen_hook);
+        pre_optimization_ir_hook, post_optimization_ir_hook, post_codegen_hook,
+        aot_options.sanitize_dataflow(),
+        aot_options.sanitize_abilists_dataflow());
     std::unique_ptr<llvm::MemoryBuffer> object_file =
         cantFail(compiler_functor(*llvm_module));
     ObjectFileData object_file_data(object_file->getBufferStart(),

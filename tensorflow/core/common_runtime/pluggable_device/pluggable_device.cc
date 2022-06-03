@@ -188,7 +188,7 @@ Status PluggableDevice::Init(const SessionOptions& options) {
   TF_RETURN_IF_ERROR(DeviceIdManager::TfToPlatformDeviceId(
       DeviceType(device_type()), tf_device_id_, &platform_device_id));
   pluggable_device_info_->gpu_id = platform_device_id.value();
-  set_tensorflow_gpu_device_info(pluggable_device_info_);
+  set_tensorflow_accelerator_device_info(pluggable_device_info_);
 
   // Whether and how the PluggableDevice uses its own threadpool.
   // This option is experimental. Once we confirm the best setting, we
@@ -237,7 +237,7 @@ Status PluggableDevice::Init(const SessionOptions& options) {
     }
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Allocator* PluggableDevice::GetAllocator(AllocatorAttributes attr) {
@@ -322,8 +322,8 @@ Status PluggableDevice::MaybeCopyTensorToPluggableDevice(
     StatusCallback done) {
   if (alloc_attrs.on_host()) {
     *to = from;
-    done(Status::OK());
-    return Status::OK();
+    done(OkStatus());
+    return OkStatus();
   } else {
     if (!DMAHelper::CanUseDMA(&from)) {
       Status err = errors::Internal("PluggableDevice copy from non-DMA ",
@@ -355,7 +355,7 @@ Status PluggableDevice::MaybeCopyTensorToPluggableDevice(
 
     device_context_->CopyCPUTensorToDevice(
         &from, this, copy, std::move(wrapped_done), false /*sync_dst_compute*/);
-    return Status::OK();
+    return OkStatus();
   }
 }
 

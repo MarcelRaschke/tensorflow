@@ -123,6 +123,30 @@ StatusOr<Shape> MakeShapeWithLayoutInternal(
   TF_RETURN_IF_ERROR(ShapeUtil::ValidateShape(shape));
   return shape;
 }
+
+template <typename T>
+const T& Deref(const T* ptr) {
+  DCHECK(ptr != nullptr);
+  return *ptr;
+}
+
+template <typename T>
+const T& Deref(const T& ref) {
+  return ref;
+}
+
+template <typename ShapePtrOrRef>
+Shape MakeTupleShapeImpl(absl::Span<ShapePtrOrRef> shapes) {
+  Shape result;
+  result.set_element_type(TUPLE);
+  result.mutable_tuple_shapes()->reserve(shapes.size());
+  for (const auto& shape : shapes) {
+    ShapeUtil::AppendShapeToTuple(Deref(shape), &result);
+  }
+  TF_DCHECK_OK(ShapeUtil::ValidateShapeWithOptionalLayout(result));
+  return result;
+}
+
 }  // namespace
 
 /* static */ bool ShapeUtil::Equal(const Shape& lhs, const Shape& rhs) {
@@ -368,14 +392,12 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
 }
 
 /* static */ Shape ShapeUtil::MakeTupleShape(absl::Span<const Shape> shapes) {
-  Shape result;
-  result.set_element_type(TUPLE);
-  result.mutable_tuple_shapes()->reserve(shapes.size());
-  for (const auto& shape : shapes) {
-    AppendShapeToTuple(shape, &result);
-  }
-  TF_DCHECK_OK(ValidateShapeWithOptionalLayout(result));
-  return result;
+  return MakeTupleShapeImpl(shapes);
+}
+
+/* static */ Shape ShapeUtil::MakeTupleShapeWithPtrs(
+    absl::Span<const Shape* const> shapes) {
+  return MakeTupleShapeImpl(shapes);
 }
 
 /* static */ Shape ShapeUtil::MakeMaybeTupleShape(
@@ -835,7 +857,7 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
       TF_RETURN_IF_ERROR(
           ValidateShapeWithOptionalLayoutInternal(element_shape));
     }
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   // Non-tuple shape.
@@ -857,7 +879,7 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
           primitive_util::LowercasePrimitiveTypeName(shape.element_type()),
           shape.ShortDebugString());
     }
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   for (int64_t i = 0; i < shape.rank(); ++i) {
@@ -870,14 +892,14 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
   }
 
   TF_RETURN_IF_ERROR(ValidateShapeSize(shape));
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 /* static */ Status ShapeUtil::ValidateShapeSize(const Shape& shape) {
   VLOG(3) << "Validating shape size: " << ShapeUtil::HumanString(shape);
 
   if (!shape.IsArray()) {
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   int64_t shape_size = [&]() {
@@ -904,7 +926,7 @@ ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(
   }
 
   VLOG(3) << "Shape size is valid: " << shape_size;
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 /* static */ Status ShapeUtil::ValidateShapeWithOptionalLayout(
@@ -1038,7 +1060,7 @@ Status ForEachSubshapeHelper(const Shape& shape,
       index->pop_back();
     }
   }
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 // Helper for ForEachMutableSubshape which visits the subshapes of the given
@@ -1055,7 +1077,7 @@ Status ForEachMutableSubshapeHelper(
       index->pop_back();
     }
   }
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 }  // namespace
@@ -1067,7 +1089,7 @@ Status ForEachMutableSubshapeHelper(
       shape,
       [&func](const Shape& subshape, const ShapeIndex& index) {
         func(subshape, index);
-        return Status::OK();
+        return ::tensorflow::OkStatus();
       },
       &index)
       .IgnoreError();
@@ -1080,7 +1102,7 @@ Status ForEachMutableSubshapeHelper(
       shape,
       [&func](Shape* subshape, const ShapeIndex& index) {
         func(subshape, index);
-        return Status::OK();
+        return ::tensorflow::OkStatus();
       },
       &index)
       .IgnoreError();
@@ -1242,11 +1264,13 @@ ShapeUtil::DimensionsUnmodifiedByReshape(const Shape& input_shape,
                                                   common_factors.end());
 }
 
-/* static */ absl::optional<std::vector<int64_t>>
+/* static */ std::optional<std::vector<int64_t>>
 ShapeUtil::ReshapeLeavesDimensionsUnmodified(
     const Shape& from_shape, const Shape& to_shape,
     absl::Span<const int64_t> input_dim_indices) {
-  CHECK(std::is_sorted(input_dim_indices.begin(), input_dim_indices.end()));
+  if (!std::is_sorted(input_dim_indices.begin(), input_dim_indices.end())) {
+    return std::nullopt;
+  }
 
   std::vector<int64_t> output_dim_indices;
   std::vector<std::pair<int64_t, int64_t>> unmodified_dims =
@@ -1261,7 +1285,7 @@ ShapeUtil::ReshapeLeavesDimensionsUnmodified(
     }
     if (i >= unmodified_dims.size() ||
         unmodified_dims[i].first != input_dim_index) {
-      return absl::nullopt;
+      return std::nullopt;
     }
     output_dim_indices.push_back(unmodified_dims[i].second);
   }
@@ -1460,7 +1484,7 @@ ShapeUtil::ReshapeLeavesDimensionsUnmodified(
          check_input_unit_indices(output_shape, input_shape);
 }
 
-/* static */ absl::optional<Shape> ShapeUtil::AlignLayouts(
+/* static */ std::optional<Shape> ShapeUtil::AlignLayouts(
     const Shape& input_shape, const Shape& output_shape) {
   CHECK(input_shape.IsArray());
   CHECK(output_shape.IsArray());
@@ -1472,7 +1496,7 @@ ShapeUtil::ReshapeLeavesDimensionsUnmodified(
         AlignLayouts(DropDegenerateDimensions(input_shape),
                      DropDegenerateDimensions(output_shape));
     if (!simple_output_shape) {
-      return absl::nullopt;
+      return std::nullopt;
     }
 
     std::vector<int64_t> layout =
@@ -1516,7 +1540,7 @@ ShapeUtil::ReshapeLeavesDimensionsUnmodified(
       --input_physical;
       if (input_physical < 0 ||
           input_shape.layout().minor_to_major(input_physical) != i) {
-        return absl::nullopt;
+        return std::nullopt;
       }
       input_to_factor[i] = pos;
     }
@@ -1644,10 +1668,10 @@ static Shape MergeDimensions(absl::Span<const size_t> segs,
                                                   dimensions);
 }
 
-/*static*/ absl::optional<std::vector<int64_t>> ShapeUtil::FindTranspose021(
+/*static*/ std::optional<std::vector<int64_t>> ShapeUtil::FindTranspose021(
     const Shape& a, const Shape& b) {
   if (!CompatibleIgnoringElementType(a, b)) {
-    return absl::nullopt;
+    return std::nullopt;
   }
 
   std::vector<int64_t> permutation(a.dimensions().size());
@@ -1678,7 +1702,7 @@ static Shape MergeDimensions(absl::Span<const size_t> segs,
     return dims_021;
   }
 
-  return absl::nullopt;
+  return std::nullopt;
 }
 
 Shape ShapeUtil::DeviceShapeToHostShape(Shape s) {
@@ -1707,7 +1731,7 @@ Status ShapeUtil::ByteStrides(const Shape& shape, absl::Span<int64_t> strides) {
     strides.at(i) = stride;
     stride *= shape.dimensions(i);
   }
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 /*static*/ int64_t ShapeUtil::ArraySize(const Shape& shape) {

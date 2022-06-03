@@ -22,6 +22,12 @@ namespace quant {
 // Returns true if the op has any quantized tensors as input or output.
 bool HasQuantizedTensors(Operation *op);
 
+enum class QuantizationMethod {
+  kQuantizationAwareTraining,
+  kPostTrainingQuantization,
+  kDynamicRangeQuantization
+};
+
 }  // namespace quant
 }  // namespace mlir
 #endif  // TENSORFLOW_COMPILER_MLIR_QUANTIZATION_TENSORFLOW_PASSES_UTIL_H_

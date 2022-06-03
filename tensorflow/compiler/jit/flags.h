@@ -94,6 +94,9 @@ struct MarkForCompilationPassFlags {
   // signatures checked strictly. This should generally not be disabled except
   // for debugging. Defaults to false.
   bool tf_xla_disable_strict_signature_checks;
+
+  // Specifies the persistance cache prefix. Default is "xla_compile_cache"
+  string tf_xla_persistent_cache_prefix;
 };
 
 // Flags associated with the XLA bridge's xla_device module.
@@ -164,7 +167,15 @@ struct MlirCommonFlags {
 struct JitRtFlags {
   bool always_specialize;
   bool cost_driven_async_parallel_for;
+
+  // Enables tracking of the "live" JitRt queries to, on a crash, identify the
+  // "query of death". See TfJitRtQueryOfDeathLogger.
+  bool log_query_of_death;
+
   bool vectorize;
+
+  // Enables crash reproducer for JitRt MLIR pass manager.
+  bool enable_crash_reproducer;
 };
 
 // Return a pointer to the DumpGraphFlags struct;
@@ -191,7 +202,7 @@ const JitRtFlags& GetJitRtFlags();
 // Returns the effective MLIR bridge rollout state based on the flags and the
 // optional configuration.
 ConfigProto::Experimental::MlirBridgeRollout GetMlirBridgeRolloutState(
-    absl::optional<const ConfigProto> config_proto);
+    std::optional<const ConfigProto> config_proto);
 
 // Appends the flag definitions associated with
 // MarkForCompilationPassFlags/DumpGraphFlags to `flag_list`.

@@ -128,7 +128,7 @@ Status CopyVariable(int output_idx, OpKernelContext* ctx, const Tensor* t) {
         return errors::Internal("Unsupported dtype", t->dtype());
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -359,6 +359,31 @@ REGISTER_KERNEL_BUILDER(
     Name("DestroyResourceOp").Device(DEVICE_DEFAULT).HostMemory("resource"),
     DestroyResourceOp);
 
+void DisableCopyOnReadOp::Compute(OpKernelContext* ctx) {
+  core::RefCountPtr<Var> variable;
+  const ResourceHandle& handle = HandleFromInput(ctx, 0);
+  const auto status = LookupResource(ctx, handle, &variable);
+  OP_REQUIRES(ctx, status.ok(),
+              errors::FailedPrecondition(
+                  "Could not find variable ", handle.name(), ". ",
+                  "This could mean that the variable has been deleted. ",
+                  "In TF1, it can also mean the variable is uninitialized. ",
+                  "Debug info: container=", handle.container(),
+                  ", status error message=", status.error_message()));
+  // If the variable is currently in copy-on-read mode, its refcount is 1
+  if (variable->copy_on_read_mode.load()) {
+    // Obtain an exclusive lock on the variable and change the access mode
+    mutex_lock ml(*variable->mu());
+    variable->copy_on_read_mode.store(false);
+  }
+}
+
+REGISTER_KERNEL_BUILDER(Name("DisableCopyOnRead").Device(DEVICE_CPU),
+                        DisableCopyOnReadOp);
+REGISTER_KERNEL_BUILDER(
+    Name("DisableCopyOnRead").Device(DEVICE_DEFAULT).HostMemory("resource"),
+    DisableCopyOnReadOp);
+
 template <typename Device, typename T>
 class AssignVariableOp : public OpKernel {
  public:
@@ -396,7 +421,7 @@ class AssignVariableOp : public OpKernel {
                                   *ptr = new Var(dtype_);
                                   *(*ptr)->tensor() = value;
                                   (*ptr)->is_initialized = true;
-                                  return Status::OK();
+                                  return OkStatus();
                                 }));
     mutex_lock ml(*variable->mu());
     // (variable->tensor()->dtype() == DT_INVALID && !variable->is_initialized)
@@ -465,7 +490,7 @@ class AssignVariableOp<Device, Variant> : public OpKernel {
                                 [](Var** ptr) {
                                   // Created on host.
                                   *ptr = new Var(DT_VARIANT);
-                                  return Status::OK();
+                                  return OkStatus();
                                 }));
 
     // For purposes of forwarding DT_VARIANT, we want the least
@@ -924,7 +949,7 @@ Status CopyTensorToHost(OpKernelContext* c, const Tensor& device_tensor,
   if (!stream) {
     return errors::Internal("Failed to copy indices to host");
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 // Copies inputs to the CPU, runs DoScatter on the CPU, then copies output
@@ -958,9 +983,9 @@ Status DoScatterOnCpu(OpKernelContext* c, Tensor* params, const Tensor& indices,
   // Deallocate host_params' buffer once the host-to-device copy is complete.
   // host_params is captured by value in the lambda so that its buffer is only
   // destructed once the lambda is destructed.
-  c->device()->tensorflow_gpu_device_info()->event_mgr->ThenExecute(
+  c->device()->tensorflow_accelerator_device_info()->event_mgr->ThenExecute(
       stream, [host_params] {});
-  return Status::OK();
+  return OkStatus();
 }
 
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -993,7 +1018,7 @@ Status DoScatter(OpKernelContext* c, Tensor* params, const Tensor& indices,
         "indices", SliceDebugString(indices.shape(), bad_i), " = ",
         indices_flat(bad_i), " is not in [0, ", params->dim_size(0), ")");
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace

@@ -117,7 +117,7 @@ class ShapeTree {
       : ShapeTree(std::make_shared<Shape>(std::move(shape)), init_value) {}
 
   ShapeTree(const Shape* shape, const T& init_value)
-      : ShapeTree(shape, CreateNodes(*shape, [&] { return init_value; })) {}
+      : ShapeTree(shape, CreateNodes(*shape, init_value)) {}
 
   // Returns the data element associated with the array in the shape at the
   // given index (see ShapeUtil::GetSubshape for how indexes are defined).
@@ -234,7 +234,7 @@ class ShapeTree {
     for (const Node& node : nodes_) {
       TF_RETURN_IF_ERROR(func(node.first, node.second));
     }
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   Status ForEachMutableElementWithStatus(
@@ -242,7 +242,7 @@ class ShapeTree {
     for (Node& node : nodes_) {
       TF_RETURN_IF_ERROR(func(node.first, &node.second));
     }
-    return Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   // Maps each element to generate a new tree with the same shape.
@@ -324,13 +324,13 @@ class ShapeTree {
     DCHECK_EQ(nodes_.size(), ShapeUtil::SubshapeCount(*shape));
   }
 
-  static Nodes CreateNodes(
-      const Shape& shape, absl::FunctionRef<T()> gen = [] { return T(); }) {
+  template <typename... Ts>
+  static Nodes CreateNodes(const Shape& shape, Ts&&... args) {
     Nodes nodes;
-    ShapeUtil::ForEachSubshape(shape,
-                               [&](const Shape&, const ShapeIndex& index) {
-                                 nodes.push_back({index, gen()});
-                               });
+    ShapeUtil::ForEachSubshape(
+        shape, [&](const Shape&, const ShapeIndex& index) {
+          nodes.push_back({index, T(std::forward<Ts>(args)...)});
+        });
     return nodes;
   }
 
@@ -355,9 +355,14 @@ class ShapeTree {
 // similar to std::map.
 template <typename T>
 template <typename Iterator, typename ValueType>
-class ShapeTree<T>::LeafIterator
-    : public std::iterator<std::bidirectional_iterator_tag, ValueType> {
+class ShapeTree<T>::LeafIterator {
  public:
+  using iterator_category = std::bidirectional_iterator_tag;
+  using value_type = ValueType;
+  using difference_type = ptrdiff_t;
+  using pointer = value_type*;
+  using reference = value_type&;
+
   LeafIterator(const ShapeTree& tree, Iterator it) : tree_(tree), it_(it) {
     while ((it_ != tree_.nodes_.end()) && !IsLeaf()) ++it_;
   }

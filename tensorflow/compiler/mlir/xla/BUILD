@@ -29,26 +29,6 @@ gentbl_cc_library(
 )
 
 gentbl_cc_library(
-    name = "legalize_tf_collective_patterns_inc_gen",
-    compatible_with = get_compatible_with_cloud(),
-    tbl_outs = [
-        (
-            ["-gen-rewriters"],
-            "transforms/generated_legalize_tf_collective.inc",
-        ),
-    ],
-    tblgen = "@llvm-project//mlir:mlir-tblgen",
-    td_file = "transforms/legalize_tf_collective_patterns.td",
-    deps = [
-        "//tensorflow/compiler/mlir/hlo:hlo_ops_td_files",
-        "//tensorflow/compiler/mlir/tensorflow:tensorflow_ops_td_files",
-        "@llvm-project//llvm:Support",
-        "@llvm-project//mlir:StdOpsTdFiles",
-        "@llvm-project//mlir:TensorOpsTdFiles",
-    ],
-)
-
-gentbl_cc_library(
     name = "xla_legalize_tf_passes_inc_gen",
     compatible_with = get_compatible_with_cloud(),
     tbl_outs = [
@@ -127,7 +107,6 @@ cc_library(
         "transforms/xla_passes.h",
     ],
     deps = [
-        ":legalize_tf",
         ":xla_framework",
         ":xla_passes_inc_gen",
         "//tensorflow/compiler/mlir/hlo",
@@ -281,7 +260,6 @@ cc_library(
     ],
     deps = [
         ":legalize_tf",
-        ":legalize_tf_collective_patterns_inc_gen",
         ":legalize_utils",
         ":type_to_shape",
         ":xla_legalize_tf_passes_inc_gen",
@@ -559,10 +537,12 @@ cc_library(
         "//tensorflow/stream_executor/lib",
         "@llvm-project//llvm:Support",
         "@llvm-project//mlir:Analysis",
+        "@llvm-project//mlir:ArithmeticDialect",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
         "@llvm-project//mlir:MemRefDialect",
         "@llvm-project//mlir:Pass",
+        "@llvm-project//mlir:Support",
         "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:TransformUtils",
         "@llvm-project//mlir:Transforms",
@@ -662,6 +642,7 @@ cc_library(
         "@llvm-project//mlir:ArithmeticDialect",
         "@llvm-project//mlir:FuncDialect",
         "@llvm-project//mlir:IR",
+        "@llvm-project//mlir:TensorDialect",
         "@llvm-project//mlir:Translation",
     ],
     alwayslink = 1,

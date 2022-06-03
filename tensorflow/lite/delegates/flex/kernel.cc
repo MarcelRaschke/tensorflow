@@ -233,7 +233,7 @@ class OpNode {
         tensorflow::OpRegistry::Global()->LookUp(nodedef_.op(), &op_reg_data_));
     AddDefaultsToNodeDef(op_reg_data_->op_def, &nodedef_);
 
-    return tensorflow::Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   tensorflow::Status BuildOpKernelRunner(
@@ -244,12 +244,12 @@ class OpNode {
                             name_, inputs_.Size(), /*attr_builder=*/
                             [this](tensorflow::AttrValueMap* attr_value_map) {
                               *attr_value_map = nodedef_.attr();
-                              return tensorflow::Status::OK();
+                              return ::tensorflow::OkStatus();
                             },
                             *eager_context->pflr(),
                             eager_context->local_device_mgr()->HostCPU()));
 
-    return tensorflow::Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   tensorflow::Status BuildOpKernelInputs(
@@ -284,7 +284,7 @@ class OpNode {
       run_state->input_tf_tensor_values[i].tensor =
           &run_state->input_tf_tensors[i];
     }
-    return tensorflow::Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
   // Returns whether an output tensor should be preserved in the buffer map by
@@ -361,7 +361,7 @@ class OpNode {
         }
       }
     }
-    return tensorflow::Status::OK();
+    return ::tensorflow::OkStatus();
   }
 
  private:
@@ -565,8 +565,8 @@ TfLiteStatus DelegateKernel::Prepare(TfLiteContext* context, TfLiteNode* node) {
 
   for (const auto& node_data : op_data_->nodes) {
     if (node_data->nodedef().op().empty()) {
-      context->ReportError(context, "Invalid NodeDef in Flex op '%s'",
-                           node_data->name().c_str());
+      TF_LITE_KERNEL_LOG(context, "Invalid NodeDef in Flex op '%s'",
+                         node_data->name().c_str());
       return kTfLiteError;
     }
     TF_LITE_ENSURE(context, node_data->op_kernel_runner());
@@ -740,8 +740,8 @@ TfLiteStatus DelegateKernel::Eval(TfLiteContext* context, TfLiteNode* node) {
       continue;
     }
     if (!buffer_map->HasTensor(tensor_index)) {
-      context->ReportError(context, "Cannot write to invalid tensor index %d",
-                           tensor_index);
+      TF_LITE_KERNEL_LOG(context, "Cannot write to invalid tensor index %d",
+                         tensor_index);
       return kTfLiteError;
     }
 

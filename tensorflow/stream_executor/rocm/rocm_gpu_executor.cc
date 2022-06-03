@@ -608,11 +608,16 @@ Event::Status GpuExecutor::PollForEventStatus(Event* event) {
 }
 
 bool GpuExecutor::AllocateStream(Stream* stream) {
-  return AsGpuStream(stream)->Init();
+  absl::MutexLock l(&alive_gpu_streams_mu_);
+  bool out = AsGpuStream(stream)->Init();
+  alive_gpu_streams_[stream->implementation()->GpuStreamHack()] = stream;
+  return out;
 }
 
 void GpuExecutor::DeallocateStream(Stream* stream) {
   GpuStream* rocm_stream = AsGpuStream(stream);
+  absl::MutexLock l(&alive_gpu_streams_mu_);
+  alive_gpu_streams_.erase(rocm_stream->GpuStreamHack());
   if (!rocm_stream->IsIdle()) {
     LOG(ERROR) << "Deallocating stream with pending work";
   }
@@ -768,6 +773,8 @@ bool FillBlockDimLimit(GpuDeviceHandle device, BlockDim* block_dim_limit) {
   block_dim_limit->z = z;
   return true;
 }
+
+bool GpuExecutor::SupportsBlasPlans() const { return false; }
 
 bool GpuExecutor::SupportsBlas() const { return true; }
 
@@ -949,8 +956,7 @@ GpuExecutor::CreateDeviceDescription(int device_ordinal) {
   builder.set_device_address_bits(64);
 
   builder.set_device_vendor("Advanced Micro Devices, Inc");
-  builder.set_rocm_amdgpu_isa_version(version);
-  builder.set_rocm_amdgpu_gcn_arch_name(gcn_arch_name);
+  builder.set_rocm_compute_capability(gcn_arch_name);
 
   builder.set_shared_memory_per_core(
       GpuDriver::GetMaxSharedMemoryPerCore(device).ValueOrDie());

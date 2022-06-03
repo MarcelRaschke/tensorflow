@@ -124,8 +124,8 @@ tf_proto_library(
     srcs = ["eager_service.proto"],
     has_services = 1,
     cc_api_version = 2,
-    cc_grpc_version = 1,
     cc_stubby_versions = ["2"],
+    create_grpc_library = True,
     create_service = True,
     protodeps = tf_additional_all_protos(),
 )
@@ -135,8 +135,8 @@ tf_proto_library(
     srcs = ["coordination_service.proto"],
     has_services = 1,
     cc_api_version = 2,
-    cc_grpc_version = 1,
     cc_stubby_versions = ["2"],
+    create_grpc_library = True,
     create_service = True,
     protodeps = ["//tensorflow/compiler/xla/pjrt/distributed:protocol_proto"] +
                 tf_additional_all_protos(),
@@ -183,6 +183,7 @@ exports_files(
         "trackable_object_graph.proto",
         "transport_options.proto",
         "distributed_runtime_payloads.proto",
+        "core_platform_payloads.proto",
     ],
 )
 
@@ -215,6 +216,7 @@ tf_proto_library(
         "trackable_object_graph.proto",
         "transport_options.proto",
         "distributed_runtime_payloads.proto",
+        "core_platform_payloads.proto",
     ],
     cc_api_version = 2,
     make_default_target_header_only = True,

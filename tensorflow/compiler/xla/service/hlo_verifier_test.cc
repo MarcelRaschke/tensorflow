@@ -66,6 +66,13 @@ class HloVerifierTestLayoutSensitive : public HloTestBase {
                     LayoutAssignment::InstructionCanChangeLayout) {}
 };
 
+class HloVerifierTestLayoutFusion : public HloTestBase {
+ public:
+  HloVerifierTestLayoutFusion()
+      : HloTestBase(/*verifier_layout_sensitive=*/true,
+                    /*allow_mixed_precision_in_hlo_verifier=*/false) {}
+};
+
 TEST_F(HloVerifierTest, NullInstructionParent) {
   HloComputation::Builder builder(TestName());
   const Shape scalar_shape = ShapeUtil::MakeShape(F32, {});
@@ -805,8 +812,8 @@ TEST_F(HloVerifierTest, AsyncStartAndAsyncDoneWrongType) {
   auto status = verifier().Run(module.get()).status();
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.error_message(),
-              HasSubstr("async-done expects its wrapped async computation to "
-                        "be identical to its operand's"));
+              HasSubstr("async-done expects the async shape at index {1} to "
+                        "match the async computation root shape"));
 }
 
 TEST_F(HloVerifierTest, AsyncStartAndAsyncDoneWrongAttr) {
@@ -931,6 +938,158 @@ TEST_F(HloVerifierTest, AsyncUpdateAndAsyncDoneNoAsyncStart) {
   EXPECT_THAT(status.error_message(),
               HasSubstr("The operand of a async-update instruction needs to be "
                         "async-start or async-update, found tuple"));
+}
+
+TEST_F(HloVerifierTest, AsyncOpComputationParamWrongType) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  async_computation {
+    p = f32[2,3] parameter(0)
+    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+  }
+
+  ENTRY AsyncStartAndAsyncDone {
+    p0 = f32[2,3] parameter(0)
+    async-start = ((f32[3,2]), f32[3,2], u32[]) async-start(p0), calls=async_computation
+    ROOT async-done = f32[3,2] async-done(async-start), calls=async_computation
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("async-start expects the async shape at index {0} to "
+                        "match async computation parameter shape"));
+}
+
+TEST_F(HloVerifierTest, AsyncOpComputationRootWrongType) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  async_computation {
+    p = f32[2,3] parameter(0)
+    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+  }
+
+  ENTRY AsyncStartAndAsyncDone {
+    p0 = f32[2,3] parameter(0)
+    async-start = ((f32[2,3]), f32[2,3], u32[]) async-start(p0), calls=async_computation
+    ROOT async-done = f32[3,2] async-done(async-start), calls=async_computation
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("async-start expects the async shape at index {1} to "
+                        "match the async computation root shape"));
+}
+
+TEST_F(HloVerifierTest, AsyncOpTupleWrongType) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  async_computation {
+    p = f32[2,3] parameter(0)
+    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+  }
+
+  ENTRY AsyncStartAndAsyncDone {
+    p0 = f32[2,3] parameter(0)
+    async-start = ((f32[2,3])) async-start(p0), calls=async_computation
+    ROOT async-done = f32[3,2] async-done(async-start), calls=async_computation
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("async-start expects the async shape to be a tuple of "
+                        "at least two elements"));
+}
+
+TEST_F(HloVerifierTest, AsyncStartOperandWrongType) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  async_computation {
+    p = f32[2,3] parameter(0)
+    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+  }
+
+  ENTRY AsyncStartAndAsyncDone {
+    p0 = f32[3,2] parameter(0)
+    async-start = ((f32[2,3]), f32[3,2], u32[]) async-start(p0), calls=async_computation
+    ROOT async-done = f32[3,2] async-done(async-start), calls=async_computation
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("async-start expects the shape of operand 0 to match "
+                        "the async shape at index {0}"));
+}
+
+TEST_F(HloVerifierTest, AsyncDoneOutputWrongType) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  async_computation {
+    p = f32[2,3] parameter(0)
+    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+  }
+
+  ENTRY AsyncStartAndAsyncDone {
+    p0 = f32[2,3] parameter(0)
+    async-start = ((f32[2,3]), f32[3,2], u32[]) async-start(p0), calls=async_computation
+    ROOT async-done = f32[2,3] async-done(async-start), calls=async_computation
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(status.error_message(),
+              HasSubstr("async-done expects the shape of output to match the "
+                        "async shape at index {1}"));
+}
+
+TEST_F(HloVerifierTest, AsyncUpdateWrongType) {
+  const char* const hlo_string = R"(
+  HloModule Module
+
+  async_computation {
+    p = f32[2,3] parameter(0)
+    ROOT custom-call = f32[3,2] custom-call(p), custom_call_target="foo"
+  }
+
+  ENTRY AsyncStartAndAsyncDone {
+    p0 = f32[2,3] parameter(0)
+    async-start = ((f32[2,3]), f32[3,2], u32[]) async-start(p0), calls=async_computation
+    async-update = ((f32[3,2]), f32[3,2], u32[]) async-update(async-start), calls=async_computation
+    ROOT async-done = f32[3,2] async-done(async-update), calls=async_computation
+  }
+  )";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_FALSE(status.ok());
+  EXPECT_THAT(
+      status.error_message(),
+      HasSubstr(
+          "async-update expects the shape of operand and output to match"));
 }
 
 TEST_F(HloVerifierTest, IotaNonArrayResult) {
@@ -1069,9 +1228,8 @@ int64_t ReplicaCount(const std::vector<std::vector<int64_t>>& replica_groups) {
 
 StatusOr<std::unique_ptr<HloModule>> MakeCollectiveCommOpComputation(
     std::vector<std::vector<int64_t>> replica_groups,
-    absl::optional<int64_t> replica_count,
-    absl::optional<int64_t> num_partitions, absl::string_view other_attributes,
-    absl::string_view template_str) {
+    std::optional<int64_t> replica_count, std::optional<int64_t> num_partitions,
+    absl::string_view other_attributes, absl::string_view template_str) {
   HloModuleConfig config;
   config.set_replica_count(
       replica_count.value_or(ReplicaCount(replica_groups)));
@@ -1088,8 +1246,8 @@ StatusOr<std::unique_ptr<HloModule>> MakeCollectiveCommOpComputation(
 
 StatusOr<std::unique_ptr<HloModule>> MakeAllReduceComputation(
     std::vector<std::vector<int64_t>> replica_groups,
-    absl::optional<int64_t> replica_count = absl::nullopt,
-    absl::optional<int64_t> num_partitions = absl::nullopt,
+    std::optional<int64_t> replica_count = std::nullopt,
+    std::optional<int64_t> num_partitions = std::nullopt,
     absl::string_view other_attributes = "") {
   const char* kTemplate = R"(
   HloModule test
@@ -1281,8 +1439,8 @@ TEST_F(HloVerifierTest, AllReduceDoneWithoutStart) {
 
 StatusOr<std::unique_ptr<HloModule>> MakeAllToAllComputation(
     std::vector<std::vector<int64_t>> replica_groups,
-    absl::optional<int64_t> replica_count = absl::nullopt,
-    absl::optional<int64_t> num_partitions = absl::nullopt,
+    std::optional<int64_t> replica_count = std::nullopt,
+    std::optional<int64_t> num_partitions = std::nullopt,
     absl::string_view other_attributes = "") {
   const char* kTemplate = R"(
   HloModule test
@@ -1969,6 +2127,32 @@ TEST_F(HloVerifierTest, ReduceScatterNonUniformGroups) {
   ASSERT_FALSE(status.ok());
   EXPECT_THAT(status.error_message(),
               HasSubstr("Replica groups expected to be of uniform size"));
+}
+
+TEST_F(HloVerifierTestLayoutFusion, DynamicUpdateSliceWithMemorySpace) {
+  const char* const hlo_string = R"(
+HloModule fusion, is_scheduled=true
+
+fused_computation {
+  %parameter.0 = bf16[1,8,1,8,320]{4,0,3,2,1:T(2,128)(2,1)S(3)} parameter(0)
+  %parameter.1 = bf16[1,8,6,8,320]{4,0,3,2,1:T(2,128)(2,1)S(3)} parameter(1)
+  %c = bf16[1,8,6,8,320]{4,0,3,2,1:T(2,128)(2,1)} copy(parameter.1)
+  %constant.1 = s32[] constant(0)
+  ROOT %dynamic-update-slice.1 = bf16[1,8,6,8,320]{4,0,3,2,1:T(2,128)(2,1)S(3)}
+    dynamic-update-slice(%c, %parameter.0, %constant.1, %constant.1,
+    %constant.1, %constant.1, %constant.1)
+}
+
+ENTRY entry (parameter.0: bf16[1,8,1,8,320], parameter.1: bf16[1,8,6,8,320]) -> bf16[1,8,6,8,320]{
+  %p0 = bf16[1,8,1,8,320]{4,0,3,2,1:T(2,128)(2,1)S(3)} parameter(0)
+  %p1 = bf16[1,8,6,8,320]{4,0,3,2,1:T(2,128)(2,1)S(3)} parameter(1)
+  ROOT out = bf16[1,8,6,8,320]{4,0,3,2,1:T(2,128)(2,1)S(3)} fusion(p0, p1), kind=kLoop, calls=fused_computation
+})";
+  TF_ASSERT_OK_AND_ASSIGN(auto module,
+                          ParseAndReturnUnverifiedModule(hlo_string));
+
+  auto status = verifier().Run(module.get()).status();
+  ASSERT_TRUE(status.ok());
 }
 
 }  // namespace

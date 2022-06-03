@@ -71,14 +71,16 @@ bool IsRematerializable(const HloInstruction* instruction) {
     }
   }
 
+  if (auto collective = DynCast<HloCollectiveInstruction>(instruction)) {
+    return !collective->constrain_layout();
+  }
+
   // Don't rematerialize instructions with side effects or instructions which
   // cannot be cloned safely.
   switch (instruction->opcode()) {
     case HloOpcode::kCall:
     case HloOpcode::kConstant:
     case HloOpcode::kConditional:
-    case HloOpcode::kAllReduce:
-    case HloOpcode::kReduceScatter:
     case HloOpcode::kCustomCall:
     case HloOpcode::kParameter:
     case HloOpcode::kWhile:
@@ -174,9 +176,9 @@ struct Item {
 struct ItemUse {
   Item* user;
   int64_t operand_number;
-  absl::optional<int64_t> index;
+  std::optional<int64_t> index;
 
-  ItemUse(Item* user, int64_t op_num, absl::optional<int64_t> index)
+  ItemUse(Item* user, int64_t op_num, std::optional<int64_t> index)
       : user(user), operand_number(op_num), index(index) {}
   bool operator==(const ItemUse& other) const {
     return user == other.user && operand_number == other.operand_number &&
@@ -470,9 +472,9 @@ UsesList GetUsers(const InstructionList& instruction_list,
       // A buffer may be used by the instruction via more than one alias. For
       // example, a buffer which appears in more than one element of a tuple.
       Item* user_item = instruction_list.GetItem(user);
-      absl::optional<int64_t> user_index =
+      std::optional<int64_t> user_index =
           logical_buffer->index().size() != 1
-              ? absl::nullopt
+              ? std::nullopt
               : absl::make_optional(logical_buffer->index().back());
       for (int64_t op_idx : user->OperandIndices(buffer_alias.instruction())) {
         if (!absl::c_linear_search(
@@ -889,7 +891,7 @@ Status MemoryUsageTracker::BeginInstruction(Item* item) {
   if (VLOG_IS_ON(1)) {
     DCHECK(Check());
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status MemoryUsageTracker::EndInstruction() {
@@ -930,7 +932,7 @@ Status MemoryUsageTracker::EndInstruction() {
   if (VLOG_IS_ON(1)) {
     DCHECK(Check());
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 int64_t MemoryUsageTracker::MemoryReducedIfCompressed(
@@ -1038,14 +1040,14 @@ Status MemoryUsageTracker::AddCompressInstructions(Item* original_item,
   }
   original_buffer.users = std::move(placed_users);
   original_buffer.unfinished_user_count = 0;
-  original_buffer.users.push_back(ItemUse{compressed_item, 0, absl::nullopt});
+  original_buffer.users.push_back(ItemUse{compressed_item, 0, std::nullopt});
   // We are reallocating the vector containing the buffers potentially,
   // invalidating the original_buffer reference, so copy the index that we need
   // across NewBuffer calls.
   ShapeIndex copied_index = original_buffer.index;
   Buffer& compressed_buffer =
       NewBuffer(compressed_item, compressed_item->instruction->shape(),
-                copied_index, {ItemUse{uncompressed_item, 0, absl::nullopt}},
+                copied_index, {ItemUse{uncompressed_item, 0, std::nullopt}},
                 /*live_out=*/false,
                 /*has_indirect_uses=*/false);
   compressed_item->buffers_used = original_item->buffers_output;
@@ -1067,7 +1069,7 @@ Status MemoryUsageTracker::AddCompressInstructions(Item* original_item,
                  uncompressed_buffer.id);
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status MemoryUsageTracker::AddRematerializedInstruction(
@@ -1202,7 +1204,7 @@ Status MemoryUsageTracker::AddRematerializedInstruction(
     for (BufferId buffer_id : indirect_user->buffers_used) {
       Buffer& buffer = buffers_.at(buffer_id);
       buffer.unfinished_user_count++;
-      buffer.users.push_back(ItemUse{indirect_user, 0, absl::nullopt});
+      buffer.users.push_back(ItemUse{indirect_user, 0, std::nullopt});
     }
   }
 
@@ -1211,7 +1213,7 @@ Status MemoryUsageTracker::AddRematerializedInstruction(
 
   DCHECK(Check());
 
-  return Status::OK();
+  return OkStatus();
 }
 
 std::string MemoryUsageTracker::ToString() const {
@@ -1696,6 +1698,13 @@ StatusOr<int64_t> RematerializeInstructions(
     for (auto* indirect_user : indirect_users) {
       instruction_list->Denylist(indirect_user->instruction);
     }
+    if (HloDataflowAnalysis::IsAsynchronousOperationStart(best->opcode()) ||
+        HloDataflowAnalysis::IsAsynchronousOperationDone(best->opcode())) {
+      VLOG(2) << "The old instruction " << best->name()
+              << " is an async op. Removing to maintain one start to one done "
+                 "invariant to keep the HLO valid.";
+      TF_RETURN_IF_ERROR(computation->RemoveInstruction(best));
+    }
   }
   VLOG(1) << "Rematerializing instructions ["
           << absl::StrJoin(instruction_names, ", ") << "] (saving "
@@ -2092,7 +2101,7 @@ StatusOr<bool> HloRematerialization::Run(HloModule* module) {
               ComputePeakMemory(node.computation(), module->schedule().sequence(
                                                         node.computation())));
         }
-        return Status::OK();
+        return OkStatus();
       },
       /*visit_unreachable_nodes=*/false));
 

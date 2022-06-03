@@ -110,12 +110,12 @@ StatusOr<HloInstruction*> AllToAllDecomposer::ExpandInstruction(
     slice_starts[split_dim] = slice_limits[split_dim];
     slice_limits[split_dim] += split_size;
   }
-  Shape all_to_all_shape = ShapeUtil::MakeTupleShape(
-      std::vector<Shape>(all_to_all_group_size, slice_shape));
+  Shape all_to_all_shape = ShapeUtil::MakeTupleShapeWithPtrs(
+      std::vector<const Shape*>(all_to_all_group_size, &slice_shape));
   HloInstruction* new_all_to_all =
       all_to_all->parent()->AddInstruction(HloInstruction::CreateAllToAll(
           all_to_all_shape, slices, all_to_all->replica_groups(), false,
-          all_to_all->channel_id(), absl::nullopt));
+          all_to_all->channel_id(), std::nullopt));
   std::vector<HloInstruction*> gtes;
   gtes.reserve(all_to_all_group_size);
   for (int64_t i = 0; i < all_to_all_group_size; ++i) {

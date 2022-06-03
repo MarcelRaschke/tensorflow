@@ -16,7 +16,6 @@ limitations under the License.
 #include "tensorflow/core/data/root_dataset.h"
 
 #include <functional>
-#include <memory>
 #include <string>
 #include <utility>
 
@@ -117,7 +116,7 @@ Status RootDataset::FromOptions(const DatasetBase* input,
   SetRootDatasetParams(input->options(), &params);
   *output = new RootDataset(input, params);
   (*output)->Initialize(/*metadata=*/{});
-  return Status::OK();
+  return OkStatus();
 }
 
 Status RootDataset::FromOptions(core::RefCountPtr<DatasetBase> input,
@@ -126,7 +125,7 @@ Status RootDataset::FromOptions(core::RefCountPtr<DatasetBase> input,
   SetRootDatasetParams(input->options(), &params);
   *output = new RootDataset(std::move(input), params);
   (*output)->Initialize(/*metadata=*/{});
-  return Status::OK();
+  return OkStatus();
 }
 
 class RootDataset::Iterator : public DatasetIterator<RootDataset> {
@@ -134,9 +133,7 @@ class RootDataset::Iterator : public DatasetIterator<RootDataset> {
   explicit Iterator(const Params& params)
       : DatasetIterator<RootDataset>(params) {
     if (dataset()->params_.autotune) {
-      model_ = std::make_shared<model::Model>(
-          model::Model::BudgetParams({dataset()->params_.autotune_cpu_budget,
-                                      dataset()->params_.autotune_ram_budget}));
+      model_ = std::make_shared<model::Model>();
     }
     if (dataset()->params_.max_intra_op_parallelism >= 0) {
       max_intra_op_parallelism_ =
@@ -179,14 +176,14 @@ class RootDataset::Iterator : public DatasetIterator<RootDataset> {
   Status SaveInternal(SerializationContext* ctx,
                       IteratorStateWriter* writer) override {
     TF_RETURN_IF_ERROR(SaveInput(ctx, writer, input_impl_));
-    return Status::OK();
+    return OkStatus();
   }
 
   Status RestoreInternal(IteratorContext* ctx,
                          IteratorStateReader* reader) override {
     TF_RETURN_IF_ERROR(
         RestoreInput(IteratorContext(CreateParams(ctx)), reader, input_impl_));
-    return Status::OK();
+    return OkStatus();
   }
 
   TraceMeMetadata GetTraceMeMetadata() const override {
@@ -241,14 +238,17 @@ class RootDataset::Iterator : public DatasetIterator<RootDataset> {
     mutex_lock l(mu_);
     if (!model_thread_) {
       model_thread_ = ctx->StartThread("tf_data_model", [this]() {
-        Status status = model_->OptimizeLoop(
-            dataset()->params_.autotune_algorithm, cancellation_manager_.get());
+        Status status =
+            model_->OptimizeLoop(dataset()->params_.autotune_algorithm,
+                                 dataset()->params_.autotune_cpu_budget,
+                                 dataset()->params_.autotune_ram_budget,
+                                 cancellation_manager_.get());
         if (!status.ok()) {
           LOG(WARNING) << "Optimization loop failed: " << status.ToString();
         }
       });
     }
-    return Status::OK();
+    return OkStatus();
   }
 
   std::shared_ptr<model::Model> model_ = nullptr;
@@ -321,7 +321,7 @@ Status RootDataset::Get(OpKernelContext* ctx, int64 index,
 Status RootDataset::InputDatasets(
     std::vector<const DatasetBase*>* inputs) const {
   inputs->push_back(input_);
-  return Status::OK();
+  return OkStatus();
 }
 
 Status RootDataset::CheckExternalState() const {
@@ -383,7 +383,7 @@ Status FinalizeDataset(OpKernelContext* ctx, const DatasetBase* input,
   } else {
     return RootDataset::FromOptions(std::move(rewritten_output), output);
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 #else   // !IS_MOBILE_PLATFORM

@@ -52,7 +52,7 @@ class TestEagerServiceImpl : public EagerServiceImpl {
     TF_RETURN_IF_ERROR(GetServerContext(context_id, &context));
     core::ScopedUnref context_unref(context);
     *ctx = context->Context();
-    return Status::OK();
+    return OkStatus();
   }
   Status GetTensorHandle(const uint64 context_id,
                          const RemoteTensorHandleInternal& remote_handle,
@@ -99,7 +99,8 @@ class FakeEagerClient : public EagerClient {
     impl_->RunComponentFunction(call_opts, request, response, std::move(done));
   }
 
-  void StreamingEnqueueAsync(CallOptions* call_opts,
+  void StreamingEnqueueAsync(bool enable_streaming_enqueue,
+                             CallOptions* call_opts,
                              const EnqueueRequest* request,
                              EnqueueResponse* response,
                              StatusCallback done) override {
@@ -119,7 +120,7 @@ class DummyEagerClientCache : public EagerClientCache {
                    core::RefCountPtr<EagerClient>* client) override {
     client->reset(client_.get());
     client_->Ref();
-    return Status::OK();
+    return OkStatus();
   }
 
  private:
@@ -130,7 +131,7 @@ class FakeCache : public TestWorkerCache {
   Status GetEagerClientCache(
       std::unique_ptr<eager::EagerClientCache>* eager_client_cache) override {
     eager_client_cache->reset(new DummyEagerClientCache);
-    return Status::OK();
+    return OkStatus();
   }
 
   void ListWorkers(std::vector<string>* workers) const override {
@@ -148,7 +149,7 @@ class EagerServiceImplTest : public ::testing::Test {
             [](const ServerDef& server_def,
                WorkerCacheInterface** worker_cache) {
               *worker_cache = new FakeCache;
-              return Status::OK();
+              return OkStatus();
             })) {
     worker_env_.env = Env::Default();
 
@@ -785,7 +786,7 @@ class FunctionWithRemoteInputsTest : public EagerServiceImplTest {
                                    const DeviceMgr* device_mgr,
                                    Rendezvous** r) {
           *r = worker_env_.rendezvous_mgr->Find(step_id);
-          return Status::OK();
+          return OkStatus();
         }});
   }
 
@@ -875,7 +876,7 @@ TEST_F(FunctionWithRemoteInputsTest, EagerPFLRTest) {
       std::move(tensor_args),
       [&inputs](const int i, RemoteTensorHandle* handle) -> Status {
         *handle = inputs.at(i);
-        return Status::OK();
+        return OkStatus();
       });
   eager_pflr_->Run(opts, handle, args, &outputs,
                    [&status, &done](const Status& s) {
@@ -978,7 +979,7 @@ TEST_F(FunctionWithRemoteInputsTest, KernelAndDeviceFuncTest) {
       std::move(input_tensors),
       [&remote_handles](const int index, RemoteTensorHandle* handle) -> Status {
         *handle = remote_handles.at(index);
-        return Status::OK();
+        return OkStatus();
       });
   std::vector<FunctionRet> outputs;
 
@@ -1032,7 +1033,7 @@ TEST_F(FunctionWithRemoteInputsTest, KernelAndDeviceFuncAsyncTest) {
       std::move(input_tensors),
       [&remote_handles](const int index, RemoteTensorHandle* handle) -> Status {
         *handle = remote_handles.at(index);
-        return Status::OK();
+        return OkStatus();
       });
   std::vector<FunctionRet> outputs;
 

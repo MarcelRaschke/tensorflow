@@ -379,6 +379,10 @@ class LayoutAssignment : public HloModulePass {
                           bool mandatory, bool dfs, int64_t priority);
   bool reverse_computation_order() const { return reverse_computation_order_; }
 
+  ComputationLayout& saved_entry_computation_layout() {
+    return saved_entry_computation_layout_;
+  }
+
  protected:
   // These methods, invoked by PropagateConstraints, propagate a layout
   // constraint to its neighbors (i.e. operands and users) in order to minimize
@@ -403,7 +407,7 @@ class LayoutAssignment : public HloModulePass {
   // Called after layouts of an instruction have been finalized to allow
   // subclasses to check for platform specific assumptions.
   virtual Status Verify(const HloInstruction* instruction) {
-    return Status::OK();
+    return OkStatus();
   }
 
   Status PropagateUnconstraintedBuffers(LayoutConstraints* constraints);
@@ -487,7 +491,7 @@ class LayoutAssignment : public HloModulePass {
   // all mandatory constraints have been added via AddMandatoryConstraints
   // and before propagating constraints.
   virtual Status AddBackendConstraints(LayoutConstraints* constraints) {
-    return Status::OK();
+    return OkStatus();
   }
 
   // Construct constraints and assign layouts to all instructions in the

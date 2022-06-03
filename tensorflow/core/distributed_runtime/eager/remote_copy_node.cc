@@ -177,6 +177,7 @@ void RemoteCopyNode::StartSend() {
     // If StartRecv fails very quickly, `this` can be destroyed before the
     // callback below is executed. So, we can't capture `this`.
     eager_client->StreamingEnqueueAsync(
+        ctx_->Executor().StreamingEnqueue(),
         /*call_opts=*/nullptr, &request, response,
         [response, captured_state](const Status& s) {
           captured_state->SetSendStatus(s);
@@ -213,7 +214,7 @@ Status RemoteCopyNode::RunLocalRecv(EagerOperation* op,
           "Expect to receive a Tensor but got a TensorShape.");
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 void RemoteCopyNode::RunRemoteRecv(EagerOperation* op, StatusCallback done) {
@@ -249,6 +250,7 @@ void RemoteCopyNode::RunRemoteRecv(EagerOperation* op, StatusCallback done) {
   const std::shared_ptr<CapturedSharedState>& captured_state = captured_state_;
   Device* recv_device = recv_device_;
   eager_client->StreamingEnqueueAsync(
+      ctx_->Executor().StreamingEnqueue(),
       /*call_opts=*/nullptr, &request, response,
       [captured_state, response, recv_device, context_view_id,
        done](const Status& s) {
@@ -354,7 +356,7 @@ Status SerializePackedHandle(const uint64 op_id, TensorHandle* packed_handle,
       return errors::InvalidArgument("Nested packed handles are not supported");
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 void RemoteCopyNode::StartSendPackedHandle(StatusCallback done) {
@@ -400,6 +402,7 @@ void RemoteCopyNode::StartSendPackedHandle(StatusCallback done) {
   Device* recv_device = recv_device_;
   const std::shared_ptr<CapturedSharedState>& captured_state = captured_state_;
   eager_client->StreamingEnqueueAsync(
+      ctx_->Executor().StreamingEnqueue(),
       /*call_opts=*/nullptr, &request, response,
       [captured_state, response, recv_device, context_view_id,
        done](const Status& s) {
@@ -452,6 +455,7 @@ void RemoteCopyNode::StartRemoteSendTensor(StatusCallback done) {
   captured_state->SetSrcShape(tensor.shape());
   Device* recv_device = recv_device_;
   eager_client->StreamingEnqueueAsync(
+      ctx_->Executor().StreamingEnqueue(),
       /*call_opts=*/nullptr, &request, response,
       [captured_state, response, recv_device, context_view_id,
        done](const Status& s) {
@@ -473,7 +477,7 @@ void RemoteCopyNode::StartRemoteSendTensor(StatusCallback done) {
 
 Status RemoteCopyNode::Prepare() {
   TF_RETURN_IF_ERROR(captured_state_->dst()->CopyInferenceShape(src_));
-  return Status::OK();
+  return OkStatus();
 }
 
 void RemoteCopyNode::RunAsync(StatusCallback done) {

@@ -78,9 +78,6 @@ class DfsHloVisitorWithDefaultBase
   Status HandleSelect(HloInstructionPtr select) override {
     return DefaultAction(select);
   }
-  Status HandleTupleSelect(HloInstructionPtr tuple_select) override {
-    return DefaultAction(tuple_select);
-  }
   Status HandleDot(HloInstructionPtr dot) override {
     return DefaultAction(dot);
   }
@@ -277,9 +274,7 @@ class DfsHloVisitorWithDefaultBase
 
   // Invoked to inform the visitor that the traversal has completed, and that
   // the root was "root".
-  Status FinishVisit(HloInstructionPtr /*root*/) override {
-    return Status::OK();
-  }
+  Status FinishVisit(HloInstructionPtr /*root*/) override { return OkStatus(); }
 
  private:
   DfsHloVisitorWithDefaultBase(const DfsHloVisitorWithDefaultBase&) = delete;
@@ -310,7 +305,7 @@ class DfsHloRewriteVisitor : public DfsHloVisitorWithDefault {
 
   // Default visitor action is to do nothing and return OK.
   Status DefaultAction(HloInstruction* /*hlo_instruction*/) override {
-    return Status::OK();
+    return OkStatus();
   }
 
   bool changed() const { return changed_; }
@@ -328,7 +323,7 @@ class DfsHloRewriteVisitor : public DfsHloVisitorWithDefault {
     TF_RETURN_IF_ERROR(old_instruction->parent()->ReplaceWithNewInstruction(
         old_instruction, std::move(new_instruction)));
     changed_ = true;
-    return Status::OK();
+    return OkStatus();
   }
 
   // Replaces the existing HLO instruction old_instruction, with
@@ -353,7 +348,7 @@ class DfsHloRewriteVisitor : public DfsHloVisitorWithDefault {
                         ReplaceInstruction(old_instruction, new_instruction,
                                            /*preserve_sharding=*/false));
     DCHECK(changed);
-    return Status::OK();
+    return OkStatus();
   }
 
   bool changed_ = false;

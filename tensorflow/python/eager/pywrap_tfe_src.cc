@@ -688,9 +688,12 @@ bool SetOpAttrScalar(TFE_Context* ctx, TFE_Op* op, const char* key,
       for (int i = 0; i < num_dims; ++i) {
         tensorflow::Safe_PyObjectPtr inner_py_value(
             PySequence_ITEM(py_value, i));
+        // If an error is generated when iterating through object, we can
+        // sometimes get a nullptr.
         if (inner_py_value.get() == Py_None) {
           dims[i] = -1;
-        } else if (!ParseDimensionValue(key, inner_py_value.get(), status,
+        } else if (inner_py_value.get() == nullptr ||
+                   !ParseDimensionValue(key, inner_py_value.get(), status,
                                         &dims[i])) {
           return false;
         }
@@ -1005,9 +1008,10 @@ std::string FormatErrorStatusStackTrace(const tensorflow::Status& status) {
   tensorflow::DCheckPyGilState();
   DCHECK(!status.ok());
 
-  if (status.stack_trace().empty()) return status.error_message();
+  std::vector<tensorflow::StackFrame> stack_trace =
+      tensorflow::errors::GetStackTrace(status);
 
-  const std::vector<tensorflow::StackFrame>& stack_trace = status.stack_trace();
+  if (stack_trace.empty()) return status.error_message();
 
   PyObject* linecache = PyImport_ImportModule("linecache");
   PyObject* getline =
@@ -1037,6 +1041,8 @@ std::string FormatErrorStatusStackTrace(const tensorflow::Status& status) {
   result << '\n' << status.error_message();
   return result.str();
 }
+
+namespace tensorflow {
 
 int MaybeRaiseExceptionFromTFStatus(TF_Status* status, PyObject* exception) {
   if (status->status.ok()) return 0;
@@ -1071,6 +1077,8 @@ int MaybeRaiseExceptionFromTFStatus(TF_Status* status, PyObject* exception) {
   PyErr_SetString(exception, msg);
   return -1;
 }
+
+}  // namespace tensorflow
 
 int MaybeRaiseExceptionFromStatus(const tensorflow::Status& status,
                                   PyObject* exception) {
@@ -3385,10 +3393,12 @@ bool ReadVariableOp(const FastPathOpExecInfo& parent_op_exec_info,
 
   TFE_Op* op = TFE_NewOp(parent_op_exec_info.ctx, "ReadVariableOp", status);
   auto cleaner = tensorflow::gtl::MakeCleanup([op] { TFE_DeleteOp(op); });
-  if (MaybeRaiseExceptionFromTFStatus(status, nullptr)) return false;
+  if (tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr))
+    return false;
 
   TFE_OpSetDevice(op, parent_op_exec_info.device_name, status);
-  if (MaybeRaiseExceptionFromTFStatus(status, nullptr)) return false;
+  if (tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr))
+    return false;
 
   // Set dtype
   DCHECK(PyObject_HasAttrString(input, "_dtype"));
@@ -3403,12 +3413,14 @@ bool ReadVariableOp(const FastPathOpExecInfo& parent_op_exec_info,
   tensorflow::Safe_PyObjectPtr handle(PyObject_GetAttrString(input, "_handle"));
   if (!EagerTensor_CheckExact(handle.get())) return false;
   TFE_OpAddInput(op, EagerTensor_Handle(handle.get()), status);
-  if (MaybeRaiseExceptionFromTFStatus(status, nullptr)) return false;
+  if (tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr))
+    return false;
 
   int num_retvals = 1;
   TFE_TensorHandle* output_handle;
   TFE_Execute(op, &output_handle, &num_retvals, status);
-  if (MaybeRaiseExceptionFromTFStatus(status, nullptr)) return false;
+  if (tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr))
+    return false;
 
   // Always create the py object (and correctly DECREF it) from the returned
   // value, else the data will leak.
@@ -3469,7 +3481,7 @@ bool ConvertToTensor(
   TFE_TensorHandle* handle = tensorflow::ConvertToEagerTensor(
       op_exec_info.ctx, input, dtype_hint, op_exec_info.device_name);
   if (handle == nullptr) {
-    return MaybeRaiseExceptionFromTFStatus(status, nullptr);
+    return tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr);
   }
 
   output_handle->reset(EagerTensorFromHandle(handle));
@@ -3524,7 +3536,7 @@ bool AddInputToOp(FastPathOpExecInfo* op_exec_info, PyObject* input,
   }
 
   TFE_OpAddInput(op, input_handle, status);
-  if (MaybeRaiseExceptionFromTFStatus(status, nullptr)) {
+  if (tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr)) {
     return false;
   }
 
@@ -3702,7 +3714,7 @@ PyObject* TFE_Py_FastPathExecute_C(PyObject* args) {
     ReturnOp(ctx, op);
   });
 
-  if (MaybeRaiseExceptionFromTFStatus(status, nullptr)) {
+  if (tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr)) {
     return nullptr;
   }
 
@@ -3868,7 +3880,7 @@ PyObject* TFE_Py_FastPathExecute_C(PyObject* args) {
         attr_value[j] = TFE_TensorHandleDataType(input_handle);
 
         TFE_OpAddInput(op, input_handle, status);
-        if (MaybeRaiseExceptionFromTFStatus(status, nullptr)) {
+        if (tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr)) {
           return nullptr;
         }
 
@@ -3934,7 +3946,7 @@ PyObject* TFE_Py_FastPathExecute_C(PyObject* args) {
         status->status, tensorflow::strings::StrCat(
                             TF_Message(status), " [Op:",
                             TFE_GetPythonString(op_exec_info.op_name), "]"));
-    MaybeRaiseExceptionFromTFStatus(status, nullptr);
+    tensorflow::MaybeRaiseExceptionFromTFStatus(status, nullptr);
     return nullptr;
   }
 

@@ -436,7 +436,7 @@ class ParametricDotTestWithoutLayoutAssignment : public ParametricDotTest {
     execution_options_.mutable_debug_options()->add_xla_disable_hlo_passes(
         "layout-assignment");
     execution_options_.mutable_debug_options()->add_xla_disable_hlo_passes(
-        "tiling-assignment");
+        "hlo-verifier");
     // Disable algebraic simplification because the pass may replace a dot
     // instruction with a layout-changing multiplication instruction.
     execution_options_.mutable_debug_options()->add_xla_disable_hlo_passes(
@@ -1680,7 +1680,7 @@ ENTRY jaxpr_computation__5.33 {
 })";
   TF_ASSERT_OK_AND_ASSIGN(std::unique_ptr<HloModule> module,
                           ParseAndReturnVerifiedModule(module_string));
-  EXPECT_TRUE(RunAndCompare(std::move(module), /*error=*/absl::nullopt));
+  EXPECT_TRUE(RunAndCompare(std::move(module), /*error=*/std::nullopt));
 }
 
 XLA_TEST_F(DotOperationTest, ReorderContractingDimsConstLHS_RL) {

@@ -145,7 +145,11 @@ void AppendMarkForCompilationPassFlagsInternal(std::vector<Flag>* flag_list) {
       Flag("tf_xla_disable_strict_signature_checks",
            &mark_for_compilation_flags->tf_xla_disable_strict_signature_checks,
            "If true, entires loaded into the XLA compile cache will not have "
-           "their signatures checked strictly. Defaults to false.")};
+           "their signatures checked strictly. Defaults to false."),
+      Flag("tf_xla_persistent_cache_prefix",
+           &mark_for_compilation_flags->tf_xla_persistent_cache_prefix,
+           "Specifies the persistance cache prefix. Default is "
+           "\"xla_compile_cache\"")};
   flag_list->insert(flag_list->end(), new_flags.begin(), new_flags.end());
 }
 
@@ -153,12 +157,17 @@ void AllocateAndParseJitRtFlags() {
   jitrt_flags = new JitRtFlags;
   jitrt_flags->always_specialize = false;
   jitrt_flags->cost_driven_async_parallel_for = false;
+  jitrt_flags->log_query_of_death = false;
   jitrt_flags->vectorize = false;
+  jitrt_flags->enable_crash_reproducer = false;
   jitrt_flag_list = new std::vector<Flag>({
       Flag("always_specialize", &jitrt_flags->always_specialize, ""),
       Flag("cost_driven_async_parallel_for",
            &jitrt_flags->cost_driven_async_parallel_for, ""),
+      Flag("log_query_of_death", &jitrt_flags->log_query_of_death, ""),
       Flag("vectorize", &jitrt_flags->vectorize, ""),
+      Flag("enable_crash_reproducer", &jitrt_flags->enable_crash_reproducer,
+           ""),
   });
   xla::ParseFlagsFromEnvAndDieIfUnknown("TF_JITRT_FLAGS", *jitrt_flag_list);
 }
@@ -189,6 +198,8 @@ void AllocateAndParseFlags() {
   mark_for_compilation_flags->tf_xla_deterministic_cluster_names = false;
   mark_for_compilation_flags->tf_xla_persistent_cache_directory = "";
   mark_for_compilation_flags->tf_xla_disable_strict_signature_checks = false;
+  mark_for_compilation_flags->tf_xla_persistent_cache_prefix =
+      "xla_compile_cache";
 
   device_flags = new XlaDeviceFlags;
   device_flags->tf_xla_compile_on_demand = false;
@@ -379,7 +390,7 @@ const JitRtFlags& GetJitRtFlags() {
 }
 
 ConfigProto::Experimental::MlirBridgeRollout GetMlirBridgeRolloutState(
-    absl::optional<const ConfigProto> config_proto) {
+    std::optional<const ConfigProto> config_proto) {
   // TF1 graphs that do not override Sessions's ConfigProto and TF2 graphs
   // can enable/disable the graph via tf_mlir_enable_mlir_bridge.
   auto tf_mlir_enable_mlir_bridge =

@@ -269,7 +269,8 @@ Status DotOpEmitter::EmitLinalgMatmul() {
 
   return EmitMlirFuncAndCall(
       mlir_context_, b_, dot_info_.result_shape, operand_shapes, target_ptr,
-      operand_ptrs, name, [&](mlir::OpBuilder* builder, mlir::FuncOp function) {
+      operand_ptrs, name,
+      [&](mlir::OpBuilder* builder, mlir::func::FuncOp function) {
         CHECK_EQ(dot_info_.dim_nums.lhs_contracting_dimensions_size(), 1);
         CHECK_EQ(dot_info_.dim_nums.rhs_contracting_dimensions_size(), 1);
         mlir::MLIRContext* context = builder->getContext();
@@ -550,15 +551,15 @@ Status DotOpEmitter::Emit() {
                                        target_machine_features_)) {
     case DotImplementationStrategy::kNaiveLlvmIr:
       EmitNaiveLlvmIrGemm();
-      return Status::OK();
+      return ::tensorflow::OkStatus();
 
     case DotImplementationStrategy::kTiledLlvmIrGemv:
       EmitTiledLlvmIrGemv();
-      return Status::OK();
+      return ::tensorflow::OkStatus();
 
     case DotImplementationStrategy::kTiledLlvmIrGemm:
       EmitTiledLlvmIrGemm();
-      return Status::OK();
+      return ::tensorflow::OkStatus();
 
     case DotImplementationStrategy::kLinalgMatmul:
       return EmitLinalgMatmul();
@@ -746,7 +747,7 @@ Status DotOpEmitter::EmitScalarDot() {
     result = b_->CreateFMul(lhs_value, rhs_value);
   }
   target_array_.EmitWriteArrayElement(/*index=*/element_index, result, b_);
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 Status DotOpEmitter::EmitCallToRuntime() {
@@ -866,7 +867,7 @@ Status DotOpEmitter::EmitCallToRuntime() {
        b_->getInt64(mat_mult_dims.m), b_->getInt64(mat_mult_dims.n),
        b_->getInt64(mat_mult_dims.k), b_->getInt32(transpose_lhs),
        b_->getInt32(transpose_rhs)});
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 DotOpEmitter::MatMultDims DotOpEmitter::GetMatMultDims() const {
@@ -901,7 +902,7 @@ DotOpEmitter::MatMultDims DotOpEmitter::GetMatMultDims() const {
 
 // For vector-matrix dot products, it is always profitable to make the Rhs
 // column major.
-absl::optional<int64_t> ProfitableToMakeDotOperandColumnMajor(
+std::optional<int64_t> ProfitableToMakeDotOperandColumnMajor(
     const HloInstruction& hlo) {
   if (hlo.opcode() == HloOpcode::kDot && hlo.shape().dimensions_size() <= 1) {
     if (hlo.operand(0)->shape().rank() != 1 ||
@@ -1119,10 +1120,10 @@ llvm_ir::IrArray CollapseFirstNDims(llvm::IRBuilder<>* b,
         LayoutUtil::IsMonotonicWithDim0Major(shape.layout()));
   CHECK_GE(shape.dimensions_size(), n);
   Shape new_shape = CollapseFirstNDims(shape, n);
-  llvm::Value* new_value = b->CreateBitCast(
-      array.GetBasePointer(),
-      llvm_ir::ShapeToIrType(new_shape, module)->getPointerTo());
-  return llvm_ir::IrArray(new_value, std::move(new_shape));
+  llvm::Type* new_ir_type = llvm_ir::ShapeToIrType(new_shape, module);
+  llvm::Value* new_value =
+      b->CreateBitCast(array.GetBasePointer(), new_ir_type->getPointerTo());
+  return llvm_ir::IrArray(new_value, new_ir_type, std::move(new_shape));
 }
 
 Status ValidateDotDimensionNumbers(const DotDimensionNumbers& dim_numbers) {
@@ -1136,7 +1137,7 @@ Status ValidateDotDimensionNumbers(const DotDimensionNumbers& dim_numbers) {
       absl::c_equal(batch_dim_numbers, dim_numbers.lhs_batch_dimensions()));
   TF_RET_CHECK(
       absl::c_equal(batch_dim_numbers, dim_numbers.rhs_batch_dimensions()));
-  return Status::OK();
+  return ::tensorflow::OkStatus();
 }
 
 // Slice out the inner array at batch index `batch_index` from `outer_array`.
@@ -1152,10 +1153,10 @@ llvm_ir::IrArray SliceOutInnerArray(llvm_ir::IrArray outer_array,
   llvm_ir::IrArray::Index slice_index(multidim_index, outer_array.GetShape(),
                                       batch_index->getType());
   llvm::Value* slice_ptr = outer_array.EmitArrayElementAddress(slice_index, b);
-  llvm::Type* slice_ptr_type =
-      llvm_ir::ShapeToIrType(inner_shape, module)->getPointerTo();
+  llvm::Type* new_ir_type = llvm_ir::ShapeToIrType(inner_shape, module);
+  llvm::Type* slice_ptr_type = new_ir_type->getPointerTo();
   return llvm_ir::IrArray(b->CreateBitCast(slice_ptr, slice_ptr_type),
-                          std::move(inner_shape));
+                          new_ir_type, std::move(inner_shape));
 }
 
 Status EmitBatchDotOperation(
