@@ -20,6 +20,7 @@ from absl.testing import parameterized
 
 from google.protobuf import text_format
 
+from tensorflow.core.config import flags
 from tensorflow.core.framework import graph_pb2
 from tensorflow.core.protobuf import graph_debug_info_pb2
 from tensorflow.python.client import session as session_lib
@@ -1068,22 +1069,6 @@ class AssetTests(test.TestCase):
     with self.assertRaisesRegex(AssertionError, "tf.function"):
       _calls_save()
 
-  def test_rewrite_asset_to_same_destination(self):
-    save_dir = os.path.join(self.get_temp_dir(), "saved_model")
-    asset_path = os.path.join(self.get_temp_dir(), "asset")
-    model = tracking.AutoTrackable()
-    with open(asset_path, "w") as f:
-      f.write("first")
-    save.save(model, save_dir)
-    load.load(save_dir)
-    self.assertEqual("first", file_io.read_file_to_string(asset_path))
-
-    with open(asset_path, "w") as f:
-      f.write("second")
-    save.save(model, save_dir)
-    load.load(save_dir)
-    self.assertEqual("second", file_io.read_file_to_string(asset_path))
-
 
 class ExportMetaGraphTests(test.TestCase):
 
@@ -1133,6 +1118,14 @@ class ExportMetaGraphTests(test.TestCase):
       _run_signature(session, meta_graph_def, {"y": 2}, "update")
       out = _run_signature(session, meta_graph_def, {"x": 4}, "multiply_var")
       self.assertAllEqual(out, {"output_0": 12})
+
+
+class FingerprintingTests(test.TestCase):
+
+  def test_toggle_flag(self):
+    self.assertFalse(flags.config().saved_model_fingerprinting.value())
+    flags.config().saved_model_fingerprinting.reset(True)
+    self.assertTrue(flags.config().saved_model_fingerprinting.value())
 
 
 if __name__ == "__main__":

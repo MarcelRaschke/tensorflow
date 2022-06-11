@@ -345,6 +345,7 @@ py_strict_library(
         ":tag_constants",
         ":utils",
         "//tensorflow/core:protos_all_py",
+        "//tensorflow/core/config:flags_py",
         "//tensorflow/python:array_ops",
         "//tensorflow/python:constant_op",
         "//tensorflow/python:control_flow_ops",
@@ -701,10 +702,7 @@ tf_python_pybind_extension(
         "pywrap_saved_model_metrics.h",
     ],
     features = ["-layering_check"],
-    visibility = [
-        "//tensorflow/python/saved_model:__subpackages__",
-        "//tensorflow/python/training:__subpackages__",
-    ],
+    visibility = ["//tensorflow/python/training:__subpackages__"],
     deps = [
         ":pywrap_saved_model_headers",
         "//tensorflow/cc/experimental/libexport:save",

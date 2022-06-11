@@ -13,19 +13,31 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef MLIR_HLO_DIALECT_GML_ST_TRANSFORMS_TILING_INTERFACE_H
-#define MLIR_HLO_DIALECT_GML_ST_TRANSFORMS_TILING_INTERFACE_H
+#ifndef FUSION_INTERFACE
+#define FUSION_INTERFACE
 
-#include "mlir-hlo/Dialect/gml_st/IR/gml_st_ops.h"
-#include "mlir/IR/OpDefinition.h"
+include "mlir/IR/OpBase.td"
 
-/// Include the generated interface declarations.
-#include "mlir-hlo/Dialect/gml_st/transforms/tiling_interface.h.inc"
+def FusionIterface : OpInterface<"FusionIterface"> {
+  let description = [{
+    TBD
+  }];
+  let cppNamespace = "::mlir::gml_st";
 
-namespace mlir {
-namespace gml_st {
-void registerTilingInterfaceExternalModels(DialectRegistry &registry);
-}  // namespace gml_st
-}  // namespace mlir
+  let methods = [
+    InterfaceMethod<
+      /*desc=*/"TBD",
+      /*retTy=*/"::mlir::Value",
+      /*methodName=*/"fuse",
+      /*args=*/(ins
+          "::mlir::Location":$loc,
+          "::mlir::Value":$subset,
+          "OpBuilder&":$builder),
+      /*methodBody=*/"",
+      /*defaultImplementation=*/[{
+        return {};
+      }]>,
+  ];
+}
 
-#endif  // MLIR_HLO_DIALECT_GML_ST_TRANSFORMS_TILING_INTERFACE_H
+#endif // FUSION_INTERFACE

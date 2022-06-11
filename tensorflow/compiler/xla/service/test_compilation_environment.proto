@@ -13,28 +13,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifndef TILING_INTERFACE
-#define TILING_INTERFACE
+syntax = "proto3";
 
-include "mlir/IR/OpBase.td"
+package xla.test;
 
-def TilingInterface : OpInterface<"TilingInterface"> {
-  let description = [{
-    TBD
-  }];
-  let cppNamespace = "::mlir::gml_st";
-
-  let methods = [
-    InterfaceMethod<
-      /*desc=*/"TBD",
-      /*retTy=*/"::mlir::Value",
-      /*methodName=*/"tile",
-      /*args=*/(ins "::mlir::gml_st::MaterializeOp":$materialize, "OpBuilder&":$builder),
-      /*methodBody=*/"",
-      /*defaultImplementation=*/[{
-        return {};
-      }]>,
-  ];
+message TestCompilationEnvironment1 {
+  uint32 some_flag = 1;
 }
 
-#endif // TILING_INTERFACE
+message TestCompilationEnvironment2 {
+  uint32 some_other_flag = 1;
+}
+
+message TestCompilationEnvironment3 {
+  uint32 a_third_flag = 1;
+}
