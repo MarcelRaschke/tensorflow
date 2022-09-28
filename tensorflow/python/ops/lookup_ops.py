@@ -18,6 +18,7 @@ import collections
 import functools
 import uuid
 
+from tensorflow.python.checkpoint import saveable_compat
 from tensorflow.python.eager import context
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
@@ -1783,6 +1784,7 @@ def index_to_string_table_from_tensor(vocabulary_list,
 
 
 @tf_export("lookup.experimental.MutableHashTable")
+@saveable_compat.legacy_saveable_name("table")
 class MutableHashTable(LookupInterface):
   """A generic mutable hash table implementation.
 
@@ -2041,7 +2043,7 @@ class MutableHashTable(LookupInterface):
   def _serialize_to_tensors(self):
     """Implements checkpointing protocols for `Trackable`."""
     tensors = self.export()
-    return {"table-keys": tensors[0], "table-values": tensors[1]}
+    return {"-keys": tensors[0], "-values": tensors[1]}
 
   def _restore_from_tensors(self, restored_tensors):
     """Implements checkpointing protocols for `Trackable`."""
@@ -2049,8 +2051,8 @@ class MutableHashTable(LookupInterface):
       with ops.colocate_with(self.resource_handle):
         return gen_lookup_ops.lookup_table_import_v2(
             self.resource_handle,
-            restored_tensors["table-keys"],
-            restored_tensors["table-values"])
+            restored_tensors["-keys"],
+            restored_tensors["-values"])
 
     # This class is needed for `MutableHashTable(checkpoint=True)`.
   class _Saveable(BaseSaverBuilder.SaveableObject):
@@ -2077,6 +2079,7 @@ class MutableHashTable(LookupInterface):
 
 
 @tf_export("lookup.experimental.DenseHashTable")
+@saveable_compat.legacy_saveable_name("table")
 class DenseHashTable(LookupInterface):
   """A mutable hash table with faster lookups and higher memory usage.
 
@@ -2375,7 +2378,7 @@ class DenseHashTable(LookupInterface):
   def _serialize_to_tensors(self):
     """Implements checkpointing interface in `Trackable`."""
     tensors = self.export()
-    return {"table-keys": tensors[0], "table-values": tensors[1]}
+    return {"-keys": tensors[0], "-values": tensors[1]}
 
   def _restore_from_tensors(self, restored_tensors):
     """Implements checkpointing interface in `Trackable`."""
@@ -2383,8 +2386,8 @@ class DenseHashTable(LookupInterface):
       with ops.colocate_with(self.resource_handle):
         return gen_lookup_ops.lookup_table_import_v2(
             self.resource_handle,
-            restored_tensors["table-keys"],
-            restored_tensors["table-values"])
+            restored_tensors["-keys"],
+            restored_tensors["-values"])
 
   # This class is needed for `DenseHashTable(checkpoint=True)`.
   class _Saveable(BaseSaverBuilder.SaveableObject):

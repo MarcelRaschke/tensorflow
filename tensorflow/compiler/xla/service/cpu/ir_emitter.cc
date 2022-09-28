@@ -51,6 +51,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/primitive_util.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/collective_ops_utils.h"
+#include "tensorflow/compiler/xla/service/cpu/backend_config.pb.h"
 #include "tensorflow/compiler/xla/service/cpu/cpu_options.h"
 #include "tensorflow/compiler/xla/service/cpu/cpu_runtime.h"
 #include "tensorflow/compiler/xla/service/cpu/dot_op_emitter.h"
@@ -81,7 +82,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/core/lib/math/math_util.h"
-#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/tsl/platform/logging.h"
 
 namespace xla {
 
@@ -173,9 +174,12 @@ StatusOr<llvm::Function*> IrEmitter::EmitComputation(
   is_top_level_computation_ = is_top_level_computation;
   allow_reassociation_ = allow_reassociation;
   num_dynamic_loop_bounds_ = 0;
-  if (!computation->root_instruction()->outer_dimension_partitions().empty()) {
+  auto backend_config_or =
+      computation->root_instruction()->backend_config<BackendConfig>();
+  if (backend_config_or.ok() &&
+      !backend_config_or->outer_dimension_partitions().empty()) {
     num_dynamic_loop_bounds_ =
-        computation->root_instruction()->outer_dimension_partitions().size();
+        backend_config_or->outer_dimension_partitions().size();
   }
 
   if (computation->root_instruction()->opcode() != HloOpcode::kOutfeed) {
@@ -597,8 +601,11 @@ Status IrEmitter::HandleSort(HloInstruction* hlo) {
   // Normalize the shape and the dimension to sort.
   Shape normalized_keys_shape =
       ShapeUtil::MakeShapeWithDescendingLayoutAndSamePhysicalLayout(keys_shape);
-  int64_t physical_dimension_to_sort = LayoutUtil::MakeLogicalToPhysical(
-      keys_shape.layout())[sort->sort_dimension()];
+  auto logical_to_physical =
+      LayoutUtil::MakeLogicalToPhysical(keys_shape.layout());
+  TF_RET_CHECK(sort->sort_dimension() < logical_to_physical.size());
+  int64_t physical_dimension_to_sort =
+      logical_to_physical[sort->sort_dimension()];
 
   int64_t sort_dimension_elements =
       normalized_keys_shape.dimensions(physical_dimension_to_sort);
@@ -993,6 +1000,7 @@ Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
       bool use_mkl_dnn =
           hlo_module_config_.debug_options().xla_cpu_use_mkl_dnn() &&
           convolution->feature_group_count() == 1;
+      bool use_acl = hlo_module_config_.debug_options().xla_cpu_use_acl();
 
       auto valid_num_dims = [](absl::Span<const int64_t> xs) {
         return xs.size() >= 2 && xs.size() <= 3;
@@ -1015,8 +1023,10 @@ Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
                        ? runtime::kEigenConv2DF16SymbolName
                        : runtime::kEigenSingleThreadedConv2DF16SymbolName)
                 : (multi_threaded
-                       ? (use_mkl_dnn ? runtime::kMKLConv2DF32SymbolName
-                                      : runtime::kEigenConv2DF32SymbolName)
+                       ? (use_mkl_dnn
+                              ? runtime::kMKLConv2DF32SymbolName
+                              : (use_acl ? runtime::kACLConv2DF32SymbolName
+                                         : runtime::kEigenConv2DF32SymbolName))
                        : runtime::kEigenSingleThreadedConv2DF32SymbolName);
       } else if (input_dims.size() == 3) {
         fn_name =
@@ -1067,6 +1077,8 @@ Status IrEmitter::HandleConvolution(HloInstruction* convolution) {
         args.push_back(b_.getInt64(d));
       }
       args.push_back(b_.getInt64(convolution->feature_group_count()));
+
+      VLOG(1) << "Ir emitter emitted Convolution to runtime:" << fn_name;
       EmitCallToFunc(fn_name, args, b_.getVoidTy(), /*does_not_throw=*/true,
                      /*only_accesses_arg_memory=*/true);
 
@@ -1180,6 +1192,8 @@ Status IrEmitter::HandleAllReduceMultipleReplica(HloInstruction* crs) {
       case F16:
       case F32:
       case F64:
+      case C64:
+      case C128:
         return true;
       default:
         return false;
@@ -2223,7 +2237,10 @@ Status IrEmitter::HandleCall(HloInstruction* call) {
 
   TF_RETURN_IF_ERROR(EmitTargetAddressForOp(call));
 
-  if (!computation->root_instruction()->outer_dimension_partitions().empty()) {
+  auto backend_config_or =
+      computation->root_instruction()->backend_config<BackendConfig>();
+  if (backend_config_or.ok() &&
+      !backend_config_or->outer_dimension_partitions().empty()) {
     // Having a nonempty set of 'outer_dimension_partitions' means that this
     // computation has been specially selected to be parallelized (one where the
     // root instruction is trivially parallelizable, like elementwise addition
@@ -2244,8 +2261,9 @@ Status IrEmitter::HandleCall(HloInstruction* call) {
     // each call such that it only generates one partition of the output.
     HloInstruction* root = computation->root_instruction();
     TF_RETURN_IF_ERROR(EmitCallToParallelForkJoin(
-        call_args, root->shape(), root->outer_dimension_partitions(), &b_,
-        call_ir_function, computation->name()));
+        call_args, root->shape(),
+        backend_config_or->outer_dimension_partitions(), &b_, call_ir_function,
+        computation->name()));
 
     if (ComputationTransitivelyContainsCustomCall(computation)) {
       EmitEarlyReturnIfErrorStatus();
@@ -2517,9 +2535,9 @@ Status IrEmitter::HandleWhile(HloInstruction* xla_while) {
         auto check = [this](const HloInstruction* a, const HloInstruction* b,
                             const ShapeIndex& index) {
           const BufferAllocation::Slice slice_a =
-              assignment_.GetUniqueSlice(a, index).ConsumeValueOrDie();
+              assignment_.GetUniqueSlice(a, index).value();
           const BufferAllocation::Slice slice_b =
-              assignment_.GetUniqueSlice(b, index).ConsumeValueOrDie();
+              assignment_.GetUniqueSlice(b, index).value();
           if (slice_a != slice_b) {
             return InternalError(
                 "instruction %s %s does not share slice with "
@@ -3524,7 +3542,7 @@ llvm::Value* IrEmitter::GetBufferForGlobalCallReturnValue(
   }
 
   const BufferAllocation::Slice root_buffer =
-      assignment_.GetUniqueTopLevelSlice(root_inst).ValueOrDie();
+      assignment_.GetUniqueTopLevelSlice(root_inst).value();
   return EmitBufferPointer(root_buffer, root_inst->shape());
 }
 

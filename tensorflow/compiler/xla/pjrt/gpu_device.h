@@ -25,7 +25,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/pjrt/distributed/client.h"
 #include "tensorflow/compiler/xla/pjrt/pjrt_stream_executor_client.h"
 #include "tensorflow/compiler/xla/statusor.h"
-#include "tensorflow/core/common_runtime/bfc_allocator.h"
 
 namespace xla {
 
@@ -36,10 +35,11 @@ class GpuDevice : public PjRtStreamExecutorDevice {
 
   absl::string_view device_vendor();
 
-  std::string ToString() const override;
+  absl::string_view ToString() const override;
 
  private:
   std::string device_vendor_;
+  std::string to_string_;
 };
 
 struct GpuAllocatorConfig {

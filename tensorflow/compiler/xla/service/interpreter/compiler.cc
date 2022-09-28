@@ -20,6 +20,7 @@ limitations under the License.
 #include <utility>
 
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
+#include "tensorflow/compiler/xla/service/batchnorm_expander.h"
 #include "tensorflow/compiler/xla/service/cholesky_expander.h"
 #include "tensorflow/compiler/xla/service/comparison_expander.h"
 #include "tensorflow/compiler/xla/service/computation_placer.h"
@@ -87,6 +88,10 @@ Status InterpreterCompiler::RunHloOptimization(HloModule* hlo_module) {
   pipeline.AddPass<EighExpander>();
   pipeline.AddPass<ComparisonExpander>();
   pipeline.AddPass<TriangularSolveExpander>();
+  pipeline.AddPass<BatchNormExpander>(
+      /*rewrite_training_op=*/true,
+      /*rewrite_inference_op=*/true,
+      /*rewrite_grad_op=*/true);
   pipeline.AddPass<LayoutAssignment>(
       hlo_module->mutable_entry_computation_layout());
 
@@ -133,12 +138,11 @@ StatusOr<std::vector<std::unique_ptr<Executable>>> InterpreterCompiler::Compile(
     return std::vector<std::unique_ptr<Executable>>();
   }
   if (module_group->size() > 1) {
-    return tensorflow::errors::Unimplemented(
+    return tsl::errors::Unimplemented(
         "Compilation of multiple HLO modules is not supported on Interpreter.");
   }
   if (stream_exec.size() != 1 || stream_exec[0].size() != 1) {
-    return tensorflow::errors::Unimplemented(
-        "Unexpected number of StreamExecutor's.");
+    return tsl::errors::Unimplemented("Unexpected number of StreamExecutor's.");
   }
   auto hlo_modules = module_group->ConsumeModules();
   TF_ASSIGN_OR_RETURN(auto module, RunHloPasses(std::move(hlo_modules[0]),
@@ -154,7 +158,7 @@ StatusOr<std::vector<std::unique_ptr<AotCompilationResult>>>
 InterpreterCompiler::CompileAheadOfTime(
     std::unique_ptr<HloModuleGroup> module_group,
     const AotCompilationOptions& aot_options) {
-  return tensorflow::errors::InvalidArgument(
+  return tsl::errors::InvalidArgument(
       "AOT compilation not supported on Interpreter");
 }
 

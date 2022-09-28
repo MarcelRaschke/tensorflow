@@ -15,6 +15,9 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/status_macros.h"
 
+#include <functional>
+#include <utility>
+
 #include "tensorflow/compiler/xla/statusor.h"
 #include "tensorflow/compiler/xla/test.h"
 #include "tensorflow/compiler/xla/test_helpers.h"
@@ -59,7 +62,7 @@ TEST(StatusMacros, RetCheckSucceeding) {
 StatusOr<int> CreateIntSuccessfully() { return 42; }
 
 StatusOr<int> CreateIntUnsuccessfully() {
-  return tensorflow::errors::Internal("foobar");
+  return tsl::errors::Internal("foobar");
 }
 
 TEST(StatusMacros, AssignOrAssertOnOK) {
@@ -69,7 +72,7 @@ TEST(StatusMacros, AssignOrAssertOnOK) {
 
 Status ReturnStatusOK() { return OkStatus(); }
 
-Status ReturnStatusError() { return (tensorflow::errors::Internal("foobar")); }
+Status ReturnStatusError() { return (tsl::errors::Internal("foobar")); }
 
 using StatusReturningFunction = std::function<Status()>;
 
@@ -81,7 +84,7 @@ StatusOr<int> CallStatusReturningFunction(const StatusReturningFunction& func) {
 TEST(StatusMacros, ReturnIfErrorOnOK) {
   StatusOr<int> rc = CallStatusReturningFunction(ReturnStatusOK);
   EXPECT_IS_OK(rc);
-  EXPECT_EQ(42, rc.ConsumeValueOrDie());
+  EXPECT_EQ(42, std::move(rc).value());
 }
 
 TEST(StatusMacros, ReturnIfErrorOnError) {

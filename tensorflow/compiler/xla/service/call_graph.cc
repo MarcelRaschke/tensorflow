@@ -26,7 +26,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/lib/core/status.h"
+#include "tensorflow/tsl/platform/status.h"
 
 namespace xla {
 
@@ -56,10 +56,10 @@ CallContext GetInstructionCallContext(HloOpcode opcode) {
     case HloOpcode::kCall:
     case HloOpcode::kConditional:
     case HloOpcode::kWhile:
-      return CallContext::kControlFlow;
     case HloOpcode::kAsyncStart:
     case HloOpcode::kAsyncUpdate:
     case HloOpcode::kAsyncDone:
+      return CallContext::kControlFlow;
     case HloOpcode::kAllReduce:
     case HloOpcode::kReduceScatter:
     case HloOpcode::kAllReduceStart:
@@ -363,6 +363,7 @@ bool CallGraph::IsFlattened() const {
       return false;
     }
     if (node.context() == CallContext::kControlFlow &&
+        !node.computation()->IsAsyncComputation() &&
         node.caller_callsites().size() > 1) {
       return false;
     }
@@ -371,7 +372,7 @@ bool CallGraph::IsFlattened() const {
 }
 
 std::vector<HloInstruction*> CallGraph::GetComputationCallers(
-    HloComputation* c) {
+    HloComputation* c) const {
   std::vector<HloInstruction*> callers;
   for (const auto& callsite : GetNode(c).caller_callsites()) {
     callers.push_back(callsite.instruction());

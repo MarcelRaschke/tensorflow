@@ -65,7 +65,9 @@ static bool IsOrContainsIllegalInstr(const HloInstruction* instr) {
 
 /*static*/ std::atomic<int64_t> HloConstantFolding::slow_op_counter_{0};
 
-StatusOr<bool> HloConstantFolding::Run(HloModule* module) {
+StatusOr<bool> HloConstantFolding::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   // Limit the constant folding to 0 iterations to skip folding loops. This
   // retains the behavior from before while loop support in HloEvaluator and may
   // be revised.
@@ -75,8 +77,9 @@ StatusOr<bool> HloConstantFolding::Run(HloModule* module) {
 
   bool changed = false;
 
-  for (auto* computation : module->MakeNonfusionComputations()) {
-    for (auto instruction : computation->MakeInstructionPostOrder()) {
+  for (auto* computation :
+       module->MakeNonfusionComputations(execution_threads)) {
+    for (auto* instruction : computation->MakeInstructionPostOrder()) {
       // Skip dead code.
       if (instruction->IsDead()) {
         continue;
@@ -134,6 +137,14 @@ StatusOr<bool> HloConstantFolding::Run(HloModule* module) {
         continue;
       }
 
+      // Don't fold across async execution thread if it's not supposed to be
+      // changed by this pass.
+      if (instruction->IsAsynchronous() &&
+          instruction->async_execution_thread() !=
+              instruction->parent()->execution_thread()) {
+        continue;
+      }
+
       // Do not fold FFT. Evaluating it may significantly increase compile time.
       if (instruction->opcode() == HloOpcode::kFft) {
         continue;
@@ -174,7 +185,23 @@ StatusOr<bool> HloConstantFolding::Run(HloModule* module) {
 
       absl::Duration slow_timeout =
           absl::Seconds(uint64_t{1} << slow_op_counter_.load());
-      SlowOperationAlarm slow_alarm(slow_timeout, [instruction, slow_timeout] {
+      // We cannot call `instruction->ToString() within the callback, because
+      // the instruction may be modified and invalidated in place, and ToString
+      // will fail if the compilation is slow. We probably do not want to
+      // call `ToString()` for all the instructions, thus, we only display the
+      // name by default.
+      std::string instruction_msg;
+      if (VLOG_IS_ON(4)) {
+        instruction_msg = instruction->ToString();
+      } else {
+        instruction_msg =
+            absl::StrCat(instruction->name(),
+                         " (displaying the full instruction incurs a runtime "
+                         "overhead. Raise your logging level to 4 or above).");
+      }
+      SlowOperationAlarm slow_alarm(slow_timeout, [instruction_msg = std::move(
+                                                       instruction_msg),
+                                                   slow_timeout] {
         const bool ndebug =
 #if NDEBUG
             true;
@@ -195,9 +222,9 @@ StatusOr<bool> HloConstantFolding::Run(HloModule* module) {
                   "slow.  Try rebuilding with -c opt.";
         return absl::StrFormat(
             "Constant folding an instruction is taking > %s:\n\n"
-            "  %s\n\n"  // instruction->ToString()
+            "  %s\n\n"  // instruction->name() or instruction->ToString()
             "%s",       // explanation_msg
-            absl::FormatDuration(slow_timeout), instruction->ToString(),
+            absl::FormatDuration(slow_timeout), instruction_msg,
             explanation_msg);
       });
 

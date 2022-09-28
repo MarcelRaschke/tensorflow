@@ -20,27 +20,32 @@ limitations under the License.
 #include <functional>
 #include <memory>
 #include <numeric>
+#include <optional>
 #include <string>
 #include <utility>
 
 #include "absl/algorithm/container.h"
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/flat_hash_set.h"
+#include "absl/container/inlined_vector.h"
 #include "absl/strings/escaping.h"
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "absl/strings/str_split.h"
+#include "absl/strings/string_view.h"
 #include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/primitive_util.h"
+#include "tensorflow/compiler/xla/protobuf_util.h"
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor.h"
 #include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
+#include "tensorflow/compiler/xla/service/hlo_clone_context.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_sharding_metadata.h"
 #include "tensorflow/compiler/xla/window_util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/platform/protobuf.h"
+#include "tensorflow/tsl/platform/protobuf.h"
 
 namespace xla {
 namespace {
@@ -79,6 +84,28 @@ std::string PrecisionConfigToString(const PrecisionConfig& precision_config) {
           }),
       "}");
 }
+
+void SetThreadName(HloComputation* called_computation,
+                   absl::string_view execution_thread,
+                   bool skip_async_execution_thread_overwrite) {
+  called_computation->SetExecutionThread(execution_thread);
+  for (HloInstruction* instr : called_computation->instructions()) {
+    if (instr->IsAsynchronous()) {
+      if (!skip_async_execution_thread_overwrite) {
+        // Set async instruction thread name and also recursively set async
+        // computations.
+        instr->set_async_execution_thread(execution_thread);
+      }
+      continue;
+    }
+    for (HloComputation* nested_called_computation :
+         instr->called_computations()) {
+      SetThreadName(nested_called_computation, execution_thread,
+                    skip_async_execution_thread_overwrite);
+    }
+  }
+}
+
 }  // namespace
 
 HloBatchNormInstruction::HloBatchNormInstruction(
@@ -216,8 +243,11 @@ std::unique_ptr<HloInstruction> HloFftInstruction::CloneWithNewOperandsImpl(
 HloAsyncInstruction::HloAsyncInstruction(
     HloOpcode opcode, const Shape& shape,
     absl::Span<HloInstruction* const> operands,
-    HloComputation* async_computation)
-    : HloInstruction(opcode, shape) {
+    HloComputation* async_computation, std::optional<int64_t> async_group_id,
+    absl::string_view async_execution_thread)
+    : HloInstruction(opcode, shape),
+      async_group_id_(async_group_id),
+      async_execution_thread_(async_execution_thread) {
   CHECK(opcode == HloOpcode::kAsyncStart || operands.size() == 1);
   for (auto operand : operands) {
     AppendOperand(operand);
@@ -226,17 +256,22 @@ HloAsyncInstruction::HloAsyncInstruction(
   CHECK(!async_computation->IsCustomCallComputation());
   CHECK(!async_computation->IsFusionComputation());
   async_computation->AddAsyncInstruction(this);
+  set_async_execution_thread(async_execution_thread);
 }
 
-HloAsyncInstruction::HloAsyncInstruction(HloOpcode opcode, const Shape& shape,
-                                         HloInstruction* operand,
-                                         HloComputation* async_computation)
-    : HloInstruction(opcode, shape) {
+HloAsyncInstruction::HloAsyncInstruction(
+    HloOpcode opcode, const Shape& shape, HloInstruction* operand,
+    HloComputation* async_computation, std::optional<int64_t> async_group_id,
+    absl::string_view async_execution_thread)
+    : HloInstruction(opcode, shape),
+      async_group_id_(async_group_id),
+      async_execution_thread_(async_execution_thread) {
   AppendOperand(operand);
   AppendComputation(async_computation);
   CHECK(!async_computation->IsCustomCallComputation());
   CHECK(!async_computation->IsFusionComputation());
   async_computation->AddAsyncInstruction(this);
+  set_async_execution_thread(async_execution_thread);
 }
 
 HloAsyncInstruction::~HloAsyncInstruction() {
@@ -269,10 +304,20 @@ HloOpcode HloAsyncInstruction::async_wrapped_opcode() const {
 
 std::vector<std::string> HloAsyncInstruction::ExtraAttributesToStringImpl(
     const HloPrintOptions& options) const {
-  if (options.syntax_sugar_async_ops()) {
-    return async_wrapped_instruction()->ExtraAttributesToString(options);
+  std::vector<std::string> result;
+  if (async_group_id_.has_value()) {
+    result.push_back(StrCat("async_group_id=", *async_group_id_));
   }
-  return {};
+  if (async_execution_thread_ != kMainExecutionThread) {
+    result.push_back(
+        StrCat("async_execution_thread=\"", async_execution_thread_, "\""));
+  }
+  if (options.syntax_sugar_async_ops()) {
+    std::vector<std::string> wrapped_extra_attributes =
+        async_wrapped_instruction()->ExtraAttributesToString(options);
+    absl::c_copy(wrapped_extra_attributes, std::back_inserter(result));
+  }
+  return result;
 }
 
 bool HloAsyncInstruction::IdenticalSlowPath(
@@ -297,8 +342,31 @@ std::unique_ptr<HloInstruction> HloAsyncInstruction::CloneWithNewOperandsImpl(
     new_wrapped_computation = module->AddEmbeddedComputation(
         async_wrapped_computation()->Clone("clone", context));
   }
-  return std::make_unique<HloAsyncInstruction>(opcode(), shape, new_operands,
-                                               new_wrapped_computation);
+  return std::make_unique<HloAsyncInstruction>(
+      opcode(), shape, new_operands, new_wrapped_computation, async_group_id_,
+      async_execution_thread_);
+}
+
+void HloAsyncInstruction::set_async_group_id(
+    std::optional<int64_t> async_group_id) {
+  async_group_id_ = async_group_id;
+}
+
+void HloAsyncInstruction::set_async_execution_thread(
+    absl::string_view async_execution_thread) {
+  async_execution_thread_ = std::string(async_execution_thread);
+  SetThreadName(async_wrapped_computation(), async_execution_thread,
+                /*skip_async_execution_thread_overwrite=*/false);
+}
+
+HloInstructionProto HloAsyncInstruction::ToProto() const {
+  HloInstructionProto proto = HloInstruction::ToProto();
+  proto.set_async_group_id(async_group_id_.has_value() ? *async_group_id_ : -1);
+  proto.set_async_execution_thread(async_execution_thread_ ==
+                                           HloInstruction::kMainExecutionThread
+                                       ? ""
+                                       : async_execution_thread_);
+  return proto;
 }
 
 HloCopyStartInstruction::HloCopyStartInstruction(const Shape& shape,
@@ -399,23 +467,23 @@ namespace {
 // Currently implements a small subset of cases; feel free to add more as
 // needed.
 std::vector<std::string> AttributeProtoToStringVector(
-    const tensorflow::protobuf::Message& message) {
-  const tensorflow::protobuf::Reflection* reflection = message.GetReflection();
-  std::vector<const tensorflow::protobuf::FieldDescriptor*> fields;
+    const tsl::protobuf::Message& message) {
+  const tsl::protobuf::Reflection* reflection = message.GetReflection();
+  std::vector<const tsl::protobuf::FieldDescriptor*> fields;
   reflection->ListFields(message, &fields);
 
   std::vector<std::string> output;
-  for (const tensorflow::protobuf::FieldDescriptor* field : fields) {
+  for (const tsl::protobuf::FieldDescriptor* field : fields) {
     std::string s = absl::StrCat(field->name(), "=");
     CHECK(!field->is_repeated()) << "Repeated fields aren't implemented";
     switch (field->type()) {
-      case tensorflow::protobuf::FieldDescriptor::TYPE_BOOL: {
+      case tsl::protobuf::FieldDescriptor::TYPE_BOOL: {
         bool val = reflection->GetBool(message, field);
         absl::StrAppend(&s, val ? "true" : "false");
         break;
       }
-      case tensorflow::protobuf::FieldDescriptor::TYPE_ENUM: {
-        const tensorflow::protobuf::EnumValueDescriptor* evd =
+      case tsl::protobuf::FieldDescriptor::TYPE_ENUM: {
+        const tsl::protobuf::EnumValueDescriptor* evd =
             reflection->GetEnum(message, field);
         absl::StrAppend(&s, evd->name());
         break;
@@ -1473,36 +1541,299 @@ std::string HloConstantInstruction::OperandsToStringWithCanonicalNameMap(
   }
 }
 
+HloCallableInstruction::HloCallableInstruction(HloOpcode opcode,
+                                               const Shape& shape)
+    : HloInstruction(opcode, shape) {}
+
+HloCallableInstruction::HloCallableInstruction(
+    HloOpcode opcode, const Shape& shape,
+    absl::Span<HloInstruction* const> operands)
+    : HloInstruction(opcode, shape) {
+  for (auto operand : operands) {
+    AppendOperand(operand);
+  }
+  SetAndSanitizeName(HloOpcodeString(opcode));
+}
+
+HloCallableInstruction::HloCallableInstruction(
+    HloOpcode opcode, const Shape& shape,
+    absl::Span<HloInstruction* const> operands,
+    HloComputation* called_computation, absl::string_view prefix)
+    : HloInstruction(opcode, shape) {
+  for (auto operand : operands) {
+    AppendOperand(operand);
+  }
+  SetAndSanitizeName(std::string(prefix) + HloOpcodeString(opcode));
+  AppendComputation(called_computation);
+}
+
+HloCallableInstruction::HloCallableInstruction(
+    HloOpcode opcode, const Shape& shape,
+    absl::Span<HloInstruction* const> operands,
+    absl::Span<HloComputation* const> called_computations)
+    : HloInstruction(opcode, shape) {
+  for (auto operand : operands) {
+    AppendOperand(operand);
+  }
+  SetAndSanitizeName(HloOpcodeString(opcode));
+  for (auto called_computation : called_computations) {
+    AppendComputation(called_computation);
+  }
+}
+
+HloCallableInstruction::~HloCallableInstruction() { ClearCalledComputations(); }
+
+HloComputation* HloCallableInstruction::called_computation() const {
+  CHECK(!called_computations().empty());
+  return called_computations().front();
+}
+
+HloInstruction* HloCallableInstruction::called_computation_root() const {
+  return called_computation()->root_instruction();
+}
+
+HloInstruction* HloCallableInstruction::AddCallOperand(
+    HloInstruction* new_operand) {
+  CHECK_EQ(operand_count(),
+           called_computation()->parameter_instructions().size());
+  const int64_t param_no = operand_count();
+  std::string param_name = StrCat("param_", param_no);
+  HloInstruction* called_computation_parameter =
+      called_computation()->AddParameter(HloInstruction::CreateParameter(
+          param_no, new_operand->shape(), param_name));
+  AppendOperand(new_operand);
+  return called_computation_parameter;
+}
+
+HloInstruction* HloCallableInstruction::AppendInstructionIntoCalledComputation(
+    HloInstruction* instruction_to_append, bool add_output) {
+  // When add_output is false, this callable instruction must be a user of
+  // instruction_to_append.
+  if (!add_output) {
+    CHECK(IsUserOf(instruction_to_append));
+  }
+  return CloneAndAppendInstructionIntoCalledComputation(instruction_to_append,
+                                                        add_output);
+}
+
+HloInstruction*
+HloCallableInstruction::CloneAndAppendInstructionIntoCalledComputation(
+    HloInstruction* instruction_to_append, bool add_output) {
+  CHECK(instruction_to_append->IsFusible())
+      << instruction_to_append->ToString();
+  VLOG(3) << "CloneAndAppendInstructionIntoCalledComputation:\n"
+          << instruction_to_append->ToString();
+  HloInstruction* clone = nullptr;
+  bool do_not_clone =
+      instruction_to_append->opcode() == HloOpcode::kTuple &&
+      std::find_if(instruction_to_append->users().begin(),
+                   instruction_to_append->users().end(), [](HloInstruction* u) {
+                     return u->opcode() != HloOpcode::kGetTupleElement;
+                   }) == instruction_to_append->users().end();
+  if (called_computations().empty()) {
+    // New fusion instruction. It should not be a multioutput instruction.
+    CHECK(!add_output);
+    auto builder = HloComputation::Builder(
+        default_called_computation_name(),
+        opcode() == HloOpcode::kFusion ? this : nullptr);
+    builder.AddInstruction(instruction_to_append->Clone(/*suffix=*/""));
+    AppendComputation(
+        CHECK_NOTNULL(GetModule())->AddEmbeddedComputation(builder.Build()));
+    clone = called_computation_root();
+  } else {
+    // When add_output is false, instruction_to_append is necessarily an operand
+    // of the callable instruction. After appending this will no longer be the
+    // case. Remove the operand from the operand list and remove its
+    // corresponding called computation parameter instruction.
+    bool in_operand_list =
+        absl::c_linear_search(operands(), instruction_to_append);
+    CHECK(add_output || in_operand_list);
+    if (do_not_clone) {
+      // We assume all uses of a kTuple operation are GTE ops. In this case, we
+      // don't need to clone 'instruction_to_append'.
+      CHECK(!in_operand_list);
+      clone = instruction_to_append;
+    } else {
+      clone = called_computation()->AddInstruction(
+          instruction_to_append->Clone(/*suffix=*/""));
+    }
+    const std::vector<HloInstruction*>& called_computation_parameters =
+        called_computation()->parameter_instructions();
+    for (int64_t operand_num = 0; operand_num < operand_count();
+         ++operand_num) {
+      if (instruction_to_append == operand(operand_num)) {
+        // Replace the called computation parameter instruction's uses with the
+        // clone.
+        HloInstruction* called_computation_parameter =
+            called_computation_parameters[operand_num];
+        TF_CHECK_OK(called_computation_parameter->ReplaceAllUsesWith(clone));
+
+        // Remove the corresponding called computation parameter and operand
+        // from their respective vectors.
+        TF_CHECK_OK(called_computation()->RemoveParameter(operand_num));
+        RemoveOperandAt(operand_num);
+        break;
+      }
+    }
+    // We've cloned instruction_to_append into this callable instruction, so
+    // this callable instruction is no longer a use of instruction_to_append.
+    if (in_operand_list) {
+      DetachFrom(instruction_to_append);
+      // When the instruction_to_append does not have other users, we don't need
+      // to generate a multioutput instruction.
+      if (instruction_to_append->user_count() == 0) {
+        add_output = false;
+      }
+    }
+  }
+
+  // Reread the parameters in the computation.
+  const std::vector<HloInstruction*>& called_computation_parameters =
+      called_computation()->parameter_instructions();
+
+  // Add each operand of the clone as an operand of the callable instruction. A
+  // complication is that some clone operands may already be operands of the
+  // callable instruction.
+  for (int64_t operand_num = 0; operand_num < clone->operand_count();
+       ++operand_num) {
+    HloInstruction* operand = clone->mutable_operand(operand_num);
+
+    // See if this operand is already an operand of the callable instruction.
+    CHECK_EQ(operands().size(), called_computation_parameters.size());
+    HloInstruction* called_computation_parameter = nullptr;
+    for (int64_t i = 0; i < operands().size(); ++i) {
+      if (this->operand(i) == operand) {
+        called_computation_parameter = called_computation_parameters[i];
+        break;
+      }
+    }
+
+    if (called_computation_parameter == nullptr) {
+      // Clone's operand was not already an operand of the callable instruction.
+      // Add it as an operand and add a corresponding called computation
+      // parameter instruction.
+      called_computation_parameter = AddCallOperand(operand);
+    }
+    TF_CHECK_OK(
+        clone->ReplaceOperandWith(operand_num, called_computation_parameter));
+  }
+
+  if (add_output) {
+    CHECK_GT(instruction_to_append->user_count(), 0);
+    // If this is already a multioutput instruction, expand the root tuple by 1.
+    HloInstruction* root = called_computation_root();
+    HloInstruction::InstructionVector tuple_elements;
+    bool newly_created_tuple_instr = false;
+    if (root->opcode() == HloOpcode::kTuple) {
+      tuple_elements = root->operands();
+    } else {
+      tuple_elements.push_back(root);
+      newly_created_tuple_instr = true;
+    }
+    if (clone->opcode() == HloOpcode::kTuple) {
+      for (auto inst : clone->operands()) {
+        tuple_elements.push_back(inst);
+      }
+    } else {
+      tuple_elements.push_back(clone);
+    }
+    HloInstruction* new_root = called_computation()->AddInstruction(
+        HloInstruction::CreateTuple(tuple_elements));
+    called_computation()->set_root_instruction(new_root,
+                                               /*accept_different_shape=*/true);
+    *mutable_shape() = new_root->shape();
+    if (root->opcode() == HloOpcode::kTuple) {
+      TF_CHECK_OK(called_computation()->RemoveInstruction(root));
+    }
+
+    // If this is a newly created multioutput instruction, we need to update
+    // the use of the original callable instruction.
+    if (newly_created_tuple_instr) {
+      HloInstruction* new_instr = parent()->AddInstruction(
+          HloInstruction::CreateGetTupleElement(root->shape(), this, 0));
+      TF_CHECK_OK(ReplaceAllUsesWithDifferentShape(new_instr));
+    }
+    int64_t index = tuple_elements.size();
+    if (do_not_clone) {
+      CHECK_EQ(clone, instruction_to_append);
+      index -= instruction_to_append->operand_count();
+      std::vector<HloInstruction*> to_be_removed;
+      const auto& users = instruction_to_append->users();
+      to_be_removed.reserve(users.size());
+      for (auto old_gte : users) {
+        CHECK_EQ(old_gte->opcode(), HloOpcode::kGetTupleElement);
+        int64_t old_tuple_index = old_gte->tuple_index();
+        HloInstruction* new_gte =
+            parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
+                old_gte->shape(), this, index + old_tuple_index));
+        TF_CHECK_OK(old_gte->ReplaceAllUsesWith(new_gte));
+        to_be_removed.push_back(old_gte);
+      }
+      for (auto old_gte : to_be_removed) {
+        TF_CHECK_OK(parent()->RemoveInstruction(old_gte));
+      }
+    } else {
+      HloInstruction* new_gte =
+          parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
+              clone->shape(), this, index - 1));
+      TF_CHECK_OK(instruction_to_append->ReplaceAllUsesWith(new_gte));
+    }
+  }
+
+  if (clone != instruction_to_append) {
+    VLOG(2) << "New clone:\n" << clone->ToString();
+  }
+  return clone;
+}
+
+absl::InlinedVector<HloComputation*, 1>
+HloCallableInstruction::GetOrCloneCalledComputations(
+    HloCloneContext* context) const {
+  HloModule* module = context != nullptr ? context->module() : GetModule();
+  absl::InlinedVector<HloComputation*, 1> new_called_computations;
+  for (auto* comp : called_computations()) {
+    HloComputation* new_custom_call_computation = nullptr;
+    if (context != nullptr) {
+      new_custom_call_computation = context->FindComputation(comp);
+    }
+    if (new_custom_call_computation == nullptr) {
+      new_custom_call_computation =
+          module->AddEmbeddedComputation(comp->Clone("clone", context));
+    }
+    new_called_computations.push_back(new_custom_call_computation);
+  }
+  return new_called_computations;
+}
+
+void HloCallableInstruction::RecursivelySetComputationsThreadName(
+    absl::string_view execution_thread,
+    bool skip_async_execution_thread_overwrite) {
+  for (HloComputation* comp : called_computations()) {
+    SetThreadName(comp, execution_thread,
+                  skip_async_execution_thread_overwrite);
+  }
+}
+
 HloFusionInstruction::HloFusionInstruction(const Shape& shape,
                                            FusionKind fusion_kind,
                                            HloInstruction* fused_root)
-    : HloInstruction(HloOpcode::kFusion, shape), fusion_kind_(fusion_kind) {
+    : HloCallableInstruction(HloOpcode::kFusion, shape),
+      fusion_kind_(fusion_kind) {
   CHECK(fused_root != nullptr);
-  std::string fusion_name = [&] {
-    if (fusion_kind == FusionKind::kInput) {
-      return absl::StrCat("input_fusion_",
-                          HloOpcodeString(fused_root->opcode()));
-
-    } else {
-      return std::string("fusion");
-    }
-  }();
-  SetAndSanitizeName(fusion_name);
+  SetAndSanitizeName(HloOpcodeString(opcode()));
   set_parent(fused_root->parent());
   set_metadata(fused_root->metadata());
-  CloneAndFuseInternal(fused_root);
+  CHECK(fused_root->IsFusible()) << fused_root->ToString();
+  CloneAndAppendInstructionIntoCalledComputation(fused_root);
 }
 
 HloFusionInstruction::HloFusionInstruction(
     const Shape& shape, FusionKind fusion_kind,
     absl::Span<HloInstruction* const> operands,
-    HloComputation* fusion_computation)
-    : HloInstruction(HloOpcode::kFusion, shape), fusion_kind_(fusion_kind) {
-  for (auto operand : operands) {
-    AppendOperand(operand);
-  }
-  SetAndSanitizeName("fusion");
-  AppendComputation(fusion_computation);
+    HloComputation* fusion_computation, absl::string_view prefix)
+    : HloCallableInstruction(HloOpcode::kFusion, shape, operands,
+                             fusion_computation, prefix),
+      fusion_kind_(fusion_kind) {
   fusion_computation->SetFusionInstruction(this);
 }
 
@@ -1588,16 +1919,7 @@ bool HloFusionInstruction::IsElementwiseImpl(
 
 HloInstruction* HloFusionInstruction::AddFusionOperand(
     HloInstruction* new_operand) {
-  CHECK_EQ(operand_count(),
-           fused_instructions_computation()->parameter_instructions().size());
-  const int64_t param_no = operand_count();
-  std::string param_name = StrCat("param_", param_no);
-  HloInstruction* fused_parameter =
-      fused_instructions_computation()->AddParameter(
-          HloInstruction::CreateParameter(param_no, new_operand->shape(),
-                                          param_name));
-  AppendOperand(new_operand);
-  return fused_parameter;
+  return AddCallOperand(new_operand);
 }
 
 void HloFusionInstruction::MergeFusionInstruction(
@@ -1661,7 +1983,7 @@ void HloFusionInstruction::MergeFusionInstruction(
     TF_CHECK_OK(instruction->parent()->RemoveInstruction(instruction));
   }
   CHECK_EQ(0, cloned_fusion->user_count());
-  TF_CHECK_OK(parent()->parent()->RemoveEmbeddedComputation(
+  TF_CHECK_OK(GetModule()->RemoveEmbeddedComputation(
       cloned_fusion->fused_instructions_computation()));
 }
 
@@ -1759,14 +2081,14 @@ const std::vector<HloInstruction*>& HloFusionInstruction::fused_parameters()
   return fused_instructions_computation()->parameter_instructions();
 }
 
-const tensorflow::gtl::iterator_range<UnwrappingIterator<
+const tsl::gtl::iterator_range<UnwrappingIterator<
     std::list<std::unique_ptr<HloInstruction>>::const_iterator>>
 HloFusionInstruction::fused_instructions() const {
   const HloComputation* subcomp = fused_instructions_computation();
   return subcomp->instructions();
 }
 
-const tensorflow::gtl::iterator_range<
+const tsl::gtl::iterator_range<
     UnwrappingIterator<std::list<std::unique_ptr<HloInstruction>>::iterator>>
 HloFusionInstruction::fused_instructions() {
   return fused_instructions_computation()->instructions();
@@ -1774,188 +2096,6 @@ HloFusionInstruction::fused_instructions() {
 
 int64_t HloFusionInstruction::fused_instruction_count() const {
   return fused_instructions_computation()->instruction_count();
-}
-
-HloInstruction* HloFusionInstruction::FuseInstructionInternal(
-    HloInstruction* instruction_to_fuse, bool add_output) {
-  // When add_output is false, this fusion instruction must be a user of
-  // instruction_to_fuse.
-  if (!add_output) {
-    CHECK(IsUserOf(instruction_to_fuse));
-  }
-  HloInstruction* fused_instruction =
-      CloneAndFuseInternal(instruction_to_fuse, add_output);
-  return fused_instruction;
-}
-
-HloInstruction* HloFusionInstruction::CloneAndFuseInternal(
-    HloInstruction* instruction_to_fuse, bool add_output) {
-  CHECK(instruction_to_fuse->IsFusible()) << instruction_to_fuse->ToString();
-  VLOG(3) << "CloneAndFuseInternal:\n" << instruction_to_fuse->ToString();
-  HloInstruction* clone = nullptr;
-  if (called_computations().empty()) {
-    // New fusion instruction. It should not be a multioutput instruction.
-    CHECK(!add_output);
-    std::string computation_name = [&] {
-      if (fusion_kind_ == FusionKind::kInput) {
-        return absl::StrCat("input_fused_computation_",
-                            HloOpcodeString(instruction_to_fuse->opcode()));
-
-      } else {
-        return std::string("fused_computation");
-      }
-    }();
-    auto builder = HloComputation::Builder(computation_name, this);
-    builder.AddInstruction(instruction_to_fuse->Clone(/*suffix=*/""));
-    AppendComputation(
-        CHECK_NOTNULL(GetModule())->AddEmbeddedComputation(builder.Build()));
-    clone = fused_expression_root();
-  } else {
-    // When add_output is false, instruction_to_fuse is necessarily an operand
-    // of the fusion instruction. After fusion this will no longer be the
-    // case. Remove the operand from the operand list and remove its
-    // corresponding fused parameter instruction. Renumber parameters as
-    // necessary to make parameter numbers consistent with their index in the
-    // fused_parameter_ vector.
-    bool in_operand_list =
-        absl::c_linear_search(operands(), instruction_to_fuse);
-    CHECK(add_output || in_operand_list);
-    if (instruction_to_fuse->opcode() == HloOpcode::kTuple) {
-      // We assume all uses of a kTuple operation are GTE ops, not another
-      // fusion node. In this case, we don't need to clone
-      // 'instruction_to_fuse'.
-      CHECK(!in_operand_list);
-      clone = instruction_to_fuse;
-    } else {
-      clone = fused_instructions_computation()->AddInstruction(
-          instruction_to_fuse->Clone(/*suffix=*/""));
-    }
-    const std::vector<HloInstruction*>& fused_parameters =
-        fused_instructions_computation()->parameter_instructions();
-    for (int64_t operand_num = 0; operand_num < operand_count();
-         ++operand_num) {
-      if (instruction_to_fuse == operand(operand_num)) {
-        // replace the fused parameter instruction's uses with the clone.
-        HloInstruction* fused_parameter = fused_parameters[operand_num];
-        TF_CHECK_OK(fused_parameter->ReplaceAllUsesWith(clone));
-
-        // Remove the corresponding fused parameter and operand from their
-        // respective vectors.
-        TF_CHECK_OK(
-            fused_instructions_computation()->RemoveParameter(operand_num));
-        RemoveOperandAt(operand_num);
-        break;
-      }
-    }
-    // We've cloned instruction_to_fuse into this fusion instruction, so this
-    // fusion instruction is no longer a use of instruction_to_fuse.
-    if (in_operand_list) {
-      DetachFrom(instruction_to_fuse);
-      // When the instruction_to_fuse does not have other users, we don't need
-      // to generate a multioutput fusion instruction.
-      if (instruction_to_fuse->user_count() == 0) {
-        add_output = false;
-      }
-    }
-  }
-
-  // Reread the parameters in the computation.
-  const std::vector<HloInstruction*>& fused_parameters =
-      fused_instructions_computation()->parameter_instructions();
-
-  // Add each operand of the clone as an operand of the fusion instruction. A
-  // complication is that some clone operands may already be operands of the
-  // fusion instruction.
-  for (int64_t operand_num = 0; operand_num < clone->operand_count();
-       ++operand_num) {
-    HloInstruction* operand = clone->mutable_operand(operand_num);
-
-    // See if this operand is already an operand of the fusion node.
-    CHECK_EQ(operands().size(), fused_parameters.size());
-    HloInstruction* fused_param = nullptr;
-    for (int64_t i = 0; i < operands().size(); ++i) {
-      if (this->operand(i) == operand) {
-        fused_param = fused_parameters[i];
-        break;
-      }
-    }
-
-    if (fused_param == nullptr) {
-      // Clone's operand was not already an operand of the fusion
-      // instruction. Add it as an operand and add a corresponding fused
-      // parameter instruction.
-      fused_param = AddFusionOperand(operand);
-    }
-    TF_CHECK_OK(clone->ReplaceOperandWith(operand_num, fused_param));
-  }
-
-  if (add_output) {
-    CHECK_GT(instruction_to_fuse->user_count(), 0);
-    // If this is already a multioutput fusion instruction, expand the root
-    // tuple by 1.
-    HloInstruction* fused_root = fused_expression_root();
-    HloInstruction::InstructionVector tuple_elements;
-    bool newly_created_tuple_instr = false;
-    if (fused_root->opcode() == HloOpcode::kTuple) {
-      tuple_elements = fused_root->operands();
-    } else {
-      tuple_elements.push_back(fused_root);
-      newly_created_tuple_instr = true;
-    }
-    if (clone->opcode() == HloOpcode::kTuple) {
-      for (auto inst : clone->operands()) {
-        tuple_elements.push_back(inst);
-      }
-    } else {
-      tuple_elements.push_back(clone);
-    }
-    HloInstruction* new_root = fused_instructions_computation()->AddInstruction(
-        HloInstruction::CreateTuple(tuple_elements));
-    fused_instructions_computation()->set_root_instruction(new_root);
-    *mutable_shape() = new_root->shape();
-    if (fused_root->opcode() == HloOpcode::kTuple) {
-      TF_CHECK_OK(
-          fused_instructions_computation()->RemoveInstruction(fused_root));
-    }
-
-    // If this is a newly created multioutput instruction, we need to update
-    // the use of the original fusion instruction.
-    if (newly_created_tuple_instr) {
-      HloInstruction* new_instr = parent()->AddInstruction(
-          HloInstruction::CreateGetTupleElement(fused_root->shape(), this, 0));
-      TF_CHECK_OK(ReplaceAllUsesWithDifferentShape(new_instr));
-    }
-    int64_t index = tuple_elements.size();
-    if (instruction_to_fuse->opcode() == HloOpcode::kTuple) {
-      CHECK_EQ(clone, instruction_to_fuse);
-      index -= clone->operand_count();
-      std::vector<HloInstruction*> to_be_removed;
-      const auto& users = clone->users();
-      to_be_removed.reserve(users.size());
-      for (auto old_gte : users) {
-        CHECK_EQ(old_gte->opcode(), HloOpcode::kGetTupleElement);
-        int64_t old_tuple_index = old_gte->tuple_index();
-        HloInstruction* new_gte =
-            parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
-                old_gte->shape(), this, index + old_tuple_index));
-        TF_CHECK_OK(old_gte->ReplaceAllUsesWith(new_gte));
-        to_be_removed.push_back(old_gte);
-      }
-      for (auto old_gte : to_be_removed) {
-        TF_CHECK_OK(parent()->RemoveInstruction(old_gte));
-      }
-    } else {
-      HloInstruction* new_gte =
-          parent()->AddInstruction(HloInstruction::CreateGetTupleElement(
-              clone->shape(), this, index - 1));
-      TF_CHECK_OK(instruction_to_fuse->ReplaceAllUsesWith(new_gte));
-    }
-  }
-
-  if (clone != instruction_to_fuse) {
-    VLOG(2) << "New clone:\n" << clone->ToString();
-  }
-  return clone;
 }
 
 std::vector<std::string> HloFusionInstruction::ExtraAttributesToStringImpl(
@@ -1975,18 +2115,10 @@ bool HloFusionInstruction::IdenticalSlowPath(
 std::unique_ptr<HloInstruction> HloFusionInstruction::CloneWithNewOperandsImpl(
     const Shape& shape, absl::Span<HloInstruction* const> new_operands,
     HloCloneContext* context) const {
-  HloModule* module = context != nullptr ? context->module() : GetModule();
-  HloComputation* new_fused_computation = nullptr;
-  if (context != nullptr) {
-    new_fused_computation =
-        context->FindComputation(fused_instructions_computation());
-  }
-  if (new_fused_computation == nullptr) {
-    new_fused_computation = module->AddEmbeddedComputation(
-        fused_instructions_computation()->Clone("clone", context));
-  }
+  auto new_fused_computation = GetOrCloneCalledComputations(context);
+  CHECK_EQ(new_fused_computation.size(), 1);
   return std::make_unique<HloFusionInstruction>(
-      shape, fusion_kind(), new_operands, new_fused_computation);
+      shape, fusion_kind(), new_operands, new_fused_computation.front());
 }
 
 Status HloFusionInstruction::DeduplicateFusionOperands() {
@@ -2013,6 +2145,22 @@ Status HloFusionInstruction::DeduplicateFusionOperands() {
   RemoveOperandsAtAscendingIndices(operands_to_remove);
   return OkStatus();
 }
+
+HloCallInstruction::HloCallInstruction(const Shape& shape,
+                                       HloInstruction* called_computation_root)
+    : HloCallableInstruction(HloOpcode::kCall, shape) {
+  CHECK(called_computation_root != nullptr);
+  SetAndSanitizeName(HloOpcodeString(opcode()));
+  set_parent(called_computation_root->parent());
+  set_metadata(called_computation_root->metadata());
+  CloneAndAppendInstructionIntoCalledComputation(called_computation_root);
+}
+
+HloCallInstruction::HloCallInstruction(
+    const Shape& shape, absl::Span<HloInstruction* const> operands,
+    HloComputation* called_computation)
+    : HloCallableInstruction(HloOpcode::kCall, shape, operands,
+                             called_computation) {}
 
 HloRngInstruction::HloRngInstruction(
     const Shape& shape, RandomDistribution distribution,
@@ -2498,7 +2646,7 @@ HloCustomCallInstruction::HloCustomCallInstruction(
     const Shape& shape, absl::Span<HloInstruction* const> operands,
     absl::string_view custom_call_target, std::string opaque,
     CustomCallApiVersion api_version)
-    : HloInstruction(HloOpcode::kCustomCall, shape),
+    : HloCallableInstruction(HloOpcode::kCustomCall, shape, operands),
       custom_call_target_(custom_call_target.begin(), custom_call_target.end()),
       feature_group_count_(1),
       batch_group_count_(1),
@@ -2508,16 +2656,13 @@ HloCustomCallInstruction::HloCustomCallInstruction(
       custom_call_schedule_(CustomCallSchedule::SCHEDULE_NONE),
       api_version_(api_version) {
   set_raw_backend_config_string(std::move(opaque));
-  for (auto operand : operands) {
-    AppendOperand(operand);
-  }
 }
 
 HloCustomCallInstruction::HloCustomCallInstruction(
     const Shape& shape, absl::Span<HloInstruction* const> operands,
     HloComputation* to_apply, absl::string_view custom_call_target,
     std::string opaque, CustomCallApiVersion api_version)
-    : HloInstruction(HloOpcode::kCustomCall, shape),
+    : HloCallableInstruction(HloOpcode::kCustomCall, shape, operands, to_apply),
       custom_call_target_(custom_call_target.begin(), custom_call_target.end()),
       feature_group_count_(1),
       batch_group_count_(1),
@@ -2527,10 +2672,6 @@ HloCustomCallInstruction::HloCustomCallInstruction(
       custom_call_schedule_(CustomCallSchedule::SCHEDULE_NONE),
       api_version_(api_version) {
   set_raw_backend_config_string(std::move(opaque));
-  for (auto operand : operands) {
-    AppendOperand(operand);
-  }
-  AppendComputation(to_apply);
   to_apply->SetCustomCallInstruction(this);
 }
 
@@ -2539,7 +2680,8 @@ HloCustomCallInstruction::HloCustomCallInstruction(
     absl::Span<HloComputation* const> called_computations,
     absl::string_view custom_call_target, std::string opaque,
     CustomCallApiVersion api_version)
-    : HloInstruction(HloOpcode::kCustomCall, shape),
+    : HloCallableInstruction(HloOpcode::kCustomCall, shape, operands,
+                             called_computations),
       custom_call_target_(custom_call_target.begin(), custom_call_target.end()),
       feature_group_count_(1),
       batch_group_count_(1),
@@ -2549,11 +2691,8 @@ HloCustomCallInstruction::HloCustomCallInstruction(
       custom_call_schedule_(CustomCallSchedule::SCHEDULE_NONE),
       api_version_(api_version) {
   set_raw_backend_config_string(std::move(opaque));
-  for (auto operand : operands) {
-    AppendOperand(operand);
-  }
   for (auto comp : called_computations) {
-    AppendComputation(comp);
+    comp->SetCustomCallInstruction(this);
   }
 }
 
@@ -2562,7 +2701,7 @@ HloCustomCallInstruction::HloCustomCallInstruction(
     absl::string_view custom_call_target, std::string opaque,
     absl::Span<const Shape> operand_shapes_with_layout,
     CustomCallApiVersion api_version)
-    : HloInstruction(HloOpcode::kCustomCall, shape),
+    : HloCallableInstruction(HloOpcode::kCustomCall, shape, operands),
       custom_call_target_(custom_call_target.begin(), custom_call_target.end()),
       feature_group_count_(1),
       batch_group_count_(1),
@@ -2574,9 +2713,6 @@ HloCustomCallInstruction::HloCustomCallInstruction(
       custom_call_schedule_(CustomCallSchedule::SCHEDULE_NONE),
       api_version_(api_version) {
   set_raw_backend_config_string(std::move(opaque));
-  for (auto operand : operands) {
-    AppendOperand(operand);
-  }
 }
 
 HloInstructionProto HloCustomCallInstruction::ToProto() const {
@@ -2770,8 +2906,11 @@ std::unique_ptr<HloInstruction>
 HloCustomCallInstruction::CloneWithNewOperandsImpl(
     const Shape& shape, absl::Span<HloInstruction* const> new_operands,
     HloCloneContext* context) const {
+  absl::InlinedVector<HloComputation*, 1> new_called_computations =
+      GetOrCloneCalledComputations(context);
+
   auto cloned = std::make_unique<HloCustomCallInstruction>(
-      shape, new_operands, called_computations(), custom_call_target(),
+      shape, new_operands, new_called_computations, custom_call_target(),
       opaque(), api_version_);
   if (layout_constrained()) {
     cloned->layout_constrained_ = true;
