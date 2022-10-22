@@ -1,7 +1,10 @@
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load("//tensorflow:tensorflow.bzl", "tf_cc_tests")
+load("//tensorflow/tsl:tsl.default.bzl", "filegroup")
 load(
-    "//tensorflow/core/platform:rules_cc.bzl",
+    "//tensorflow/tsl/platform:build_config.bzl",
+    "tsl_cc_test",
+)
+load(
+    "//tensorflow/tsl/platform:rules_cc.bzl",
     "cc_library",
 )
 
@@ -15,6 +18,7 @@ package(
         # tensorflow/core/framework uses map_util, and flatmap
         "//tensorflow/core/framework:__pkg__",
         "//tensorflow/tsl/framework:__pkg__",
+        "//tensorflow/tsl/platform/cloud:__pkg__",
         # tensorflow/core/util uses inlined_vector
         "//tensorflow/core/util:__pkg__",
         # tensorflow/core/tfrt/utils uses inlined_vector
@@ -196,7 +200,7 @@ filegroup(
     ],
 )
 
-tf_cc_tests(
+tsl_cc_test(
     name = "tsl_lib_gtl_tests",
     srcs = [
         "compactptrset_test.cc",
@@ -213,10 +217,10 @@ tf_cc_tests(
         ":int_type",
         ":iterator_range",
         ":map_util",
-        "//tensorflow/core/platform:test_main",
         "//tensorflow/tsl/platform:hash",
         "//tensorflow/tsl/platform:macros",
         "//tensorflow/tsl/platform:test",
+        "//tensorflow/tsl/platform:test_main",
         "//tensorflow/tsl/platform:types",
     ],
 )

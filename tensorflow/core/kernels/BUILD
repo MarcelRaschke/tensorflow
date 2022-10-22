@@ -13,6 +13,7 @@ load(
     "tf_cc_tests",
     "tf_copts",
     "tf_cuda_library",
+    "tf_cuda_only_cc_test",
     "tf_opts_nortti_if_lite_protos",
 )
 load(
@@ -30,33 +31,7 @@ load(
     "if_mkl",
     "mkl_deps",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "cc_header_only_library")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_kernel_library")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "if_nccl")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_disable_ptxas_warning_flags")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_only_cc_test")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_tests")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
+load("//tensorflow:tensorflow.default.bzl", "cc_header_only_library", "filegroup", "get_compatible_with_portable", "if_nccl", "tf_cc_shared_library", "tf_cuda_cc_test", "tf_cuda_cc_tests", "tf_disable_ptxas_warning_flags", "tf_kernel_library")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "if_static",
@@ -67,9 +42,6 @@ load(
     "@local_config_rocm//rocm:build_defs.bzl",
     "if_rocm",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cc_shared_library")
 
 # Description:
 # Op kernel implementations for TensorFlow.
@@ -111,37 +83,6 @@ package_group(
         "//learning/brain/research/lather/...",
         "//learning/clair/alise/...",
     ],
-)
-
-config_setting(
-    # Add "--define tensorflow_xsmm=1" to your build command to use libxsmm for
-    # sparse matrix multiplications. You will also need appropriate -mavx*
-    # options, as required by specific op you use.
-    name = "xsmm",
-    define_values = {
-        "tensorflow_xsmm": "1",
-    },
-)
-
-config_setting(
-    # Add "--define tensorflow_xsmm_convolutions=1" to your build command to
-    # use libxsmm for forward convolutions. You will also need appropriate
-    # -mavx* # options, as required by specific op you use.
-    name = "xsmm_convolutions",
-    define_values = {
-        "tensorflow_xsmm_convolutions": "1",
-    },
-)
-
-config_setting(
-    # Add "--define tensorflow_xsmm_convolutions=1 --define
-    # tensorflow_xsmm_backward_convolutions=1" to your build command to use libxsmm for
-    # backward convolutions (and possibly more in the future). You will also
-    # need appropriate -mavx* options, as required by specific op you use.
-    name = "xsmm_backward_convolutions",
-    define_values = {
-        "tensorflow_xsmm_backward_convolutions": "1",
-    },
 )
 
 config_setting(
@@ -866,6 +807,7 @@ cc_library(
         "@com_google_absl//absl/base",
         "//third_party/eigen3",
         "//tensorflow/core/platform:dynamic_annotations",
+        "//tensorflow/tsl/framework/fixedpoint",
     ] + select({
         "//tensorflow:android_x86": [],
         "//tensorflow:arm_any": [],
@@ -885,6 +827,7 @@ cc_library(
     compatible_with = get_compatible_with_portable(),
     deps = [
         "//tensorflow/core/platform:dynamic_annotations",
+        "//tensorflow/tsl/framework/fixedpoint",
         "//third_party/eigen3",
         "@com_google_absl//absl/base",
     ],
@@ -939,6 +882,7 @@ cc_library(
         "eigen_spatial_convolutions.h",
     ],
     compatible_with = get_compatible_with_portable(),
+    defines = ["EIGEN_NEON_GEBP_NR=4"],
     deps = [
         ":eigen_contraction_kernel",
         ":eigen_convolution_helpers",
@@ -958,6 +902,7 @@ cc_library(
         "eigen_pooling.h",
         "eigen_spatial_convolutions.h",
     ],
+    defines = ["EIGEN_NEON_GEBP_NR=4"],
     deps = [
         ":eigen_convolution_helpers",
         ":eigen_spatial_convolutions-inl",
@@ -1828,32 +1773,6 @@ tf_cc_test(
     ],
 )
 
-tf_cc_test(
-    name = "xsmm_conv2d_test",
-    size = "small",
-    srcs = select({
-        ":xsmm_convolutions": ["xsmm_conv2d_test.cc"],
-        "//conditions:default": [],
-    }),
-    deps = [
-        ":conv_ops",
-        ":ops_testutil",
-        ":ops_util",
-        "//tensorflow/core:core_cpu",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core:test",
-        "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-    ] + select({
-        ":xsmm_convolutions": [
-            "@libxsmm_archive//:xsmm_avx",
-        ],
-        "//conditions:default": [],
-    }),
-)
-
 tf_cuda_cc_test(
     name = "conv_ops_test",
     size = "medium",
@@ -2553,7 +2472,7 @@ tf_cc_test(
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
-        "//tensorflow/core/common_runtime:forward_type_inference",
+        "//tensorflow/core/common_runtime:type_inference",
     ],
 )
 
@@ -3545,17 +3464,8 @@ MATH_DEPS = [
 
 tf_kernel_library(
     name = "sparse_matmul_op",
-    defines = select({
-        ":xsmm": ["TENSORFLOW_USE_LIBXSMM"],
-        "//conditions:default": [],
-    }),
     prefix = "sparse_matmul_op",
-    deps = MATH_DEPS + [":eigen_contraction_kernel"] + select({
-        ":xsmm": [
-            "@libxsmm_archive//:xsmm_avx",
-        ],
-        "//conditions:default": [],
-    }),
+    deps = MATH_DEPS + [":eigen_contraction_kernel"],
 )
 
 cc_library(
@@ -3616,19 +3526,12 @@ tf_kernel_library(
     name = "matmul_op",
     # <prefix>*impl.h are excluded by default from the CPU build, add explicitly.
     hdrs = ["matmul_op_impl.h"],
-    defines = select({
-        ":xsmm": ["TENSORFLOW_USE_LIBXSMM"],
-        "//conditions:default": [],
-    }),
     prefix = "matmul_op",
     deps = MATH_DEPS + [
         ":eigen_contraction_kernel",
         ":fused_eigen_output_kernels",
         ":loose_headers",
-    ] + select({
-        ":xsmm": ["@libxsmm_archive//:xsmm_avx"],
-        "//conditions:default": [],
-    }) + mkl_deps() + if_cuda([
+    ] + mkl_deps() + if_cuda([
         ":matmul_util",
         "//tensorflow/compiler/xla/stream_executor/gpu:gpu_asm_opts",
         "//tensorflow/compiler/xla/stream_executor/gpu:redzone_allocator",
@@ -4120,38 +4023,28 @@ tf_kernel_library(
     name = "conv_ops",
     srcs = [
         "conv_grad_filter_ops.cc",
+        "conv_grad_input_ops.cc",
+        "conv_grad_input_ops_bfloat16.cc",
         "conv_grad_input_ops_double.cc",
         "conv_grad_input_ops_float.cc",
         "conv_grad_input_ops_half.cc",
-        "conv_grad_input_ops_bfloat16.cc",
         "conv_grad_input_ops_int32.cc",
-        "conv_grad_input_ops.cc",
         "conv_grad_ops_3d.cc",
         "deep_conv2d.cc",
-    ] + select({
-        ":xsmm_convolutions": ["xsmm_conv2d.cc"],
-        "//conditions:default": [],
-    }),
+    ],
     hdrs = [
         "autotune_conv_impl.h",
-        "fill_functor.h",
-        "conv_grad_ops.h",
         "conv_grad_input_ops.h",
+        "conv_grad_ops.h",
+        "conv_ops_fused_impl.h",
         "deep_conv2d.h",
+        "fill_functor.h",
         "gemm_functors.h",
         "winograd_transform.h",
-        "conv_ops_fused_impl.h",
-    ] + select({
-        ":xsmm_convolutions": ["xsmm_conv2d.h"],
-        "//conditions:default": [],
-    }),
-    defines = select({
-        ":xsmm_convolutions": ["TENSORFLOW_USE_LIBXSMM_CONVOLUTIONS"],
-        "//conditions:default": [],
-    }) + select({
-        ":xsmm_backward_convolutions": ["TENSORFLOW_USE_LIBXSMM_BACKWARD_CONVOLUTIONS"],
-        "//conditions:default": [],
-    }),
+    ],
+    defines = [
+        "EIGEN_NEON_GEBP_NR=4",
+    ],
     prefix = "conv_ops",
     deps = [
         ":conv_grad_shape_utils",
@@ -4176,12 +4069,7 @@ tf_kernel_library(
         "//tensorflow/core/protobuf:autotuning_proto_cc",
         "//tensorflow/core/util:image_resizer_state",
         "//tensorflow/core/util/proto:proto_utils",
-    ] + select({
-        ":xsmm_convolutions": [
-            "@libxsmm_archive//:xsmm_avx",
-        ],
-        "//conditions:default": [],
-    }) + if_cuda([
+    ] + if_cuda([
         "//tensorflow/compiler/xla/stream_executor/gpu:gpu_asm_opts",
         "//tensorflow/tsl/platform/default/build_config:cublas_plugin",
         "//tensorflow/tsl/platform/default/build_config:cudnn_plugin",
@@ -6714,13 +6602,7 @@ filegroup(
         "//tensorflow/core/kernels/image:encode_png_op.cc",
         "//tensorflow/core/kernels/image:colorspace_op.cc",
         "//tensorflow/core/kernels/uniform_quant_ops:portable_all_op_kernels",
-    ] + select({
-        ":xsmm_convolutions": [
-            "xsmm_conv2d.h",
-            "xsmm_conv2d.cc",
-        ],
-        "//conditions:default": [],
-    }),
+    ],
 )
 
 filegroup(
@@ -7038,7 +6920,6 @@ filegroup(
             "unicode_ops.cc",
             "unicode_script_op.cc",
             # Ops that are inherently incompatible with Android (e.g. tied to x86 platform).
-            "xsmm_*",
             "nextafter_op.cc",
             "initializable_lookup_table.*",
             "lookup_util.*",
@@ -7084,6 +6965,7 @@ cc_library(
         "//tensorflow/core/kernels:portable_extended_ops",
     ]),
     copts = tf_copts() + tf_opts_nortti_if_lite_protos(),
+    defines = ["EIGEN_NEON_GEBP_NR=4"],
     linkopts = if_android(["-ldl"]),
     tags = [
         "manual",
@@ -7100,6 +6982,7 @@ cc_library(
         "//tensorflow/core/lib/png:png_io",
         "//tensorflow/core/platform:strong_hash",
         "//tensorflow/core/platform:types",
+        "//tensorflow/tsl/framework/fixedpoint",
         "//third_party/eigen3",
         "//third_party/fft2d:fft2d_headers",
         "//third_party/icu/data:conversion_data",
@@ -7164,7 +7047,6 @@ tf_kernel_library(
         ":pooling_ops",
         ":quantization_utils",
         "//tensorflow/core:core_cpu",
-        "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core/util:determinism_for_kernels",
         "//tensorflow/core/util:image_resizer_state",
@@ -7915,7 +7797,6 @@ tf_cc_shared_library(
         "@icu//:__subpackages__",
         "@jsoncpp_git//:__subpackages__",
         "@libjpeg_turbo//:__subpackages__",
-        "@libxsmm_archive//:__subpackages__",
         "@llvm_openmp//:__subpackages__",
         "@llvm-project//:__subpackages__",
         "@llvm_terminfo//:__subpackages__",

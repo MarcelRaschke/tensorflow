@@ -58,11 +58,11 @@ limitations under the License.
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/util/ptr_util.h"
 #include "tensorflow/tsl/platform/env.h"
 #include "tensorflow/tsl/platform/errors.h"
 #include "tensorflow/tsl/platform/logging.h"
 #include "tensorflow/tsl/platform/protobuf.h"
+#include "tensorflow/tsl/util/ptr_util.h"
 
 namespace xla {
 namespace {
@@ -307,6 +307,8 @@ StatusOr<std::vector<std::unique_ptr<Executable>>> Service::BuildExecutables(
     const HloModuleConfig& config = *module_configs[i];
     TF_ASSIGN_OR_RETURN(
         auto module, CreateModuleFromProto(*proto, config, run_backend_only));
+    module->set_layout_canonicalization_callback(
+        options.layout_canonicalization_callback);
     UpdateEntryComputationLayout(
         module.get(), std::bind(&Compiler::DefaultDeviceShapeRepresentation,
                                 backend->compiler(), std::placeholders::_1));

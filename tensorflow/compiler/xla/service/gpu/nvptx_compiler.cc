@@ -38,8 +38,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gpu/gpu_asm_opts_util.h"
 #include "tensorflow/compiler/xla/service/gpu/gpu_conv_padding_legalization.h"
 #include "tensorflow/compiler/xla/service/gpu/gpu_conv_rewriter.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_executable.h"
-#include "tensorflow/compiler/xla/service/gpu/gpu_layout_assignment.h"
 #include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/gpu/llvm_gpu_backend/gpu_backend_lib.h"
 #include "tensorflow/compiler/xla/service/gpu/metrics.h"
@@ -47,24 +45,20 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/gpu/target_constants.h"
 #include "tensorflow/compiler/xla/service/gpu/triangular_solve_rewriter.h"
 #include "tensorflow/compiler/xla/service/hlo_constant_folding.h"
-#include "tensorflow/compiler/xla/service/hlo_cse.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_fix.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_pipeline.h"
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/tuple_simplifier.h"
-#include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/stream_executor/cuda/cuda_diagnostics.h"
 #include "tensorflow/compiler/xla/stream_executor/cuda/cuda_platform_id.h"
 #include "tensorflow/compiler/xla/stream_executor/gpu/asm_compiler.h"
-#include "tensorflow/compiler/xla/stream_executor/gpu/gpu_driver.h"
-#include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/profiler/lib/traceme.h"
+#include "tensorflow/tsl/platform/path.h"
 #include "tensorflow/tsl/platform/status.h"
 #include "tensorflow/tsl/platform/statusor.h"
+#include "tensorflow/tsl/profiler/lib/traceme.h"
 
 namespace xla {
 namespace gpu {
@@ -148,13 +142,7 @@ Status NVPTXCompiler::OptimizeHloPostLayoutAssignment(
       hlo_module, stream_exec, device_allocator));
 
   HloPassPipeline post_pipeline("nvptx post-layout_assignment part 2");
-
-  // Find the fastest algorithm for GEMMs. Skip on Ampere and later as the
-  // algorithm goes unused.
-  if (!stream_exec->GetDeviceDescription().cuda_compute_capability().IsAtLeast(
-          se::CudaComputeCapability::AMPERE)) {
-    post_pipeline.AddPass<GemmAlgorithmPicker>(stream_exec, device_allocator);
-  }
+  post_pipeline.AddPass<GemmAlgorithmPicker>(stream_exec, device_allocator);
 
   // Transform TriangularSolve ops into custom-calls, so we can add temp
   // memory.
@@ -381,8 +369,8 @@ std::vector<uint8_t> NVPTXCompiler::CompileGpuAsmOrGetCachedResult(
     se::CudaComputeCapability cc, const HloModuleConfig& hlo_module_config,
     bool relocatable) {
   XLA_SCOPED_LOGGING_TIMER("NVPTXCompiler::CompileGpuAsmOrGetCachedResult");
-  tensorflow::profiler::TraceMe activity(
-      "PTX->CUBIN", tensorflow::profiler::TraceMeLevel::kInfo);
+  tsl::profiler::TraceMe activity("PTX->CUBIN",
+                                  tsl::profiler::TraceMeLevel::kInfo);
   bool inserted;
   decltype(compilation_cache_.begin()) iter;
   // Pointers into compilation_cache_ where the ptx and (optional) cubin are
@@ -428,8 +416,7 @@ std::vector<uint8_t> NVPTXCompiler::CompileGpuAsmOrGetCachedResult(
           VLOG(1) << "Compiled PTX size:" << ptx.size()
                   << " CUBIN size: " << cache_value->cubin_data.size();
         } else {
-          if (maybe_cubin.status().code() ==
-              tensorflow::error::Code::NOT_FOUND) {
+          if (maybe_cubin.status().code() == tsl::error::Code::NOT_FOUND) {
             if (!hlo_module_config.debug_options()
                      .xla_gpu_unsafe_fallback_to_driver_on_ptxas_not_found()) {
               LOG(WARNING) << CantFindCudaMessage(
@@ -455,7 +442,7 @@ std::vector<uint8_t> NVPTXCompiler::CompileGpuAsmOrGetCachedResult(
                 "using $PATH.",
                 hlo_module_config);
           } else if (maybe_cubin.status().code() !=
-                     tensorflow::error::Code::UNIMPLEMENTED) {
+                     tsl::error::Code::UNIMPLEMENTED) {
             // If unimplemented is returned, we fallback to the driver.
             LOG(FATAL) << "ptxas returned an error during compilation of ptx "
                           "to sass: '"

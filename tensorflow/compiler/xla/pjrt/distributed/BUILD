@@ -1,6 +1,6 @@
 load("//tensorflow/tsl/platform:rules_cc.bzl", "cc_library")
-load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
-load("//tensorflow:tensorflow.bzl", "tf_grpc_cc_dependencies")
+load("//tensorflow/tsl/platform:build_config.bzl", "tf_proto_library")
+load("//tensorflow:tensorflow.default.bzl", "tf_grpc_cc_dependencies")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test")
 
 licenses(["notice"])
@@ -50,11 +50,11 @@ cc_library(
         "//tensorflow/compiler/xla:statusor",
         "//tensorflow/compiler/xla:types",
         "//tensorflow/compiler/xla:util",
-        "//tensorflow/core:protos_all_cc",
+        "//tensorflow/core/protobuf:coordination_config_proto_cc",
         "//tensorflow/core/distributed_runtime/coordination:coordination_service",
         "//tensorflow/core/distributed_runtime/coordination:coordination_service_impl",
-        "//tensorflow/core/distributed_runtime/rpc:async_service_interface",
         "//tensorflow/core/distributed_runtime/rpc/coordination:grpc_coordination_service_impl",
+        "//tensorflow/tsl/distributed_runtime/rpc:async_service_interface",
         "//tensorflow/tsl/platform:env",
         "//tensorflow/tsl/platform:random",
         "//tensorflow/tsl/platform:errors",
@@ -97,13 +97,14 @@ cc_library(
         "//tensorflow/compiler/xla:util",
         "//tensorflow/core/distributed_runtime/coordination:coordination_service_error_util",
         "//tensorflow/core/protobuf:coordination_service_proto_cc",
-        "//tensorflow/core:lib",
+        "//tensorflow/core/protobuf:coordination_config_proto_cc",
+        "//tensorflow/tsl/platform:env",
+        "//tensorflow/tsl/platform:errors",
         "//tensorflow/tsl/platform:logging",
         "//tensorflow/core/distributed_runtime/coordination:coordination_client",
         "//tensorflow/core/distributed_runtime/coordination:coordination_service_agent",
         "//tensorflow/core/distributed_runtime/rpc/coordination:grpc_coordination_client",
-        "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core/distributed_runtime:worker_env",
+        "//tensorflow/tsl/platform:random",
     ] + tf_grpc_cc_dependencies(),
 )
 

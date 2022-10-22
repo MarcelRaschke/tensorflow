@@ -18,13 +18,13 @@ limitations under the License.
 #ifndef MLIR_HLO_DIALECT_THLO_IR_THLO_OPS_H
 #define MLIR_HLO_DIALECT_THLO_IR_THLO_OPS_H
 
-#include "mlir-hlo/Dialect/gml_st/transforms/fusion_interface.h"
 #include "mlir-hlo/Dialect/gml_st/transforms/tiling_interface.h"
 #include "mlir/Dialect/Linalg/IR/LinalgInterfaces.h"
 #include "mlir/IR/BuiltinTypes.h"
 #include "mlir/IR/Dialect.h"
 #include "mlir/IR/MLIRContext.h"
 #include "mlir/Interfaces/ControlFlowInterfaces.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Interfaces/SideEffectInterfaces.h"
 
 // Generated dialect declarations.

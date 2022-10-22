@@ -1,11 +1,4 @@
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_custom_op_py_library")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_cloud")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_py_test")
+load("//tensorflow:tensorflow.default.bzl", "get_compatible_with_cloud", "tf_custom_op_py_library", "tf_py_test")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_test",
@@ -16,6 +9,7 @@ load(
 
 package(
     default_visibility = [
+        "//tensorflow:__pkg__",
         "//tensorflow/compiler/mlir/quantization/tensorflow:internal_visibility_allowlist_package",
     ],
     licenses = ["notice"],

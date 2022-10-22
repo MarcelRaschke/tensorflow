@@ -79,27 +79,7 @@ load(
     "tf_opts_nortti_if_lite_protos",
     "transitive_hdrs",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "cc_header_only_library")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "if_nccl")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tensorflow_opensource_extra_deps")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_monitoring_framework_deps")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_selective_registration_deps")
+load("//tensorflow:tensorflow.default.bzl", "cc_header_only_library", "filegroup", "get_compatible_with_portable", "if_nccl", "tensorflow_opensource_extra_deps", "tf_monitoring_framework_deps", "tf_selective_registration_deps")
 
 # For platform specific build config
 load(
@@ -113,7 +93,6 @@ load(
     "tf_portable_deps_no_runtime",
     "tf_portable_proto_lib",
     "tf_proto_library",
-    "tf_protos_all_impl",
     "tf_protos_grappler_impl",
     "tf_protos_profiler_impl",
     "tf_tpu_dependencies",
@@ -140,7 +119,10 @@ package(
         "//tensorflow:internal",
         "//tensorflow_models:__subpackages__",
     ],
-    features = if_google(["-parse_headers"]),
+    features = if_google([
+        "-layering_check",
+        "-parse_headers",
+    ]),
     licenses = ["notice"],
 )
 
@@ -186,6 +168,7 @@ tf_proto_library(
         "//tensorflow/core/lib/core:error_codes_proto",
         "//tensorflow/core/profiler/protobuf:xplane_proto",
         "//tensorflow/core/profiler:profiler_options_proto",
+        "//tensorflow/core/protobuf:coordination_config_proto",
         "//tensorflow/core/protobuf:error_codes_proto_impl",
         "//tensorflow/core/protobuf:for_core_protos",
         "//tensorflow/core/util:protos_all",
@@ -515,6 +498,7 @@ cc_library(
             "//tensorflow/core/platform:thread_annotations",
             "//tensorflow/core/platform:mutex",
             "//tensorflow/tsl/platform/default/build_config:minimal",
+            "//tensorflow/tsl/framework:fixedpoint_types",
             "//tensorflow/core/platform:types",
         ],
 )
@@ -835,23 +819,14 @@ filegroup(
         "//tensorflow/core/lib/hash:mobile_srcs_no_runtime",
         "//tensorflow/core/lib/strings:mobile_srcs_no_runtime",
         "//tensorflow/core/platform:mobile_srcs_no_runtime",
+        "//tensorflow/core/profiler:mobile_srcs_no_runtime",
         "//tensorflow/core/public:mobile_srcs_no_runtime",
         "//tensorflow/core/util:mobile_srcs_no_runtime",
         "//tensorflow/core/util/ctc:mobile_srcs",
-        "//tensorflow/core/profiler:mobile_srcs_no_runtime",
         "//tensorflow/tsl/framework:mobile_srcs_no_runtime",
+        "//tensorflow/tsl/framework/fixedpoint:mobile_srcs_no_runtime",
         "//tensorflow/tsl/platform:mobile_srcs_no_runtime",
-    ] + glob(
-        [
-            "client/**/*.cc",
-        ],
-        exclude = [
-            "**/*test.*",
-            "**/*testutil*",
-            "**/*testlib*",
-            "**/*main.cc",
-        ],
-    ),
+    ],
     visibility = ["//visibility:public"],
 )
 
@@ -896,6 +871,7 @@ filegroup(
         "//tensorflow/core/platform:mobile_srcs_only_runtime",
         "//tensorflow/tsl/platform:mobile_srcs_only_runtime",
         "//tensorflow/tsl/framework:mobile_srcs_only_runtime",
+        "//tensorflow/tsl/framework/fixedpoint:mobile_srcs_only_runtime",
 
         # Wav io files
         "//tensorflow/core/lib/wav:wav_io.h",
@@ -1031,8 +1007,7 @@ cc_library(
     name = "portable_tensorflow_lib_lite",
     srcs = if_mobile([":mobile_srcs"]),
     copts = tf_copts(android_optimization_level_override = None) + tf_opts_nortti_if_lite_protos() + if_ios(["-Os"]),
-    defines = ["SUPPORT_SELECTIVE_REGISTRATION"] +
-              select({
+    defines = ["SUPPORT_SELECTIVE_REGISTRATION"] + select({
                   "//tensorflow:chromiumos": ["IS_MOBILE_PLATFORM"],
                   "//tensorflow:fuchsia": ["IS_MOBILE_PLATFORM"],
                   "//conditions:default": [],
@@ -1047,6 +1022,7 @@ cc_library(
     ],
     visibility = ["//visibility:public"],
     deps = [
+        "//tensorflow/core/platform:resource",
         "//tensorflow/core/util:stats_calculator_portable",
         "//tensorflow/core:mobile_additional_lib_deps",
     ] + tf_portable_proto_lib() + tf_portable_deps_no_runtime(),
@@ -1058,7 +1034,10 @@ cc_library(
 #     name = "portable_tensorflow_lib_lite_no_runtime",
 #     srcs = if_mobile([":mobile_srcs_no_runtime"]),
 #     copts = tf_copts(android_optimization_level_override = None) + tf_opts_nortti_if_lite_protos() + if_ios(["-Os"]),
-#     defines = ["SUPPORT_SELECTIVE_REGISTRATION"] + select({
+#     defines = [
+#         "SUPPORT_SELECTIVE_REGISTRATION",
+#         "EIGEN_NEON_GEBP_NR=4",
+#     ] + select({
 #         "//tensorflow:chromiumos": ["IS_MOBILE_PLATFORM"],
 #         "//tensorflow:fuchsia": ["IS_MOBILE_PLATFORM"],
 #         "//conditions:default": [],
@@ -1079,6 +1058,8 @@ cc_library(
 #         "@com_google_absl//absl/strings",
 #         "@com_google_absl//absl/types:optional",
 #         "//tensorflow/core/util:managed_stack_trace",
+#         "//tensorflow/core/platform:resource",
+#         "//tensorflow/tsl/framework/fixedpoint",
 #         "//tensorflow/core/util:stats_calculator_portable",
 #         "//tensorflow/core:mobile_additional_lib_deps",
 #     ] + tf_portable_proto_lib() + tf_portable_deps_no_runtime(),
@@ -1176,7 +1157,7 @@ alias(
 
 alias(
     name = "cuda",
-    actual = "//tensorflow/core/common_runtime/gpu:cuda",
+    actual = "//tensorflow/tsl/platform:cuda",
     visibility = ["//visibility:public"],
 )
 
@@ -1470,7 +1451,14 @@ cc_library(
     ] + select({
         "//tensorflow:fuchsia": [],
         "//conditions:default": ["//tensorflow/core/platform:subprocess"],
-    }) + tf_protos_all_impl() + tf_protos_grappler_impl() + tf_protos_profiler_impl() + tf_monitoring_framework_deps(),
+    }) +
+    # The TF proto implementations that we will statically link here.
+    [
+        "//tensorflow/core/protobuf:autotuning_proto_cc_impl",
+        "//tensorflow/core/protobuf:conv_autotuning_proto_cc_impl",
+        "//tensorflow/core:protos_all_cc_impl",
+        "//tensorflow/tsl/protobuf:protos_all_cc_impl",
+    ] + tf_protos_grappler_impl() + tf_protos_profiler_impl() + tf_monitoring_framework_deps(),
     # Alwayslink causes a cc_binary to "always link" in the
     # srcs for a given cc_library, even if they are unreferenced, see:
     # https://docs.bazel.build/versions/master/be/c-cpp.html#cc_library.alwayslink
@@ -1693,6 +1681,7 @@ tf_cuda_library(
         "//tensorflow/core/util:tensor_format",
         "//tensorflow/compiler/jit:common",
         "//tensorflow/tsl/framework:cancellation",
+        "//tensorflow/tsl/util:command_line_flags",
         "@com_google_absl//absl/container:btree",
     ] + if_cuda([
         "@local_config_cuda//cuda:cudnn_header",

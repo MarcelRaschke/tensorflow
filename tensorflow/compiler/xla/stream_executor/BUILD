@@ -5,14 +5,12 @@
 # do not link against restricted binary blobs.
 
 # TODO(rdzhabarov): XLA should have its own tensorflow independent rule.
-load("//tensorflow/core/platform:build_config_root.bzl", "if_static")
+load("//tensorflow/tsl/platform:build_config_root.bzl", "if_static")
 load("//tensorflow:tensorflow.bzl", "tf_cc_test", "tf_cuda_library")
 load("//tensorflow/tsl/platform:rules_cc.bzl", "cc_library")
-load("//tensorflow/core/platform:build_config.bzl", "tf_proto_library")
+load("//tensorflow/tsl/platform:build_config.bzl", "tf_proto_library")
 load("//tensorflow/compiler/xla/stream_executor:build_defs.bzl", "stream_executor_friends")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
+load("//tensorflow:tensorflow.default.bzl", "filegroup")
 
 package(
     default_visibility = [
@@ -66,7 +64,10 @@ cc_library(
         ":host_or_device_scalar",
         "//tensorflow/compiler/xla/stream_executor/lib",
         "//tensorflow/compiler/xla/stream_executor/platform",
+        "//tensorflow/tsl/platform:errors",
         "//tensorflow/tsl/platform:logging",
+        "//tensorflow/tsl/platform:status",
+        "//tensorflow/tsl/platform:types",
         "@com_google_absl//absl/base:core_headers",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/strings",
@@ -684,7 +685,13 @@ cc_library(
         "timer.h",
         "trace_listener.h",
     ],
-    deps = [":stream_executor_headers"] + if_static([":stream_executor_impl"]),
+    deps = [
+        ":stream_executor_headers",
+        "//tensorflow/tsl/platform:errors",
+        "//tensorflow/tsl/platform:logging",
+        "//tensorflow/tsl/platform:status",
+        "//tensorflow/tsl/platform:types",
+    ] + if_static([":stream_executor_impl"]),
 )
 
 cc_library(
@@ -753,8 +760,8 @@ tf_cc_test(
     srcs = ["dnn_test.cc"],
     deps = [
         ":dnn",
-        "//tensorflow/core:test",
-        "//tensorflow/core:test_main",
+        "//tensorflow/tsl/platform:test",
+        "//tensorflow/tsl/platform:test_main",
     ],
 )
 

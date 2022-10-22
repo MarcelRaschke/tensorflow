@@ -18,15 +18,7 @@ load(
     "tf_kernel_library",
     "tf_mkl_kernel_library",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_version_info_genrule")
+load("//tensorflow:tensorflow.default.bzl", "filegroup", "get_compatible_with_portable", "tf_version_info_genrule")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "if_static",
@@ -137,6 +129,7 @@ filegroup(
         "util.h",
         "work_sharder.cc",
         "work_sharder.h",
+        "//tensorflow/core/util/quantization:mobile_srcs_only_runtime",
         "//tensorflow/tsl/util:mobile_srcs_only_runtime",
     ],
 )
@@ -496,6 +489,11 @@ cc_library(
         "//tensorflow/python:__pkg__",
         "//tensorflow/python/util:__pkg__",
     ],
+    deps = [
+        "//tensorflow/core/platform:platform_port",
+        "//tensorflow/core/util:env_var",
+        "@com_google_absl//absl/base",
+    ],
     alwayslink = 1,
 )
 
@@ -503,6 +501,7 @@ cc_library(
     name = "managed_stack_trace",
     hdrs = ["managed_stack_trace.h"],
     visibility = [
+        "//tensorflow:__pkg__",
         "//tensorflow/c/eager:__pkg__",
         "//tensorflow/compiler/mlir/tensorflow:__pkg__",
         "//tensorflow/core:__pkg__",
@@ -999,6 +998,7 @@ tf_proto_library(
         ":event_proto",
         ":saved_tensor_slice_proto",
         ":memmapped_file_system_proto",
+        "//tensorflow/core/util/quantization:uniform_quant_ops_attr_proto",
     ],
     tags = [
         "alt_dep=//third_party/tensorflow/core:protos_all",

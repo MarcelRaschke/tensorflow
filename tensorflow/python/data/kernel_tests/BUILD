@@ -1,8 +1,7 @@
-load("//tensorflow:tensorflow.bzl", "py_strict_test")
+load("//tensorflow:strict.default.bzl", "py_strict_test")
 
 # Definitions are loaded separately so that copybara can pattern match (and modify) each definition.
-load("//tensorflow:tensorflow.bzl", "cuda_py_test")  # buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_py_test")  # buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "cuda_py_test", "tf_py_test")
 
 package(
     default_visibility = ["//tensorflow:internal"],
@@ -752,6 +751,22 @@ tf_py_test(
         "//tensorflow/python:dtypes",
         "//tensorflow/python:errors",
         "@absl_py//absl/testing:parameterized",
+    ],
+)
+
+tf_py_test(
+    name = "ragged_batch_test",
+    size = "small",
+    srcs = ["ragged_batch_test.py"],
+    shard_count = 4,
+    deps = [
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:dtypes",
+        "//tensorflow/python:errors",
+        "//tensorflow/python/data/kernel_tests:test_base",
+        "//tensorflow/python/data/ops:dataset_ops",
+        "//third_party/py/numpy",
     ],
 )
 

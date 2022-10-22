@@ -50,10 +50,9 @@ limitations under the License.
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/window_util.h"
-#include "tensorflow/core/lib/io/zlib_compression_options.h"
-#include "tensorflow/core/lib/io/zlib_outputbuffer.h"
-#include "tensorflow/core/lib/strings/numbers.h"
 #include "tensorflow/tsl/lib/gtl/map_util.h"
+#include "tensorflow/tsl/lib/io/zlib_compression_options.h"
+#include "tensorflow/tsl/lib/io/zlib_outputbuffer.h"
 #include "tensorflow/tsl/platform/base64.h"
 #include "tensorflow/tsl/platform/env.h"
 #include "tensorflow/tsl/platform/numbers.h"
@@ -504,7 +503,7 @@ stylesheet=<
   if (profile_ != nullptr) {
     auto cycles = profile_->total_cycles_executed(*computation_);
     absl::StrAppendFormat(&graph_label, "<br/>total cycles = %d (%s)", cycles,
-                          tensorflow::strings::HumanReadableNum(cycles));
+                          tsl::strings::HumanReadableNum(cycles));
   }
 
   // Create CSS rules that say, when you hover over the given node or cluster,
@@ -1042,6 +1041,7 @@ ColorScheme HloDotDumper::GetInstructionColor(const HloInstruction* instr) {
     case HloOpcode::kShiftLeft:
     case HloOpcode::kShiftRightArithmetic:
     case HloOpcode::kShiftRightLogical:
+    case HloOpcode::kStochasticConvert:
     case HloOpcode::kLogistic:
     case HloOpcode::kSign:
     case HloOpcode::kSin:
@@ -1842,9 +1842,9 @@ static StatusOr<std::string> CompressAndEncode(absl::string_view input) {
   std::string compressed;
   WritableStringFile f(&compressed);
 
-  auto gz_opts = tensorflow::io::ZlibCompressionOptions::GZIP();
-  tensorflow::io::ZlibOutputBuffer gz_file(&f, gz_opts.input_buffer_size,
-                                           gz_opts.output_buffer_size, gz_opts);
+  auto gz_opts = tsl::io::ZlibCompressionOptions::GZIP();
+  tsl::io::ZlibOutputBuffer gz_file(&f, gz_opts.input_buffer_size,
+                                    gz_opts.output_buffer_size, gz_opts);
   TF_RETURN_IF_ERROR(gz_file.Init());
   TF_RETURN_IF_ERROR(gz_file.Append(input));
   TF_RETURN_IF_ERROR(gz_file.Close());

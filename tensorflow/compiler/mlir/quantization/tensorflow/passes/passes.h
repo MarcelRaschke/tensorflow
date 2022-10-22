@@ -35,8 +35,9 @@ std::unique_ptr<OperationPass<ModuleOp>> CreateInsertMainFunctionPass();
 std::unique_ptr<OperationPass<func::FuncOp>> CreateConvertFakeQuantToQdqPass();
 
 // Lifts the quantizable spots as composite functions.
+// TODO(b/249914162): Pass OpSet by value instead of reference.
 std::unique_ptr<OperationPass<ModuleOp>>
-CreateLiftQuantizableSpotsAsFunctionsPass();
+CreateLiftQuantizableSpotsAsFunctionsPass(const OpSet& op_set);
 
 // Apply graph optimizations such as fusing and constant folding to prepare
 // lifting.
@@ -87,7 +88,8 @@ std::unique_ptr<OperationPass<func::FuncOp>> CreatePrepareQuantizePass(
 
 // Creates an instance of the PrepareQuantizeDRQ pass, which will
 // perfrom similar transformations as TFL::PrepareQuantizeDynamicRangePass.
-std::unique_ptr<OperationPass<func::FuncOp>> CreatePrepareQuantizeDRQPass();
+std::unique_ptr<OperationPass<func::FuncOp>> CreatePrepareQuantizeDRQPass(
+    const QuantizationSpecs& quant_specs, OpSet op_set);
 
 // Creates an instance of the PostQuantize pass, which will remove unnecessary
 // ops from the final quantized graph.

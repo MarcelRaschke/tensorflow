@@ -64,6 +64,7 @@ transitive_hdrs(
         "//tensorflow/python/framework:python_op_gen",
         "//tensorflow/python/client:tf_session_helper",
         "//third_party/eigen3",
+        "//tensorflow/stream_executor:stream_executor_headers",
     ] + if_cuda([
         "@local_config_cuda//cuda:cuda_headers",
     ]),
@@ -251,12 +252,7 @@ filegroup(
             "@com_github_googlecloudplatform_google_cloud_cpp//:LICENSE",
         ],
     }) + select({
-        "//tensorflow/core/kernels:xsmm": [
-            "@libxsmm_archive//:LICENSE.md",
-        ],
-        "//conditions:default": [],
-    }) + select({
-        "//tensorflow:with_numa_support": [
+        "//tensorflow/tsl:with_numa_support": [
             "@hwloc//:COPYING",
         ],
         "//conditions:default": [],

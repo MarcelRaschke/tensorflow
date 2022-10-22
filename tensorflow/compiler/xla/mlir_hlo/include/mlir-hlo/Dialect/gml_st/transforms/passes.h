@@ -22,26 +22,11 @@ limitations under the License.
 #include "mlir/Dialect/Func/IR/FuncOps.h"
 #include "mlir/Pass/Pass.h"
 
-#define GEN_PASS_DECL_COLLAPSEMATERIALIZEOPSPASS
-#define GEN_PASS_DECL_DEPRECATEDTILINGPASS
-#define GEN_PASS_DECL_FUSIONPASS
-#define GEN_PASS_DECL_TILINGPASS
-#define GEN_PASS_DECL_GMLSTTOGPUPASS
-#define GEN_PASS_DECL_TILINGCWISEPASS
+#define GEN_PASS_DECL
 #include "mlir-hlo/Dialect/gml_st/transforms/passes.h.inc"
 
 namespace mlir {
 namespace gml_st {
-
-/// Pass to fuse producers into `gml_st.materialize` ops.
-std::unique_ptr<OperationPass<func::FuncOp>> createDeprecatedFusionPass();
-
-/// Pass to tile operations.
-std::unique_ptr<OperationPass<func::FuncOp>> createDeprecatedTilingPass();
-std::unique_ptr<OperationPass<func::FuncOp>> createDeprecatedTilingPass(
-    const SmallVector<SmallVector<int64_t>>& tileSizes);
-std::unique_ptr<OperationPass<func::FuncOp>> createDeprecatedTilingPass(
-    const std::string& tileSizes);
 
 /// Pass to tile ops using TilingInterface.
 std::unique_ptr<OperationPass<func::FuncOp>> createTilingPass(
@@ -54,15 +39,24 @@ std::unique_ptr<OperationPass<func::FuncOp>> createFusionPass(
 
 /// Pass to tile and fuse all cwise ops.
 std::unique_ptr<OperationPass<func::FuncOp>> createTilingCwisePass(
-    bool distribute, ArrayRef<int64_t> tileSizes);
+    bool distribute, ArrayRef<int64_t> tileSizes,
+    StringRef distributionLabel = "");
 std::unique_ptr<OperationPass<func::FuncOp>> createTilingCwisePass();
 
-/// Pass to compose set operations.
-std::unique_ptr<OperationPass<func::FuncOp>> createComposeSetOpsPass();
+/// Pass to tile a linalg.generic reduction.
+std::unique_ptr<OperationPass<func::FuncOp>> createTilingReductionPass();
+
+/// Pass to tile a linalg.generic reduction for GPU on the warp level.
+std::unique_ptr<OperationPass<func::FuncOp>> createTilingCwiseGPUWarpsPass();
+
+/// Pass to match, tile, and fuse softmax implementations.
+std::unique_ptr<OperationPass<func::FuncOp>> createTilingSoftmaxPass(
+    bool distribute, ArrayRef<int64_t> tileSizes,
+    StringRef distributionLabel = "");
+std::unique_ptr<OperationPass<func::FuncOp>> createTilingSoftmaxPass();
 
 /// Pass to collapse (or uncollapse) materialize operations.
-std::unique_ptr<OperationPass<func::FuncOp>> createCollapseMaterializeOpsPass(
-    bool reverse = false);
+std::unique_ptr<OperationPass<func::FuncOp>> createCollapseMaterializeOpsPass();
 
 /// Create a pass to convert `gml_st.loop` to `scf.for` and `scf.parallel`
 /// loops and memref.load/memref.store accesses.
@@ -74,7 +68,16 @@ std::unique_ptr<OperationPass<func::FuncOp>> CreateTiledLoopBufferizePass();
 
 /// Pass to vectorize linalg.generic ops tiled to gml_st.parallel and gml_st.for
 /// loops.
-std::unique_ptr<OperationPass<func::FuncOp>> createVectorizeGmlStLoopsPass();
+std::unique_ptr<OperationPass<func::FuncOp>> createVectorizeGmlStLoopsPass(
+    bool vectorizeGmlStOps = false,
+    ArrayRef<StringRef> distributionLabels = {});
+
+/// Pass to transform a thlo.scatter op for CPU backend.
+std::unique_ptr<OperationPass<func::FuncOp>> createTransformScatterForCpuPass();
+
+/// Pass to transform a linalg.matmul op for CPU backend.
+std::unique_ptr<OperationPass<func::FuncOp>> createTransformMatmulForCpuPass(
+    ArrayRef<int64_t> tileSizes = llvm::None);
 
 #define GEN_PASS_REGISTRATION
 #include "mlir-hlo/Dialect/gml_st/transforms/passes.h.inc"

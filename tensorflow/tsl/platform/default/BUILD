@@ -1,8 +1,8 @@
 # Tensorflow default + linux implementations of tensorflow/core/platform libraries.
 load("@bazel_skylib//:bzl_library.bzl", "bzl_library")
-load("//tensorflow:tensorflow.bzl", "filegroup")
-load("//tensorflow:tensorflow.bzl", "if_not_windows", "tf_copts")
-load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
+load("//tensorflow/tsl:tsl.default.bzl", "filegroup")
+load("//tensorflow/tsl:tsl.bzl", "if_not_windows", "tsl_copts")
+load("//tensorflow/tsl/platform:rules_cc.bzl", "cc_library")
 
 package(
     default_visibility = [
@@ -99,7 +99,6 @@ cc_library(
         "nobuilder",
     ],
     deps = [
-        "//tensorflow/core:error_codes_proto_impl_cc",
         "//tensorflow/tsl/platform",
         "//tensorflow/tsl/platform:blocking_counter",
         "//tensorflow/tsl/platform:context",
@@ -127,6 +126,7 @@ cc_library(
         "//tensorflow/tsl/platform:threadpool_interface",
         "//tensorflow/tsl/platform:tracing",
         "//tensorflow/tsl/platform:types",
+        "//tensorflow/tsl/protobuf:error_codes_proto_impl_cc",
         "//third_party/eigen3",
         "@com_google_absl//absl/time",
         "@com_google_absl//absl/types:optional",
@@ -145,11 +145,11 @@ cc_library(
     ],
     deps = [
         ":env",
-        "//tensorflow/core/protobuf:error_codes_proto_impl_cc",
         "//tensorflow/tsl/platform:load_library",
         "//tensorflow/tsl/platform:logging",
         "//tensorflow/tsl/platform:mutex",
         "//tensorflow/tsl/platform:strcat",
+        "//tensorflow/tsl/protobuf:error_codes_proto_impl_cc",
     ],
 )
 
@@ -297,10 +297,10 @@ cc_library(
         "//tensorflow/tsl/platform:snappy.h",
         "//tensorflow/tsl/platform/profile_utils:cpu_utils.h",
     ],
-    copts = tf_copts(),
+    copts = tsl_copts(),
     defines = ["TF_USE_SNAPPY"] + select({
         # TF Additional NUMA defines
-        "//tensorflow:with_numa_support": ["TENSORFLOW_USE_NUMA"],
+        "//tensorflow/tsl:with_numa_support": ["TENSORFLOW_USE_NUMA"],
         "//conditions:default": [],
     }),
     features = ["-layering_check"],
@@ -321,7 +321,7 @@ cc_library(
         "@snappy",
     ] + select({
         # TF Additional NUMA dependencies
-        "//tensorflow:with_numa_support": [
+        "//tensorflow/tsl:with_numa_support": [
             # Don't merge in a single line
             "@hwloc",
         ],
@@ -521,6 +521,11 @@ bzl_library(
     visibility = ["//tensorflow:__subpackages__"],
 )
 
+bzl_library(
+    name = "rules_cc_bzl",
+    srcs = ["rules_cc.bzl"],
+)
+
 # Export source files needed for mobile builds, which do not use granular targets.
 filegroup(
     name = "additional_mobile_srcs_no_runtime",
@@ -539,7 +544,6 @@ filegroup(
         "port.cc",
         "posix_file_system.cc",
         "posix_file_system.h",
-        "resource.cc",
         "stacktrace.h",
         "tracing_impl.h",
         "//tensorflow/tsl/platform/profile_utils:cpu_utils.h",
@@ -559,22 +563,10 @@ filegroup(
         "mutex.h",
         "mutex_data.h",
         "notification.h",
-        "subprocess.cc",
-        "subprocess.h",
         "unbounded_work_queue.cc",
         "unbounded_work_queue.h",
     ],
     visibility = ["//tensorflow/core/platform:__pkg__"],
-)
-
-package_group(
-    name = "core_and_platform_packages",
-    packages = [
-        "//tensorflow/core",
-        "//tensorflow/core/lib/gif",
-        "//tensorflow/core/lib/jpeg",
-        "//tensorflow/core/platform",
-    ],
 )
 
 exports_files(
@@ -595,5 +587,10 @@ exports_files(
         "logging.h",
         "test.cc",
     ],
-    visibility = [":core_and_platform_packages"],
+    visibility = [
+        "//tensorflow/core:__pkg__",
+        "//tensorflow/core/lib/gif:__pkg__",
+        "//tensorflow/core/lib/jpeg:__pkg__",
+        "//tensorflow/core/platform:__pkg__",
+    ],
 )

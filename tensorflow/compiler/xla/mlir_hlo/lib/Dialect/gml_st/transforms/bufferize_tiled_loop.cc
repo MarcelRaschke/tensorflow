@@ -23,7 +23,7 @@ limitations under the License.
 #include "mlir-hlo/Dialect/lhlo/IR/lhlo_ops.h"
 #include "mlir-hlo/Dialect/mhlo/transforms/type_conversion.h"
 #include "mlir/Dialect/Affine/IR/AffineOps.h"
-#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"
+#include "mlir/Dialect/Arith/IR/Arith.h"
 #include "mlir/Dialect/Bufferization/IR/Bufferization.h"
 #include "mlir/Dialect/Bufferization/Transforms/Bufferize.h"
 #include "mlir/Dialect/Complex/IR/Complex.h"
@@ -52,6 +52,7 @@ limitations under the License.
 #include "mlir/IR/Operation.h"
 #include "mlir/IR/PatternMatch.h"
 #include "mlir/IR/Visitors.h"
+#include "mlir/Interfaces/DestinationStyleOpInterface.h"
 #include "mlir/Transforms/DialectConversion.h"
 #include "mlir/Transforms/GreedyPatternRewriteDriver.h"
 #include "stablehlo/dialect/ChloOps.h"
@@ -61,8 +62,8 @@ namespace {
 using bufferization::ToMemrefOp;
 using bufferization::ToTensorOp;
 using gml_st::LoopOp;
-using linalg::InitTensorOp;
 using memref::SubViewOp;
+using tensor::EmptyOp;
 using tensor::ExtractSliceOp;
 using tensor::InsertSliceOp;
 using vector::TransferReadOp;
@@ -126,18 +127,18 @@ struct BufferizeExtractSliceOp : public OpConversionPattern<ExtractSliceOp> {
   }
 };
 
-/// Convert `linalg.init_tensor` of `memref.alloc`.
-struct BufferizeInitTensorOp : public OpConversionPattern<InitTensorOp> {
-  using OpConversionPattern<InitTensorOp>::OpConversionPattern;
+/// Convert `tensor.empty` to `memref.alloc`.
+struct BufferizeEmptyTensorOp : public OpConversionPattern<EmptyOp> {
+  using OpConversionPattern<EmptyOp>::OpConversionPattern;
 
   LogicalResult matchAndRewrite(
-      InitTensorOp op, OpAdaptor adaptor,
+      EmptyOp op, OpAdaptor adaptor,
       ConversionPatternRewriter &rewriter) const final {
     if (!op->getParentOfType<LoopOp>()) return failure();
 
     rewriter.replaceOpWithNewOp<memref::AllocOp>(
         op, getTypeConverter()->convertType(op.getType()).cast<MemRefType>(),
-        adaptor.sizes());
+        adaptor.getDynamicSizes());
     return success();
   }
 };
@@ -200,10 +201,9 @@ struct BufferizeInsertSliceOp : public OpConversionPattern<InsertSliceOp> {
 
 /// Create linalg op on buffers given the original tensor-based operation and
 /// the buffers for the outputs.
-linalg::DestinationStyleOpInterface createDstStyleOpOnBuffers(
-    ConversionPatternRewriter &rewriter,
-    linalg::DestinationStyleOpInterface dstStyleOp, ValueRange inputs,
-    ValueRange outputs) {
+DestinationStyleOpInterface createDstStyleOpOnBuffers(
+    ConversionPatternRewriter &rewriter, DestinationStyleOpInterface dstStyleOp,
+    ValueRange inputs, ValueRange outputs) {
   SmallVector<Value, 8> newOperands = inputs;
   newOperands.append(outputs.begin(), outputs.end());
   auto *newOp = dstStyleOp.cloneWithoutRegions(rewriter, dstStyleOp.getLoc(),
@@ -231,12 +231,12 @@ ValueRange getVariadicOperands(DenseI32ArrayAttr sizeAttr,
 
 // Bufferize DestinationStyleOpInterface in-place.
 struct BufferizeDstStyleOpInterface
-    : public OpInterfaceConversionPattern<linalg::DestinationStyleOpInterface> {
+    : public OpInterfaceConversionPattern<DestinationStyleOpInterface> {
   using OpInterfaceConversionPattern<
-      linalg::DestinationStyleOpInterface>::OpInterfaceConversionPattern;
+      DestinationStyleOpInterface>::OpInterfaceConversionPattern;
 
   LogicalResult matchAndRewrite(
-      linalg::DestinationStyleOpInterface op, ArrayRef<Value> operands,
+      DestinationStyleOpInterface op, ArrayRef<Value> operands,
       ConversionPatternRewriter &rewriter) const final {
     if (!op->getParentOfType<LoopOp>()) return failure();
 
@@ -397,8 +397,7 @@ struct TiledLoopBufferizePass
     auto &context = getContext();
     ConversionTarget target(context);
     target.addLegalDialect<
-        mlir::arith::ArithmeticDialect,
-        mlir::bufferization::BufferizationDialect,
+        mlir::arith::ArithDialect, mlir::bufferization::BufferizationDialect,
         mlir::complex::ComplexDialect, mlir::lmhlo::LmhloDialect,
         mlir::AffineDialect, mlir::vector::VectorDialect,
         mlir::memref::MemRefDialect, mlir::func::FuncDialect,
@@ -438,7 +437,7 @@ void populateTiledLoopBufferizePattern(
   patterns->add<
     BufferizeDstStyleOpInterface,
     BufferizeExtractSliceOp,
-    BufferizeInitTensorOp,
+    BufferizeEmptyTensorOp,
     BufferizeInsertSliceOp,
     BufferizeLinalgYieldOp,
     BufferizeLoopOp,

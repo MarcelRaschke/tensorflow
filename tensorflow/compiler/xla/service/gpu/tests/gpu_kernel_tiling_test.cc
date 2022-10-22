@@ -535,7 +535,9 @@ TEST_F(GpuKernelTilingTest, RowReductionTwoRowsPerWarp) {
 ; CHECK: %[[TID_LOGICAL:.*]] = and i32 %[[TID_X]], 15
 ; CHECK: call SHUFFLE
 ; CHECK: %[[LOGICAL_T0:.*]] = icmp eq i32 %[[TID_LOGICAL]], 0
-; CHECK: br i1 %[[LOGICAL_T0]],
+; CHECK: LCAL
+; CHECK: EXTV
+; CHECK: BR_CAL
 )";
   CompileAndVerifyIr(std::move(hlo_module),
                      MakePlatformSpecificLlvm(expected_ir),
@@ -572,8 +574,11 @@ TEST_F(GpuKernelTilingTest, RowReductionFourRowsPerWarp) {
 ; CHECK: %[[TID_LOGICAL:.*]] = and i32 %[[TID_X]], 7
 ; CHECK: call SHUFFLE
 ; CHECK: %[[LOGICAL_T0:.*]] = icmp eq i32 %[[TID_LOGICAL]], 0
-; CHECK: br i1 %[[LOGICAL_T0]],
+; CHECK: LCAL
+; CHECK: EXTV
+; CHECK: BR_CAL
 )";
+
   CompileAndVerifyIr(std::move(hlo_module),
                      MakePlatformSpecificLlvm(expected_ir),
                      /*match_optimized_ir=*/true);
@@ -658,6 +663,49 @@ TEST_F(GpuKernelTilingTest, ColumnReductionSmallTileSizeX) {
                      /*match_optimized_ir=*/true);
   // Check that the kernel runs correctly.
   EXPECT_TRUE(RunAndCompare(kHloString, ErrorSpec{1.0e-5, 1.0e-5}));
+}
+
+TEST_F(GpuKernelTilingTest, ColReductionWithSmallDtype) {
+  const char *const kHloString = R"(
+HloModule mod
+region_0 {
+  Arg_0 = f32[] parameter(0)
+  Arg_1 = f32[] parameter(1)
+  ROOT add = f32[] add(Arg_0, Arg_1)
+}
+fused_computation {
+  param_0.4 = bf16[32,16,512,512]{3,2,1,0} parameter(0)
+  convert.31 = f32[32,16,512,512]{3,2,1,0} convert(param_0.4)
+  constant_1 = f32[] constant(0)
+  ROOT reduce = f32[16,512,512]{2,1,0} reduce(convert.31, constant_1), dimensions={0}, to_apply=region_0
+}
+ENTRY main {
+ Arg_3.4 = bf16[32,16,512,512]{3,2,1,0} parameter(0)
+ ROOT fusion = f32[16,512,512]{2,1,0} fusion(Arg_3.4), kind=kInput, calls=fused_computation
+})";
+
+  // Check that the kernel is not tiled by looking for llvm.nvvm.shfl.sync.down.
+  auto hlo_module =
+      ParseAndReturnVerifiedModule(kHloString, ConfigWithoutLayoutAssignment())
+          .value();
+  std::string expected_ir = R"(
+; CHECK-LABEL: define KERNEL_ANNOTATION @fusion
+; CHECK: load <4 x i16>
+; CHECK-COUNT-4: load PLATFORM_SPECIFIC_TYPE
+; CHECK-NOT: load
+; CHECK: }
+)";
+
+  expected_ir = absl::StrReplaceAll(
+      expected_ir,
+      {{"PLATFORM_SPECIFIC_TYPE", is_built_with_rocm_ ? "i32" : "float"}});
+
+  CompileAndVerifyIr(std::move(hlo_module),
+                     MakePlatformSpecificLlvm(expected_ir),
+                     /*match_optimized_ir=*/true);
+
+  // Check that the kernel runs correctly.
+  EXPECT_TRUE(RunAndCompareNoHloPasses(kHloString, ErrorSpec{0.001}));
 }
 
 TEST_F(GpuKernelTilingTest,
@@ -813,7 +861,7 @@ TEST_F(GpuKernelTilingTest, ReductionInputTooLarge) {
   )";
   auto hlo_module = ParseAndReturnVerifiedModule(kHloString).value();
   Status status = CompileToExecutable(std::move(hlo_module)).status();
-  EXPECT_EQ(status.code(), tensorflow::error::Code::FAILED_PRECONDITION);
+  EXPECT_EQ(status.code(), tsl::error::Code::FAILED_PRECONDITION);
   EXPECT_THAT(
       status.error_message(),
       ::testing::HasSubstr(

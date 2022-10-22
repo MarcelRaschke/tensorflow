@@ -1,5 +1,5 @@
 load("//tensorflow/tsl/platform:rules_cc.bzl", "cc_library")
-load("//tensorflow:tensorflow.bzl", "tf_grpc_cc_dependencies")
+load("//tensorflow:tensorflow.default.bzl", "tf_grpc_cc_dependencies")
 load(
     "//tensorflow:tensorflow.bzl",
     "tf_cc_binary",
@@ -10,7 +10,7 @@ load(
     "if_libtpu",
 )
 load(
-    "//tensorflow/core/platform:build_config.bzl",
+    "//tensorflow/tsl/platform:build_config.bzl",
     "tf_proto_library",
 )
 load(
@@ -59,8 +59,9 @@ cc_library(
         "@com_google_absl//absl/strings:str_format",
         "//tensorflow/compiler/xla/service:platform_util",
         "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
         "//tensorflow/tsl/platform:logging",
+        "//tensorflow/tsl/platform:platform_port",
+        "//tensorflow/tsl/util:command_line_flags",
     ] + tf_grpc_cc_dependencies() + if_libtpu(
         if_false = ["//tensorflow/compiler/xla/service:cpu_plugin"],
         if_true = [],
@@ -88,10 +89,12 @@ tf_cc_test(
         "//tensorflow/compiler/xla/client:xla_builder",
         "//tensorflow/compiler/xla/tests:literal_test_util",
         "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
         "//tensorflow/tsl/platform:logging",
+        "//tensorflow/tsl/platform:net",
+        "//tensorflow/tsl/platform:subprocess",
         "//tensorflow/tsl/platform:test",
         "//tensorflow/tsl/platform:test_main",
+        "//tensorflow/tsl/platform:path",
     ] + tf_grpc_cc_dependencies(),
 )
 

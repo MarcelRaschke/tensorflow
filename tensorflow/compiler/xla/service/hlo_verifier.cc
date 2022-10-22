@@ -39,7 +39,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/lib/core/errors.h"
 #include "tensorflow/tsl/platform/errors.h"
 
 namespace xla {
@@ -191,6 +190,13 @@ Status ShapeVerifier::HandleBitcastConvert(HloInstruction* convert) {
   return CheckShape(convert, ShapeInference::InferBitcastConvertShape(
                                  convert->operand(0)->shape(),
                                  convert->shape().element_type()));
+}
+
+Status ShapeVerifier::HandleStochasticConvert(HloInstruction* convert) {
+  return CheckShape(
+      convert, ShapeInference::InferStochasticConvertShape(
+                   convert->operand(0)->shape(), convert->operand(1)->shape(),
+                   convert->shape().element_type()));
 }
 
 Status ShapeVerifier::HandleCopy(HloInstruction* copy) {

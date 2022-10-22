@@ -11,17 +11,7 @@ load(
     "tf_copts",
     "tf_cuda_library",
 )
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "filegroup")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_cuda_cc_test")
-
-# buildifier: disable=same-origin-load
-load("//tensorflow:tensorflow.bzl", "tf_generate_proto_text_sources")
-
-# buildifier: disable=same-origin-load
+load("//tensorflow:tensorflow.default.bzl", "filegroup", "tf_cuda_cc_test", "tf_generate_proto_text_sources")
 load(
     "//tensorflow/core/platform:build_config_root.bzl",
     "if_static",
@@ -629,6 +619,31 @@ cc_library(
 )
 
 cc_library(
+    name = "float8",
+    srcs = ["float8.cc"],
+    hdrs = ["float8.h"],
+    visibility = [
+        "//tensorflow/core:__subpackages__",
+        "//tensorflow/security/fuzzing:__subpackages__",
+    ],
+    deps = [
+        "//third_party/eigen3",
+    ],
+    alwayslink = 1,
+)
+
+tf_cc_test(
+    name = "float8_test",
+    srcs = ["float8_test.cc"],
+    deps = [
+        ":float8",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core/platform:test_benchmark",
+    ],
+)
+
+cc_library(
     name = "numeric_types",
     hdrs = ["numeric_types.h"],
     visibility = [
@@ -638,7 +653,6 @@ cc_library(
     deps = [
         "//tensorflow/core/platform:types",
         "//tensorflow/tsl/framework:numeric_types",
-        "//third_party/eigen3",
     ],
 )
 
@@ -1761,7 +1775,9 @@ tf_proto_library(
         ":tensor_proto",
         ":tensor_shape_proto",
         ":types_proto",
+        "//tensorflow/tsl/protobuf:histogram_proto",
     ],
+    exports = ["//tensorflow/tsl/protobuf:histogram_proto"],
 )
 
 tf_proto_library(
