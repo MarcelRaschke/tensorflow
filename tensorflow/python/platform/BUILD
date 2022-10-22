@@ -19,7 +19,7 @@ visibility = [
 
 package(
     default_visibility = visibility,
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 tf_py_build_info_genrule(
@@ -48,15 +48,17 @@ py_library(
     ) + ["build_info.py"],
     srcs_version = "PY3",
     deps = [
+        ":_pywrap_cpu_feature_guard",
         ":build_info",
         "//tensorflow/core:protos_all_py",
         "//tensorflow/python:pywrap_tfe",
         "//tensorflow/python:util",
         "//tensorflow/python/lib/io:lib",
         "//tensorflow/python/util:_pywrap_util_port",
+        "@absl_py//absl:app",
         "@absl_py//absl/flags",
+        "@absl_py//absl/logging",
         "@rules_python//python/runfiles",
-        "@six_archive//:six",
     ],
 )
 
@@ -67,7 +69,6 @@ py_library(
     deps = [
         ":platform",
         "//tensorflow/python:client",
-        "@six_archive//:six",
     ],
 )
 
@@ -130,6 +131,7 @@ tf_py_test(
     deps = [
         ":platform",
         ":test",
+        "//tensorflow:tensorflow_py",
     ],
 )
 
@@ -174,9 +176,21 @@ tf_py_test(
 tf_python_pybind_extension(
     name = "_pywrap_stacktrace_handler",
     srcs = ["stacktrace_handler_wrapper.cc"],
-    hdrs = ["//tensorflow/core/platform:stacktrace_handler_hdrs"],
-    module_name = "_pywrap_stacktrace_handler",
+    hdrs = [
+        "//tensorflow/core/platform:stacktrace_handler_hdrs",
+        "//tensorflow/tsl/platform:stacktrace_handler_hdrs",
+    ],
     deps = [
+        "//third_party/python_runtime:headers",
+        "@pybind11",
+    ],
+)
+
+pybind_extension(
+    name = "_pywrap_cpu_feature_guard",
+    srcs = ["cpu_feature_guard_wrapper.cc"],
+    deps = [
+        "//tensorflow/core/platform:cpu_feature_guard",
         "//third_party/python_runtime:headers",
         "@pybind11",
     ],
@@ -239,7 +253,6 @@ pybind_extension(
     name = "_pywrap_tf2",
     srcs = ["enable_tf2.cc"],
     hdrs = ["//tensorflow/core/platform:enable_tf2_hdr"],
-    module_name = "_pywrap_tf2",
     deps = [
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",

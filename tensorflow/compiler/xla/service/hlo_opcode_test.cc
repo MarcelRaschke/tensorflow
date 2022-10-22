@@ -38,7 +38,7 @@ TEST(HloOpcodeTest, OpcodeProperties) {
   for (int i = 0; i < HloOpcodeCount(); ++i) {
     auto opcode = static_cast<HloOpcode>(i);
     // Test round-trip conversion to and from string.
-    EXPECT_EQ(opcode, StringToHloOpcode(HloOpcodeString(opcode)).ValueOrDie());
+    EXPECT_EQ(opcode, StringToHloOpcode(HloOpcodeString(opcode)).value());
 
     // Test some properties.
     switch (opcode) {
@@ -50,9 +50,16 @@ TEST(HloOpcodeTest, OpcodeProperties) {
     }
     switch (opcode) {
       case HloOpcode::kAfterAll:
+      case HloOpcode::kAllGather:
+      case HloOpcode::kAllGatherStart:
       case HloOpcode::kAllReduce:
+      case HloOpcode::kAsyncStart:
+      case HloOpcode::kReduceScatter:
+      case HloOpcode::kAllReduceStart:
       case HloOpcode::kAllToAll:
       case HloOpcode::kCall:
+      case HloOpcode::kCollectivePermute:
+      case HloOpcode::kCollectivePermuteStart:
       case HloOpcode::kConcatenate:
       case HloOpcode::kConditional:
       case HloOpcode::kCustomCall:
@@ -63,6 +70,7 @@ TEST(HloOpcodeTest, OpcodeProperties) {
       case HloOpcode::kMap:
       case HloOpcode::kReduce:
       case HloOpcode::kRng:
+      case HloOpcode::kScatter:
       case HloOpcode::kSort:
       case HloOpcode::kTuple:
       case HloOpcode::kReduceWindow:

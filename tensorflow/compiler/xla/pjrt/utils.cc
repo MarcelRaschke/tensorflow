@@ -44,7 +44,9 @@ StatusOr<Shape> GetShardedShape(const Shape& shape,
           sharding.DebugString(), shape.ToString());
     }
     std::vector<Shape> sharded_subshapes;
-    for (int i = 0; i < shape.tuple_shapes_size(); ++i) {
+    const int tuple_shapes_size = shape.tuple_shapes_size();
+    sharded_subshapes.reserve(tuple_shapes_size);
+    for (int i = 0; i < tuple_shapes_size; ++i) {
       TF_ASSIGN_OR_RETURN(
           Shape sharded_subshape,
           GetShardedShape(shape.tuple_shapes(i), sharding.tuple_shardings(i)));
@@ -140,14 +142,14 @@ Status ParseDeviceAssignmentCompileOptions(
     *device_assignment =
         std::make_shared<DeviceAssignment>(build_options->device_assignment());
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status DetermineArgumentLayoutsFromCompileOptions(
     const XlaComputation& computation,
     std::function<StatusOr<Shape>(Shape)>
         choose_compact_layout_for_shape_function,
-    absl::optional<std::vector<Shape>>& argument_layouts,
+    std::optional<std::vector<Shape>>& argument_layouts,
     ExecutableBuildOptions* build_options,
     std::vector<const Shape*>* argument_layout_pointers) {
   TF_ASSIGN_OR_RETURN(ProgramShape program_shape,
@@ -181,7 +183,7 @@ Status DetermineArgumentLayoutsFromCompileOptions(
                 choose_compact_layout_for_shape_function(sharded_subshape));
             *subshape->mutable_layout() = layout.layout();
           }
-          return Status::OK();
+          return OkStatus();
         });
   };
   TF_ASSIGN_OR_RETURN(auto sharded_shapes,
@@ -203,10 +205,10 @@ Status DetermineArgumentLayoutsFromCompileOptions(
   }
   TF_RETURN_IF_ERROR(assign_layouts(sharded_shapes.second, &result_layout));
   build_options->set_result_layout(result_layout);
-  return Status::OK();
+  return OkStatus();
 }
 
-StatusOr<absl::flat_hash_set<int>> GetParametersThatMustBeDonated(
+StatusOr<std::vector<int>> ComputeParametersThatMustBeDonated(
     const HloModule& module, bool tuple_inputs) {
   HloComputation* computation = module.entry_computation();
   int number_of_parameters = [&]() -> int {
@@ -222,7 +224,8 @@ StatusOr<absl::flat_hash_set<int>> GetParametersThatMustBeDonated(
   }();
   // If any buffer in a parameter is aliased we will donate the entire input
   // parameter.
-  absl::flat_hash_set<int> parameters_to_donate;
+  std::vector<int> parameters_to_donate;
+  parameters_to_donate.reserve(computation->num_parameters());
   const HloInputOutputAliasConfig& config = module.input_output_alias_config();
   TF_RETURN_IF_ERROR(config.ForEachAliasWithStatus(
       [&](const ShapeIndex& output_index,
@@ -243,7 +246,7 @@ StatusOr<absl::flat_hash_set<int>> GetParametersThatMustBeDonated(
                   "inputs and %d parameters",
                   index.ToString(), number_of_parameters);
             }
-            parameters_to_donate.insert(this_parameter);
+            parameters_to_donate.push_back(this_parameter);
           }
         } else {
           int this_parameter = alias.parameter_number;
@@ -253,10 +256,11 @@ StatusOr<absl::flat_hash_set<int>> GetParametersThatMustBeDonated(
                 "inputs and %d parameters",
                 this_parameter, number_of_parameters);
           }
-          parameters_to_donate.insert(this_parameter);
+          parameters_to_donate.push_back(this_parameter);
         }
-        return Status::OK();
+        return OkStatus();
       }));
+  absl::c_sort(parameters_to_donate);
   return parameters_to_donate;
 }
 
@@ -270,7 +274,27 @@ int DefaultThreadPoolSize() {
   if (nproc_str && absl::SimpleAtoi(nproc_str, &nproc)) {
     return std::max(0, nproc);
   }
-  return tensorflow::port::MaxParallelism();
+  return tsl::port::MaxParallelism();
+}
+
+bool HasMajorToMinorLayout(PrimitiveType type, absl::Span<int64_t const> dims,
+                           absl::Span<int64_t const> byte_strides) {
+  CHECK_EQ(dims.size(), byte_strides.size());
+  // If the array is size 0, the strides are irrelevant.
+  if (absl::c_find(dims, 0) != dims.end()) {
+    return true;
+  }
+  int64_t stride = primitive_util::ByteWidth(type);
+  for (int i = static_cast<int>(dims.size()) - 1; i >= 0; --i) {
+    // If a dimension is of size 1, its stride is irrelevant.
+    if (dims[i] != 1) {
+      if (byte_strides[i] != stride) {
+        return false;
+      }
+      stride *= dims[i];
+    }
+  }
+  return true;
 }
 
 }  // namespace xla

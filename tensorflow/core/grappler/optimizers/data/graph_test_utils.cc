@@ -27,12 +27,13 @@ namespace graph_tests_utils {
 
 NodeDef MakeBatchV2Node(StringPiece name, StringPiece input_node_name,
                         StringPiece batch_size_node_name,
-                        StringPiece drop_remainder_node_name) {
+                        StringPiece drop_remainder_node_name,
+                        bool parallel_copy) {
   return test::function::NDef(
       name, "BatchDatasetV2",
       {string(input_node_name), string(batch_size_node_name),
        string(drop_remainder_node_name)},
-      {{"parallel_copy", false},
+      {{"parallel_copy", parallel_copy},
        {"output_shapes", gtl::ArraySlice<TensorShape>{}},
        {"output_types", gtl::ArraySlice<DataType>{}}});
 }
@@ -215,6 +216,20 @@ NodeDef MakeTakeNode(StringPiece name, StringPiece input_node_name,
       });
 }
 
+NodeDef MakeTensorSliceNode(StringPiece name, StringPiece tensor_node_name,
+                            bool replicate_on_split) {
+  return test::function::NDef(
+      name, "TensorSliceDataset",
+      {
+          string(tensor_node_name),
+      },
+      {
+          {"output_shapes", gtl::ArraySlice<TensorShape>{}},
+          {"output_types", gtl::ArraySlice<DataType>{}},
+          {"replicate_on_split", replicate_on_split},
+      });
+}
+
 NodeDef MakeSkipNode(StringPiece name, StringPiece input_node_name,
                      StringPiece count_node_name) {
   return test::function::NDef(
@@ -243,6 +258,17 @@ NodeDef MakeShardNode(StringPiece name, StringPiece input_node_name,
           {"output_shapes", gtl::ArraySlice<TensorShape>{}},
           {"output_types", gtl::ArraySlice<DataType>{}},
       });
+}
+
+NodeDef MakePrefetchNode(StringPiece name, StringPiece input_node_name,
+                         StringPiece buffer_size) {
+  return test::function::NDef(
+      name, "PrefetchDataset", {string(input_node_name), string(buffer_size)},
+      {{"output_shapes", gtl::ArraySlice<TensorShape>{}},
+       {"output_types", gtl::ArraySlice<DataType>{}},
+       {"slack_period", 0},
+       {"legacy_autotune", true},
+       {"buffer_size_min", 0}});
 }
 
 }  // namespace graph_tests_utils

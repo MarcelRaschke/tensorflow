@@ -17,20 +17,22 @@ limitations under the License.
 
 #define EIGEN_USE_THREADS
 
-#include "mkldnn.hpp"
+#include "dnnl.hpp"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/type_traits.h"
 #include "tensorflow/core/framework/types.h"
 #include "tensorflow/core/graph/mkl_graph_util.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/util/mkl_util.h"
+#ifdef DNNL_AARCH64_USE_ACL
+#include "tensorflow/core/platform/mutex.h"
+#endif
 
-using mkldnn::primitive_attr;
-using mkldnn::prop_kind;
-using mkldnn::reorder;
-using mkldnn::stream;
+using dnnl::primitive_attr;
+using dnnl::prop_kind;
+using dnnl::reorder;
+using dnnl::stream;
 
 namespace {
 enum {
@@ -87,13 +89,16 @@ class MklReorderWithScalePrimitive : public MklPrimitive {
 
   void Execute(void* src_data, void* dst_data,
                std::shared_ptr<stream> reorder_stream) {
-#ifdef ENABLE_MKLDNN_THREADPOOL
+#ifdef DNNL_AARCH64_USE_ACL
+    mutex_lock lock(primitive_execution_mu_);
+#endif
+#ifndef ENABLE_ONEDNN_OPENMP
     context_.src_mem->set_data_handle(src_data, *reorder_stream);
     context_.dst_mem->set_data_handle(dst_data, *reorder_stream);
 #else
     context_.src_mem->set_data_handle(src_data);
     context_.dst_mem->set_data_handle(dst_data);
-#endif  // ENABLE_MKLDNN_THREADPOOL
+#endif  // !ENABLE_ONEDNN_OPENMP
     context_.reorder_prim->execute(*reorder_stream, context_.prim_args);
     // After execution, set data handle back.
     context_.src_mem->set_data_handle(DummyData);
@@ -104,17 +109,17 @@ class MklReorderWithScalePrimitive : public MklPrimitive {
   // Primitive reuse context for reorder
   struct ReorderContext {
     // MKL-DNN memory
-    std::shared_ptr<mkldnn::memory> src_mem;
-    std::shared_ptr<mkldnn::memory> dst_mem;
+    std::shared_ptr<dnnl::memory> src_mem;
+    std::shared_ptr<dnnl::memory> dst_mem;
 
     // Reorder primitive descriptor and primitive
     std::shared_ptr<reorder::primitive_desc> reorder_pd;
     std::shared_ptr<primitive> reorder_prim;
 
     // Stream and primitive vector
-    std::shared_ptr<mkldnn::stream> reorder_stream;
+    std::shared_ptr<dnnl::stream> reorder_stream;
 
-    std::unordered_map<int, mkldnn::memory> prim_args;
+    std::unordered_map<int, dnnl::memory> prim_args;
 
     ReorderContext()
         : src_mem(nullptr),
@@ -133,7 +138,7 @@ class MklReorderWithScalePrimitive : public MklPrimitive {
 
     // Check if there is any fusion as post-ops
     auto const& post_op_params = fwdParams.post_op_params;
-    mkldnn::primitive_attr post_ops_attr;
+    dnnl::primitive_attr post_ops_attr;
 
     DCHECK(post_op_params.name == "scale");
     DCHECK_EQ(post_op_params.param.size(), 1);
@@ -147,9 +152,13 @@ class MklReorderWithScalePrimitive : public MklPrimitive {
 
     // Create reorder primitive
     context_.reorder_prim.reset(new reorder(*context_.reorder_pd));
-    context_.prim_args.insert({MKLDNN_ARG_FROM, *context_.src_mem});
-    context_.prim_args.insert({MKLDNN_ARG_TO, *context_.dst_mem});
+    context_.prim_args.insert({DNNL_ARG_FROM, *context_.src_mem});
+    context_.prim_args.insert({DNNL_ARG_TO, *context_.dst_mem});
   }
+
+#ifdef DNNL_AARCH64_USE_ACL
+  mutex primitive_execution_mu_;
+#endif
 };
 
 template <typename T>
@@ -210,7 +219,7 @@ class MklReorderWithScalePrimitiveFactory : public MklPrimitiveFactory<T> {
 
 // Quantizes a tensor from float to T, with user-specified min_range and
 // max_range.
-template <typename Device, typename T>
+template <typename Device, typename T, bool native_format = false>
 class MklQuantizeV2Op : public OpKernel {
  public:
   explicit MklQuantizeV2Op(OpKernelConstruction* ctx) : OpKernel(ctx) {
@@ -271,24 +280,24 @@ class MklQuantizeV2Op : public OpKernel {
 
     Tensor* output_tensor = nullptr;
     AllocateOutputSetMklShape(ctx, 0, &output_tensor, src_tensor.shape(),
-                              output_mkl_shape);
+                              output_mkl_shape, native_format);
     TensorShape min_tf_shape = {};
     MklDnnShape min_mkl_shape;
     min_mkl_shape.SetMklTensor(false);
     Tensor* output_min_tensor = nullptr;
     AllocateOutputSetMklShape(ctx, 1, &output_min_tensor, min_tf_shape,
-                              min_mkl_shape);
+                              min_mkl_shape, native_format);
     TensorShape max_tf_shape = {};
     MklDnnShape max_mkl_shape;
     max_mkl_shape.SetMklTensor(false);
     Tensor* output_max_tensor = nullptr;
     AllocateOutputSetMklShape(ctx, 2, &output_max_tensor, max_tf_shape,
-                              max_mkl_shape);
+                              max_mkl_shape, native_format);
 
     // Estimate scale for quantization
     float scale_factor = 0;
     const int number_of_bits = sizeof(T) * 8;
-    const int64 number_of_steps = static_cast<int64>(1) << number_of_bits;
+    const int64 number_of_steps = static_cast<int64_t>(1) << number_of_bits;
     scale_factor = (number_of_steps - 1.0) / (max_range - min_range);
 
     float* src_data = const_cast<float*>(src_tensor.flat<float>().data());
@@ -330,7 +339,7 @@ class MklQuantizeV2Op : public OpKernel {
     auto cpu_engine = engine(engine::kind::cpu, 0);
     const Tensor& src_tensor = MklGetInput(ctx, src_idx);
     MklDnnShape src_mkl_shape;
-    GetMklShape(ctx, src_idx, &src_mkl_shape);
+    GetMklShape(ctx, src_idx, &src_mkl_shape, native_format);
     auto src_tf_shape = src_mkl_shape.IsMklTensor() ? src_mkl_shape.GetTfShape()
                                                     : src_tensor.shape();
     auto src_dims = src_mkl_shape.IsMklTensor()
@@ -419,7 +428,7 @@ class MklQuantizeV2Op : public OpKernel {
 
     Tensor* output_tensor = nullptr;
     AllocateOutputSetMklShape(ctx, 0, &output_tensor, output_tf_shape,
-                              output_mkl_shape);
+                              output_mkl_shape, native_format);
     dst.SetUsrMem(dst_md, output_tensor);
 
     TensorShape min_tf_shape = {};
@@ -427,13 +436,13 @@ class MklQuantizeV2Op : public OpKernel {
     min_mkl_shape.SetMklTensor(false);
     Tensor* output_min_tensor = nullptr;
     AllocateOutputSetMklShape(ctx, 1, &output_min_tensor, min_tf_shape,
-                              min_mkl_shape);
+                              min_mkl_shape, native_format);
     TensorShape max_tf_shape = {};
     MklDnnShape max_mkl_shape;
     max_mkl_shape.SetMklTensor(false);
     Tensor* output_max_tensor = nullptr;
     AllocateOutputSetMklShape(ctx, 2, &output_max_tensor, max_tf_shape,
-                              max_mkl_shape);
+                              max_mkl_shape, native_format);
 
     float scale_factor = 0;
     if (mode_ == QUANTIZE_MODE_SCALED) {
@@ -448,7 +457,7 @@ class MklQuantizeV2Op : public OpKernel {
         // If it is signed, we try to keep 0.0 being 0 and drop one bucket. For
         // example, if it is 8 bits, we have the range [-127, 127]. So for input
         // range of [-x, x], the scale should be 254/(2*x).
-        target_range = static_cast<float>((uint64_t{1} << (num_bits - 1)) - 1);
+        target_range = static_cast<float>((uint64_t{1} << num_bits) - 1) / 2.;
       } else {
         max_range = max_abs;
         min_range = 0.0;
@@ -461,7 +470,7 @@ class MklQuantizeV2Op : public OpKernel {
     } else if (mode_ == QUANTIZE_MODE_MIN_FIRST) {
       // Estimate scale for qunatization
       const int number_of_bits = sizeof(T) * 8;
-      const int64 number_of_steps = static_cast<int64>(1) << number_of_bits;
+      const int64 number_of_steps = static_cast<int64_t>(1) << number_of_bits;
       scale_factor = (number_of_steps - 1.0) / (max_range - min_range);
     }
 
@@ -495,12 +504,12 @@ REGISTER_KERNEL_BUILDER(Name("_MklQuantizeV2")
                             .Device(DEVICE_CPU)
                             .TypeConstraint<quint8>("T")
                             .Label(mkl_op_registry::kMklQuantizedOpLabel),
-                        MklQuantizeV2Op<CPUDevice, quint8>);
+                        MklQuantizeV2Op<CPUDevice, quint8, true>);
 REGISTER_KERNEL_BUILDER(Name("_MklQuantizeV2")
                             .Device(DEVICE_CPU)
                             .TypeConstraint<qint8>("T")
                             .Label(mkl_op_registry::kMklQuantizedOpLabel),
-                        MklQuantizeV2Op<CPUDevice, qint8>);
+                        MklQuantizeV2Op<CPUDevice, qint8, true>);
 }  // namespace tensorflow
 
 #endif  // INTEL_MKL

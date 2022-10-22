@@ -13,22 +13,18 @@
 # limitations under the License.
 # ==============================================================================
 """Training state management."""
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
 
 import os
-
+from tensorflow.python.checkpoint import checkpoint as trackable_util
+from tensorflow.python.checkpoint import checkpoint_management
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
 from tensorflow.python.framework import errors
-from tensorflow.python.keras import backend as K
+from tensorflow.python.keras import backend
 from tensorflow.python.keras.distribute import distributed_file_utils
 from tensorflow.python.keras.utils import mode_keys
 from tensorflow.python.lib.io import file_io
 from tensorflow.python.ops import variables
-from tensorflow.python.training import checkpoint_management
-from tensorflow.python.training.tracking import util as trackable_util
 
 # Constant for `tf.keras.Model` attribute to store the epoch at which the most
 # recently saved checkpoint was saved.
@@ -56,7 +52,7 @@ class WorkerTrainingState(object):
         name='ckpt_saved_epoch')
 
     # Variable initialization.
-    K.set_value(self._ckpt_saved_epoch, CKPT_SAVED_EPOCH_UNUSED_VALUE)
+    backend.set_value(self._ckpt_saved_epoch, CKPT_SAVED_EPOCH_UNUSED_VALUE)
 
     # _ckpt_saved_epoch gets tracked and is included in the checkpoint file
     # when backing up.
@@ -92,7 +88,7 @@ class WorkerTrainingState(object):
     Args:
       epoch: The current epoch information to be saved.
     """
-    K.set_value(self._ckpt_saved_epoch, epoch)
+    backend.set_value(self._ckpt_saved_epoch, epoch)
     # Save the model plus CKPT_SAVED_EPOCH variable.
     if self.write_checkpoint_manager.save():
       distributed_file_utils.remove_temp_dirpath(
@@ -139,7 +135,7 @@ class WorkerTrainingState(object):
       at. Otherwise, return the `initial_epoch` the user passes in.
     """
 
-    epoch = K.eval(self._ckpt_saved_epoch)
+    epoch = backend.eval(self._ckpt_saved_epoch)
     if mode == mode_keys.ModeKeys.TRAIN and epoch >= 0:
       # The most recently saved epoch is one epoch prior to the epoch it
       # failed at, so return the value of 'self._ckpt_saved_epoch' plus one.

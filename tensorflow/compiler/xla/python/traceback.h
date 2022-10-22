@@ -22,25 +22,33 @@ limitations under the License.
 
 #include "absl/container/inlined_vector.h"
 #include "pybind11/pybind11.h"
+#include "pybind11/stl.h"
 
 namespace xla {
 
 // Represents a Python traceback.
 class Traceback {
  public:
-  // Require GIL.
+  // Require GIL. Creates a Traceback object that requires destructor to be
+  // invoked with GIL held as well.
   static std::shared_ptr<Traceback> Get();
+
+  // Safely destroy the traceback object regardless of whether GIL is held or
+  // not.
+  static void SafeDestroy(Traceback traceback);
 
   // Require GIL.
   static bool enabled() { return enabled_; }
   // Require GIL.
   static void SetEnabled(bool enabled);
 
-  Traceback() = default;
+  // Require GIL.
+  Traceback();
+  // Require GIL.
   ~Traceback();
 
   Traceback(const Traceback&) = delete;
-  Traceback(Traceback&&) = delete;
+  Traceback(Traceback&& other);
   Traceback& operator=(const Traceback&) = delete;
   Traceback& operator=(Traceback&&) = delete;
 
@@ -62,12 +70,31 @@ class Traceback {
     return frames_;
   }
 
+  // Returns the traceback as a fake Python Traceback object, suitable for
+  // using as an exception traceback.
+  pybind11::object AsPythonTraceback() const;
+
+  bool operator==(const Traceback& other) const {
+    return frames_ == other.frames_;
+  }
+  bool operator!=(const Traceback& other) const {
+    return frames_ != other.frames_;
+  }
+
  private:
   absl::InlinedVector<std::pair<PyCodeObject*, int>, 32> frames_;
 
   // Protected by GIL.
   static bool enabled_;
 };
+
+template <typename H>
+H AbslHashValue(H h, const Traceback& traceback) {
+  h = H::combine(std::move(h), traceback.raw_frames());
+  return h;
+}
+
+void BuildTracebackSubmodule(pybind11::module& m);
 
 }  // namespace xla
 

@@ -2,10 +2,8 @@ load("//tensorflow:tensorflow.bzl", "tf_py_test")
 
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
-
-exports_files(["LICENSE"])
 
 py_library(
     name = "module",
@@ -16,8 +14,7 @@ py_library(
         "//tensorflow/python:tf2",
         "//tensorflow/python:util",
         "//tensorflow/python:variables",
-        "//tensorflow/python/training/tracking",
-        "@six_archive//:six",
+        "//tensorflow/python/trackable:autotrackable",
     ],
 )
 

@@ -7,8 +7,11 @@ load(
 load("//tensorflow:tensorflow.bzl", "get_compatible_with_portable")
 
 package(
-    default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    default_visibility = [
+        "//learning/brain/testing/tf2_migration_tools:__pkg__",
+        "//tensorflow:internal",
+    ],
+    licenses = ["notice"],
 )
 
 py_library(
@@ -83,6 +86,7 @@ py_library(
     srcs = ["renames_v2.py"],
     compatible_with = get_compatible_with_portable(),
     srcs_version = "PY3",
+    visibility = ["//tensorflow:internal"],
 )
 
 py_library(
@@ -96,10 +100,7 @@ py_library(
     srcs = ["all_renames_v2.py"],
     compatible_with = get_compatible_with_portable(),
     srcs_version = "PY3",
-    visibility = [
-        "//tensorflow:__pkg__",
-        "//tensorflow:__subpackages__",
-    ],
+    visibility = ["//tensorflow:__subpackages__"],
     deps = [":renames_v2"],
 )
 
@@ -166,20 +167,24 @@ py_test(
     name = "tf_upgrade_v2_test",
     srcs = ["tf_upgrade_v2_test.py"],
     python_version = "PY3",
+    shard_count = 5,
     srcs_version = "PY3",
     tags = [
         "no_windows",
+        "nomsan",
         "v1only",
     ],
     deps = [
         ":tf_upgrade_v2_lib",
+        "@six_archive//:six",
+        # copybara:uncomment "//third_party/py/tensorflow:tensorflow_compat_v1_estimator",
+        # copybara:uncomment "//third_party/py/tensorflow:tensorflow_compat_v2_estimator",
         "//tensorflow:tensorflow_py",
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_test_lib",
         "//tensorflow/tools/common:public_api",
         "//tensorflow/tools/common:traverse",
         "@absl_py//absl/testing:parameterized",
-        "@six_archive//:six",
     ],
 )
 
@@ -224,7 +229,7 @@ genrule(
 
 py_test(
     name = "test_file_v1_0",
-    size = "small",
+    size = "medium",
     srcs = ["test_file_v1_0.py"],
     python_version = "PY3",
     srcs_version = "PY3",

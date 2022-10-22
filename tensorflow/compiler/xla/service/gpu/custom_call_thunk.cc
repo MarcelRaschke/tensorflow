@@ -18,21 +18,22 @@ limitations under the License.
 #include "absl/strings/str_format.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/core/platform/errors.h"
+#include "tensorflow/tsl/platform/errors.h"
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-#include "tensorflow/stream_executor/gpu/gpu_stream.h"
+#include "tensorflow/compiler/xla/stream_executor/gpu/gpu_stream.h"
 #endif
 
 namespace xla {
 namespace gpu {
 
-CustomCallThunk::CustomCallThunk(ThunkInfo thunk_info, void* call_target,
+CustomCallThunk::CustomCallThunk(ThunkInfo thunk_info,
+                                 CustomCallTarget call_target,
                                  std::vector<OptionalSlice> operands,
                                  std::vector<OptionalSlice> results,
                                  const std::string& opaque)
     : Thunk(Thunk::kCustomCall, thunk_info),
-      call_target_(call_target),
+      call_target_(std::move(call_target)),
       operands_(std::move(operands)),
       results_(std::move(results)),
       opaque_(opaque) {}
@@ -56,11 +57,15 @@ Status CustomCallThunk::ExecuteOnStream(const ExecuteParams& params) {
 
 #if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   auto gpu_stream = se::gpu::AsGpuStreamValue(params.stream);
-  using call_type = void (*)(decltype(gpu_stream), void** /*buffers*/,
-                             const char* /*opaque*/, size_t /*opaque_len*/);
-  auto typed_call_target = reinterpret_cast<call_type>(call_target_);
-  typed_call_target(gpu_stream, buffers.data(), opaque_.data(), opaque_.size());
-  return Status::OK();
+  XlaCustomCallStatus custom_call_status;
+  call_target_(gpu_stream, buffers.data(), opaque_.data(), opaque_.size(),
+               &custom_call_status);
+  auto message = CustomCallStatusGetMessage(&custom_call_status);
+  if (message) {
+    return InternalError("CustomCall failed: %s", *message);
+  } else {
+    return OkStatus();
+  }
 #else   //  GOOGLE_CUDA || TENSORFLOW_USE_ROCM
   return Unavailable(
       "Custom calls on GPU are not supported in this configuration. Please "

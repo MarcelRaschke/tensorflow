@@ -17,6 +17,7 @@ limitations under the License.
 
 include "mlir/IR/OpBase.td"
 include "tensorflow/compiler/mlir/tensorflow/ir/tf_ops.td"
+include "tensorflow/compiler/mlir/tensorflow/transforms/rewrite_util.td"
 
 /// TODO(b/130756570): Support OpBase constraints in PatternRewrites.
 def SingleResultAndOperandHaveSameElementType : Constraint<
@@ -50,6 +51,24 @@ def AddV2OfNegLeft : Pat<(TF_AddV2Op (TF_NegOp $arg0), $arg1),
 
 def AddV2OfNegRight : Pat<(TF_AddV2Op $arg0, (TF_NegOp $arg1)),
                           (TF_SubOp $arg0, $arg1)>;
+
+//===----------------------------------------------------------------------===//
+// Gather op patterns.
+//===----------------------------------------------------------------------===//
+
+class GetI32Attr<int x>: NativeCodeCall<
+  "$_builder.getI32IntegerAttr(" # x # ")">;
+
+class GetI64Attr<int x>: NativeCodeCall<
+  "$_builder.getI64IntegerAttr(" # x # ")">;
+
+// The deprecated validate_indices attribute is NOT verified during
+// canonicalization because it is neither supported in the old bridge
+// nor in the reference TF implementation.
+def GatherToV2 :
+  Pat<(TF_GatherOp $params, $indices, $ignored_validate_indices),
+      (TF_GatherV2Op $params, $indices,
+        (TF_ConstOp (GetI32Attr<0>)), (GetI64Attr<0>))>;
 
 //===----------------------------------------------------------------------===//
 // BatchMatMul op patterns.
@@ -97,7 +116,7 @@ def BatchToSpaceToBatchToSpaceND :
 //===----------------------------------------------------------------------===//
 
 def BiasAddV1ToBiasAdd : Pat<(TF_BiasAddV1Op $arg0, $arg1),
-  (TF_BiasAddOp $arg0, $arg1, ConstantAttr<TF_ConvnetDataFormatAttr, "NHWC">)>;
+  (TF_BiasAddOp $arg0, $arg1, ConstantAttr<TF_ConvnetDataFormatAttr, "\"NHWC\"">)>;
 
 //===----------------------------------------------------------------------===//
 // Bitcast op patterns.
@@ -172,9 +191,6 @@ def LogicalNotOfLessEqual : Pat<(TF_LogicalNotOp (TF_LessEqualOp $arg0, $arg1)),
 // MatrixSetDiag op patterns.
 //===----------------------------------------------------------------------===//
 
-class GetI32Attr<int x>: NativeCodeCall<
-  "$_builder.getI32IntegerAttr(" # x # ")">;
-
 class GetStrAttr<string x>: NativeCodeCall<
   "$_builder.getStringAttr(\"" # x # "\")">;
 
@@ -187,6 +203,28 @@ def MatrixSetDiagToV3 : Pat<(TF_MatrixSetDiagOp $input, $diag),
 def MatrixSetDiagV2ToV3 : Pat<(TF_MatrixSetDiagV2Op $input, $diag, $k),
                               (TF_MatrixSetDiagV3Op $input, $diag, $k,
                                 (GetStrAttr<"LEFT_LEFT">))>;
+
+//===----------------------------------------------------------------------===//
+// MatrixDiag Op.
+//===----------------------------------------------------------------------===//
+
+def MatrixDiagToV3 : Pat<(TF_MatrixDiagOp $diag),
+                         (TF_MatrixDiagV3Op $diag,
+                           (TF_ConstOp (GetI32Attr<0>)),
+                           (TF_ConstOp (GetI32Attr<-1>)),
+                           (TF_ConstOp (GetI32Attr<-1>)),
+                           (TF_ConstOp (GetScalarOfType<0> $diag)),
+                           (GetStrAttr<"RIGHT_LEFT">))>;
+
+//===----------------------------------------------------------------------===//
+// QuantizeAndDequantizeV2 op patterns.
+//===----------------------------------------------------------------------===//
+
+def QuantizeAndDequantizeV2ToQuantizeAndDequantizeV4 : Pat<
+  (TF_QuantizeAndDequantizeV2Op $inputs, $min, $max, $signed_input, $num_bits,
+    $range_given, $round_mode, $narrow_range, $axis),
+  (TF_QuantizeAndDequantizeV4Op $inputs, $min, $max, $signed_input, $num_bits,
+    $range_given, $round_mode, $narrow_range, $axis)>;
 
 //===----------------------------------------------------------------------===//
 // RealDiv op patterns.
@@ -214,27 +252,15 @@ def ReshapeToSelfShape : Pat<(TF_ReshapeOp:$op $x, (TF_ShapeOp $x)),
                          [(SingleResultAndOperandHaveSameType $x, $op)]>;
 
 //===----------------------------------------------------------------------===//
-// Select op patterns.
-//===----------------------------------------------------------------------===//
-
-def ReshapeSelectPredIfNecessary : NativeCodeCall<
-  "ReshapeSelectPredIfNecessary(&($_builder), $0.getOwner()->getLoc(), $1, "
-  "$2.getType().cast<RankedTensorType>().getRank())">;
-
-// Select supports tensor `condition` where the shape is equal to the first
-// dimension of t and e. SelectV2 op supports normal broadcasting, so in these
-// cases the condition needs to be reshaped.
-def SelectToSelectV2 : Pat<
-  (TF_SelectOp:$op StaticShapeTensorOf<[AnyType]>:$cond,
-                   StaticShapeTensorOf<[AnyType]>:$t,
-                   StaticShapeTensorOf<[AnyType]>:$e),
-  (TF_SelectV2Op (ReshapeSelectPredIfNecessary $op, $cond, $t), $t, $e)>;
-
-//===----------------------------------------------------------------------===//
 // Square op patterns.
 //===----------------------------------------------------------------------===//
 
-def SquareOfSub : Pat<(TF_SquareOp (TF_SubOp $arg0, $arg1)),
+// Restrict the pattern to the types supported by SquaredDifferenceOp.
+def TF_NumberTensorNoSmallInt: TensorOf<[TF_Bfloat16, TF_Complex128, TF_Complex64,
+    TF_Float16, TF_Float32, TF_Int32, TF_Int64]>;
+
+def SquareOfSub : Pat<(TF_SquareOp (TF_SubOp TF_NumberTensorNoSmallInt:$arg0,
+                                    TF_NumberTensorNoSmallInt:$arg1)),
                       (TF_SquaredDifferenceOp $arg0, $arg1)>;
 
 //===----------------------------------------------------------------------===//
@@ -271,3 +297,62 @@ def ReadVariableOfCast : Pat<(TF_ReadVariableOp (TF_CastOp:$output $x, BoolAttr:
 //===----------------------------------------------------------------------===//
 
 def VariableToVariableV2 : Pat<(TF_VariableOp $shape, $container, $shard_name), (TF_VariableV2Op $shape, $container, $shard_name)>;
+
+
+//===----------------------------------------------------------------------===//
+// Canonicalize tf.HashTable and its user ops to V2 versions.
+//===----------------------------------------------------------------------===//
+def HashTableAndInitializeTableToV2 :
+ Pat<
+   (TF_InitializeTableFromTextFileOp
+     (TF_HashTableOp $container, $shared_name, $use_node_name_sharing, $key_dtype, $value_dtype),
+     $filename, $key_index, $value_index, $vocab_size, $delimiter, $offset),
+   (TF_InitializeTableFromTextFileV2Op
+     (TF_HashTableV2Op $container, $shared_name, $use_node_name_sharing, $key_dtype, $value_dtype),
+     $filename, $key_index, $value_index, $vocab_size, $delimiter, $offset)
+  >;
+
+def HashTableAndLookupTableSizeToV2 :
+ Pat<
+   (TF_LookupTableSizeOp
+     (TF_HashTableOp $container, $shared_name, $use_node_name_sharing, $key_dtype, $value_dtype)),
+   (TF_LookupTableSizeV2Op
+     (TF_HashTableV2Op $container, $shared_name, $use_node_name_sharing, $key_dtype, $value_dtype))
+  >;
+
+def HashTableAndLookupTableFindToV2 :
+ Pat<
+   (TF_LookupTableFindOp
+     (TF_HashTableOp $container, $shared_name, $use_node_name_sharing, $key_dtype, $value_dtype),
+     $keys, $default_value),
+   (TF_LookupTableFindV2Op
+     (TF_HashTableV2Op $container, $shared_name, $use_node_name_sharing, $key_dtype, $value_dtype),
+     $keys, $default_value)
+ >;
+
+//===----------------------------------------------------------------------===//
+// Canonicalize tf.Maximum of zero to tf.Relu
+//===----------------------------------------------------------------------===//
+
+def IsInteger32Pred: CPred<
+  "getElementTypeOrSelf($0.getType()).isInteger(32)">;
+
+// Whether the transformation is compatible with the device if given.
+// Currently, Relu with int32 is not supported on GPU.
+def IsDeviceCompatible: Constraint<
+  Neg<And<[IsOnGpuDevicePred, IsInteger32Pred]>>>;
+
+// TODO(b/239736969): Remove the device compatibility constraint to make the
+// canonicalization device independent, by adding an int32 GPU kernel for Relu.
+def MaximumOfZeroToRelu : Pat<
+  (TF_MaximumOp:$maximum_op $x, $y), (TF_ReluOp $x),
+  [(IsConstantValueOf<0> $y), (IsDeviceCompatible $maximum_op)]>;
+
+//===----------------------------------------------------------------------===//
+// Canonicalize tf.Relu of Minimul six to tf.Relu6
+//===----------------------------------------------------------------------===//
+
+def ReluOfMinimum6ToRelu6 :
+  Pat<(TF_ReluOp (TF_MinimumOp $x, $y)),
+      (TF_Relu6Op $x),
+      [(IsConstantValueOf<6> $y)]>;

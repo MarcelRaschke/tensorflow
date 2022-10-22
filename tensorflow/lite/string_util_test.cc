@@ -19,7 +19,7 @@ limitations under the License.
 #include <string>
 
 #include <gtest/gtest.h>
-#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/core/interpreter.h"
 #include "tensorflow/lite/string_type.h"
 #include "tensorflow/lite/testing/util.h"
 
@@ -195,9 +195,3 @@ TEST(StringUtil, TestShapes) {
 }
 
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

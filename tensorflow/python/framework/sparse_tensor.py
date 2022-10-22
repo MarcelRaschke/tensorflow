@@ -14,10 +14,6 @@
 # ==============================================================================
 """Sparse tensors."""
 # pylint: disable=g-bad-name
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 
 import numpy as np
@@ -106,8 +102,8 @@ class SparseTensor(internal.NativeObject, composite_tensor.CompositeTensor):
   @classmethod
   def from_value(cls, sparse_tensor_value):
     if not is_sparse(sparse_tensor_value):
-      raise TypeError("Neither a SparseTensor nor SparseTensorValue: %s." %
-                      sparse_tensor_value)
+      raise TypeError(f"Argument sparse_tensor_value={sparse_tensor_value} "
+                      "is neither a SparseTensor nor SparseTensorValue.")
     return SparseTensor(
         indices=sparse_tensor_value.indices,
         values=sparse_tensor_value.values,
@@ -232,7 +228,7 @@ class SparseTensor(internal.NativeObject, composite_tensor.CompositeTensor):
     """The `Graph` that contains the index, value, and dense_shape tensors."""
     return self._indices.graph
 
-  def __str__(self):
+  def __repr__(self):
     return "SparseTensor(indices=%s, values=%s, dense_shape=%s)" % (
         self._indices, self._values, self._dense_shape)
 
@@ -277,12 +273,37 @@ class SparseTensor(internal.NativeObject, composite_tensor.CompositeTensor):
     # invariant here is the shape of the SparseTensor.dense_shape property. It
     # must be the shape of a vector.
     if shape.ndims is not None and shape.ndims != 1:
-      raise ValueError("Expected a shape with 1 dimension")
+      raise ValueError(f"Expected a shape with 1 dimension. Obtained: {shape} "
+                       f"which has {shape.ndims} dimensions.")
     rank = tensor_shape.dimension_value(shape[0])
     return SparseTensorSpec(tensor_shape.unknown_shape(rank), self.dtype)
 
   def consumers(self):
     return self._consumers()
+
+  def _numpy(self):
+    """Returns a numpy `array` with the values for this `SparseTensor`.
+
+    Requires that this `SparseTensor` was constructed in eager execution mode.
+    """
+    if not self._is_eager():
+      raise ValueError("SparseTensor.numpy() is only supported in eager mode.")
+    arr = np.zeros(self.dense_shape, dtype=self.dtype.as_numpy_dtype())
+    for i, v in zip(self.indices, self.values):
+      arr[tuple(i)] = v
+
+    return arr
+
+  def _is_eager(self):
+    """Returns True if this `SparseTensor` was constructed in eager execution.
+
+    Requires that each individual component of `SparseTensor`
+    (`indices`, `values` and `dense_shape`) is an instance of `EagerTensor`.
+    """
+
+    return all(
+        isinstance(t, ops.EagerTensor)
+        for t in (self.indices, self.values, self.dense_shape))
 
 
 SparseTensorValue = collections.namedtuple("SparseTensorValue",
@@ -366,7 +387,8 @@ class SparseTensorSpec(type_spec.BatchableTypeSpec):
     dense_shape = tensor_util.constant_value_as_shape(value.dense_shape)
     if self._shape.merge_with(dense_shape).ndims == 0:
       raise ValueError(
-          "Unbatching a sparse tensor is only supported for rank >= 1")
+          "Unbatching a sparse tensor is only supported for rank >= 1. "
+          f"Obtained input: {value}.")
     return [gen_sparse_ops.serialize_many_sparse(
         value.indices, value.values, value.dense_shape,
         out_type=dtypes.variant)]
@@ -425,7 +447,8 @@ class SparseTensorSpec(type_spec.BatchableTypeSpec):
       else:
         return cls.from_value(SparseTensor.from_value(value))
     else:
-      raise TypeError("Expected SparseTensor or SparseTensorValue")
+      raise TypeError("Expected SparseTensor or SparseTensorValue. Received: "
+                      f"{value} of type {type(value).__name__}.")
 
 
 # TODO(b/133606651) Delete the SparseTensor registration when CompositeTensor
@@ -460,8 +483,8 @@ def convert_to_tensor_or_sparse_tensor(value, dtype=None, name=None):
     value = SparseTensor.from_value(value)
   if isinstance(value, SparseTensor):
     if dtype and not dtype.is_compatible_with(value.dtype):
-      raise RuntimeError("Sparse dtype: requested = %s, actual = %s" %
-                         (dtype.name, value.dtype.name))
+      raise RuntimeError(f"Sparse dtype mismatch. Requested: {dtype.name}, "
+                         f" Actual: {value.dtype.name}")
     return value
   return ops.convert_to_tensor(value, dtype=dtype, name=name)
 

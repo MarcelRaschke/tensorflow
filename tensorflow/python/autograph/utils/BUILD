@@ -1,7 +1,7 @@
 load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 filegroup(
@@ -13,7 +13,7 @@ filegroup(
             "**/OWNERS",
         ],
     ),
-    visibility = ["//tensorflow:__subpackages__"],
+    visibility = ["//visibility:private"],
 )
 
 py_library(
@@ -38,7 +38,6 @@ py_library(
         "//tensorflow/python:util",
         "//tensorflow/python/autograph/pyct",
         "//tensorflow/python/data/ops:dataset_ops",
-        "@six_archive//:six",
     ],
 )
 

@@ -103,7 +103,7 @@ class OpsTestBase : public ::testing::Test {
   // Like AddInput but takes in an explicit arrayslice of data.
   template <typename T>
   void AddInputFromArray(const TensorShape& shape,
-                         const gtl::ArraySlice<T>& data) {
+                         const gtl::ArraySlice<T> data) {
     test::FillValues<T>(AddInput(DataTypeToEnum<T>::v(), shape), data);
   }
 
@@ -147,6 +147,8 @@ class OpsTestBase : public ::testing::Test {
   Tensor* GetOutput(int output_index);
 
   Allocator* allocator();
+
+  OpKernel* op_kernel();
 
   const DataTypeVector& output_types() const;
 

@@ -92,14 +92,16 @@ Status SingleMachine::Provision() {
         return errors::InvalidArgument(
             strings::StrCat("Not able to parse GPU device name: ", dev.name()));
       }
-      TfGpuId tf_gpu_id(parsed.id);
-      PlatformGpuId platform_gpu_id;
-      Status s = GpuIdManager::TfToPlatformGpuId(tf_gpu_id, &platform_gpu_id);
+      TfDeviceId tf_device_id(parsed.id);
+      PlatformDeviceId platform_device_id;
+      Status s =
+          GpuIdManager::TfToPlatformDeviceId(tf_device_id, &platform_device_id);
       if (!s.ok()) {
         return errors::Unavailable("Unknown TF GPU device with id ",
-                                   tf_gpu_id.value(), ": ", s.ToString());
+                                   tf_device_id.value(), ": ",
+                                   s.error_message());
       }
-      attr = GetLocalGPUInfo(platform_gpu_id);
+      attr = GetLocalGPUInfo(platform_device_id);
     } else if (dev.device_type().find("XLA") == string::npos) {
       // Filter out the fake XLA devices to avoid double counting the actual
       // hardware resources that are available.
@@ -116,7 +118,7 @@ Status SingleMachine::Provision() {
   if (cpu_allocator_stats_enabled_) {
     TF_RETURN_IF_ERROR(ClearAllocatorStats());
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::Initialize(const GrapplerItem& item) {
@@ -128,7 +130,7 @@ Status SingleMachine::Initialize(const GrapplerItem& item) {
     queue_runner_defs_ = item.queue_runners;
     last_graph_id_ = item.id;
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::Shutdown() {
@@ -138,7 +140,7 @@ Status SingleMachine::Shutdown() {
   last_graph_ = nullptr;
   already_provisioned = false;
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::Run(const GraphDef& graph_def,
@@ -151,7 +153,7 @@ Status SingleMachine::Run(const GraphDef& graph_def,
     TF_RETURN_IF_ERROR(session_->Create(graph_def));
     if (!init_ops_.empty()) {
       init_metadata_ = RunMetadata();
-      int64 timeout_s = timeout_s_ + expected_init_time_s_;
+      int64_t timeout_s = timeout_s_ + expected_init_time_s_;
       TF_RETURN_IF_ERROR(
           RunWithTimeout({}, init_ops_, &init_metadata_, timeout_s));
       // The compute cost for init ops is likely to be pessimistic since init
@@ -199,14 +201,14 @@ Status SingleMachine::Run(const GraphDef& graph_def,
 
   last_graph_ = &graph_def;
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::EnablePeakMemoryStats() {
   EnableCPUAllocatorStats();
   cpu_allocator_stats_enabled_ = true;
   // No need to enable GPU allocator stats since its stats are always collected.
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::GetPeakMemoryUsage(
@@ -234,7 +236,7 @@ Status SingleMachine::GetPeakMemoryUsage(
         (stats ? stats->peak_bytes_in_use : 0);
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::RunWithTimeout(
@@ -246,7 +248,7 @@ Status SingleMachine::RunWithTimeout(
 Status SingleMachine::RunWithTimeout(
     const std::vector<std::pair<string, Tensor>>& feed,
     const std::vector<string>& fetch, RunMetadata* run_metadata,
-    int64 timeout_s) {
+    int64_t timeout_s) {
   // We shouldn't be running or closing the session at this point.
   {
     mutex_lock l(close_mu_);
@@ -272,7 +274,7 @@ Status SingleMachine::RunWithTimeout(
 
 Status SingleMachine::CloseSession(bool use_timeout) {
   if (!session_ || !thread_pool_) {
-    return Status::OK();
+    return OkStatus();
   }
 
   {
@@ -289,7 +291,7 @@ Status SingleMachine::CloseSession(bool use_timeout) {
           this->coordinator_->RequestStop().IgnoreError();
           // Wait for all the runners to have closed their queues.
           while (!this->coordinator_->AllRunnersStopped()) {
-            sleep(1);
+            Env::Default()->SleepForMicroseconds(1000000);
           }
           // Now we can close the session. This should cancel any pending I/O
           // operation.
@@ -312,7 +314,7 @@ Status SingleMachine::CloseSession(bool use_timeout) {
                                timeout_s_, " seconds, aborting");
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::ShutdownSession() {
@@ -329,7 +331,7 @@ Status SingleMachine::ShutdownSession() {
     thread_pool_.reset();
     n->Notify();
   });
-  int64 timeout_us = 1000000ll * timeout_s_;
+  int64_t timeout_us = 1000000ll * timeout_s_;
   const bool notified = WaitForNotificationWithTimeout(n.get(), timeout_us);
   if (!notified) {
     // Let the caller know that we can't shutdown the session properly since
@@ -338,7 +340,7 @@ Status SingleMachine::ShutdownSession() {
                                timeout_s_, " seconds");
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status SingleMachine::ResetSession() {
@@ -374,7 +376,7 @@ Status SingleMachine::ResetSession() {
     // We currently don't care about the client device.
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 void SingleMachine::MergeCosts(CostGraphDef* graph_costs,
@@ -457,9 +459,14 @@ Status SingleMachine::ClearAllocatorStats() const {
       return Status(error::INVALID_ARGUMENT,
                     "Tracking allocation is not enabled.");
     }
-    allocator->ClearStats();
+    if (!allocator->ClearStats()) {
+      return Status(
+          error::INVALID_ARGUMENT,
+          absl::StrCat("Clearing allocation stats is not supported for ",
+                       device->name()));
+    }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace grappler

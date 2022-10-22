@@ -53,15 +53,15 @@ class TransposeOp : public XlaOpKernel {
                                         ". But input(1) is a vector of size ",
                                         perm_tensor_shape.num_elements()));
 
-    std::vector<int64> perm;
+    std::vector<int64_t> perm;
     OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntVector("perm", &perm));
 
-    std::vector<int64> transposed_order;
+    std::vector<int64_t> transposed_order;
     // Check whether permutation is a permutation of integers of [0 .. dims).
     absl::InlinedVector<bool, 8> bits(dims);
     bool is_identity = true;
     for (int i = 0; i < dims; ++i) {
-      const int64 d = perm[i];
+      const int64_t d = perm[i];
       OP_REQUIRES(
           ctx, 0 <= d && d < dims,
           errors::InvalidArgument(d, " is out of range [0 .. ", dims, ")"));
@@ -130,7 +130,7 @@ class InvertPermutationOp : public XlaOpKernel {
         InvertPermutation<int32>(ctx);
         break;
       case DT_INT64:
-        InvertPermutation<int64>(ctx);
+        InvertPermutation<int64_t>(ctx);
         break;
       default:
         // This should never happen since we restrict this kernel to only match
@@ -151,15 +151,16 @@ class InvertPermutationOp : public XlaOpKernel {
                     std::numeric_limits<T>::max(), " elements"));
 
     auto e = ctx->InputExpression(0);
-    auto tensor_or_status = e.ResolveConstant(ctx->compiler()->client());
+    auto* client = ctx->compiler() ? ctx->compiler()->client() : nullptr;
+    auto tensor_or_status = e.ResolveConstant(client);
     OP_REQUIRES_OK(ctx, tensor_or_status.status());
     // If the input is a constant, we also want the output to be a constant.
     // Some models rely on the result of InvertPermutation being a constant.
     // TODO(b/32495713): Remove this when we can check whether Scatter is
     // constant. Right now, we always assume it is non-constant because we don't
     // check the embedded computation.
-    if (tensor_or_status.ValueOrDie().has_value()) {
-      std::vector<int64> perm;
+    if (tensor_or_status.value().has_value()) {
+      std::vector<int64_t> perm;
       OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntVector(0, &perm));
 
       int size = perm.size();
@@ -167,7 +168,7 @@ class InvertPermutationOp : public XlaOpKernel {
       std::vector<T> output(size);
       std::fill_n(output.data(), size, -1);
       for (int i = 0; i < size; ++i) {
-        const int64 d = perm[i];
+        const int64_t d = perm[i];
         OP_REQUIRES(ctx, FastBoundsCheck(d, size),
                     errors::InvalidArgument(d, " is not between 0 and ", size));
         OP_REQUIRES(ctx, output[d] == -1,
@@ -186,7 +187,7 @@ class InvertPermutationOp : public XlaOpKernel {
                                /*indices_are_vectors=*/false, /*combiner=*/{},
                                ctx->builder());
       OP_REQUIRES_OK(ctx, result.status());
-      ctx->SetOutput(0, result.ValueOrDie());
+      ctx->SetOutput(0, result.value());
     }
   }
 };

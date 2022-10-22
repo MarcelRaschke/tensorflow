@@ -31,8 +31,8 @@ namespace tensorflow {
 
 template <typename T>
 struct SplitOpGPULaunch {
-  void Run(const Eigen::GpuDevice& d, const T* input, int32 prefix_dim_size,
-           int32 split_dim_size, int32 suffix_dim_size,
+  void Run(const Eigen::GpuDevice& d, const T* input, int32_t prefix_dim_size,
+           int32_t split_dim_size, int32_t suffix_dim_size,
            const GpuDeviceArrayStruct<T*>& output_ptr_data);
 };
 
@@ -47,8 +47,9 @@ struct SplitVOpGPULaunch {
 // Explicit instantiations in split_lib_gpu.cu.cc.
 #define REGISTER_GPU_KERNEL(T)                        \
   extern template struct SplitOpGPULaunch<T>;         \
+  extern template struct SplitVOpGPULaunch<T, int8>;  \
   extern template struct SplitVOpGPULaunch<T, int32>; \
-  extern template struct SplitVOpGPULaunch<T, int64>;
+  extern template struct SplitVOpGPULaunch<T, int64_t>;
 
 TF_CALL_bfloat16(REGISTER_GPU_KERNEL);
 TF_CALL_uint8(REGISTER_GPU_KERNEL);

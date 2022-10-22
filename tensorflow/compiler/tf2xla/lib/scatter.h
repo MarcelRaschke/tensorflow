@@ -20,7 +20,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/client/xla_builder.h"
 #include "tensorflow/compiler/xla/client/xla_computation.h"
-#include "tensorflow/compiler/xla/statusor.h"
+#include "tensorflow/core/platform/statusor.h"
 
 namespace tensorflow {
 
@@ -43,7 +43,7 @@ namespace tensorflow {
 // If a `combiner` is provided, updates are combined with the existing values in
 // the buffer using the combiner function. Otherwise, the updates replace the
 // existing values. The order of updates is implementation-defined.
-xla::StatusOr<xla::XlaOp> XlaScatter(
+StatusOr<xla::XlaOp> XlaScatter(
     const xla::XlaOp& buffer, const xla::XlaOp& updates,
     const xla::XlaOp& indices, bool indices_are_vectors,
     const std::function<xla::XlaOp(xla::XlaOp, xla::XlaOp, xla::XlaBuilder*)>&

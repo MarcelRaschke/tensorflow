@@ -24,10 +24,12 @@ limitations under the License.
 #include "tensorflow/c/eager/tfe_context_internal.h"
 #include "tensorflow/c/eager/tfe_op_internal.h"
 #include "tensorflow/c/eager/tfe_tensorhandle_internal.h"
+#include "tensorflow/c/tf_buffer_internal.h"
 #include "tensorflow/compiler/jit/flags.h"
 #include "tensorflow/core/common_runtime/eager/attr_builder.h"
 #include "tensorflow/core/common_runtime/eager/context.h"
 #include "tensorflow/core/common_runtime/eager/eager_operation.h"
+#include "tensorflow/core/common_runtime/pluggable_device/pluggable_device_plugin_init.h"
 #include "tensorflow/core/distributed_runtime/rpc/grpc_server_lib.h"
 #include "tensorflow/core/framework/collective.h"
 #include "tensorflow/core/framework/node_def.pb.h"
@@ -99,6 +101,13 @@ unsigned char TF_SetTfXlaCpuGlobalJit(unsigned char enable) {
 
 void TF_SetXlaAutoJitMode(const char* mode) {
   tensorflow::SetXlaAutoJitFlagFromFlagString(mode);
+}
+
+unsigned char TF_GetXlaAutoJitEnabled() {
+  tensorflow::XlaAutoJitFlag flag =
+      tensorflow::GetMarkForCompilationPassFlags()->xla_auto_jit_flag;
+  return static_cast<unsigned char>(flag.optimization_level_single_gpu > 0 ||
+                                    flag.optimization_level_general > 0);
 }
 
 unsigned char TF_GetXlaConstantFoldingDisabled() {
@@ -492,7 +501,7 @@ TFE_TensorHandle* TFE_NewTensorHandleFromScalar(TF_DataType data_type,
   tensorflow::Tensor tensor(dtype, tensorflow::TensorShape({}));
   std::memcpy(tensorflow::TensorCApi::Buffer(tensor)->data(), data, len);
 
-  status->status = tensorflow::Status::OK();
+  status->status = ::tensorflow::OkStatus();
   return tensorflow::wrap(tensorflow::TensorHandle::CreateLocalHandle(tensor));
 }
 
@@ -507,9 +516,7 @@ TF_CAPI_EXPORT extern void TFE_EnableCollectiveOps(TFE_Context* ctx,
         "Invalid tensorflow.ServerDef protocol buffer");
     return;
   }
-  status->status =
-      tensorflow::unwrap(ctx)->GetDistributedManager()->EnableCollectiveOps(
-          server_def);
+  status->status = tensorflow::unwrap(ctx)->EnableCollectiveOps(server_def);
 }
 
 TF_CAPI_EXPORT extern void TFE_AbortCollectiveOps(TFE_Context* ctx,
@@ -735,7 +742,10 @@ TF_Library* TF_LoadPluggableDeviceLibrary(const char* library_filename,
     } else {
       status->status =
           env->LoadDynamicLibrary(library_filename, &lib_handle->lib_handle);
-      if (!status->status.ok()) {
+      if (status->status.ok()) {
+        TF_CHECK_OK(
+            tensorflow::RegisterPluggableDevicePlugin(lib_handle->lib_handle));
+      } else {
         delete lib_handle;
         return nullptr;
       }

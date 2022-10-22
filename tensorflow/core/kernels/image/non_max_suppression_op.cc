@@ -111,27 +111,60 @@ static inline void ParseAndCheckCombinedNMSBoxSizes(OpKernelContext* context,
 }
 // Return intersection-over-union overlap between boxes i and j
 template <typename T>
-static inline T IOU(typename TTypes<T, 2>::ConstTensor boxes, int i, int j) {
-  const T ymin_i = std::min<T>(boxes(i, 0), boxes(i, 2));
-  const T xmin_i = std::min<T>(boxes(i, 1), boxes(i, 3));
-  const T ymax_i = std::max<T>(boxes(i, 0), boxes(i, 2));
-  const T xmax_i = std::max<T>(boxes(i, 1), boxes(i, 3));
-  const T ymin_j = std::min<T>(boxes(j, 0), boxes(j, 2));
-  const T xmin_j = std::min<T>(boxes(j, 1), boxes(j, 3));
-  const T ymax_j = std::max<T>(boxes(j, 0), boxes(j, 2));
-  const T xmax_j = std::max<T>(boxes(j, 1), boxes(j, 3));
-  const T area_i = (ymax_i - ymin_i) * (xmax_i - xmin_i);
-  const T area_j = (ymax_j - ymin_j) * (xmax_j - xmin_j);
-  if (area_i <= static_cast<T>(0) || area_j <= static_cast<T>(0)) {
-    return static_cast<T>(0.0);
+static inline float IOU(typename TTypes<T, 2>::ConstTensor boxes, int i,
+                        int j) {
+  const float ymin_i = Eigen::numext::mini<float>(
+      static_cast<float>(boxes(i, 0)), static_cast<float>(boxes(i, 2)));
+  const float xmin_i = Eigen::numext::mini<float>(
+      static_cast<float>(boxes(i, 1)), static_cast<float>(boxes(i, 3)));
+  const float ymax_i = Eigen::numext::maxi<float>(
+      static_cast<float>(boxes(i, 0)), static_cast<float>(boxes(i, 2)));
+  const float xmax_i = Eigen::numext::maxi<float>(
+      static_cast<float>(boxes(i, 1)), static_cast<float>(boxes(i, 3)));
+  const float ymin_j = Eigen::numext::mini<float>(
+      static_cast<float>(boxes(j, 0)), static_cast<float>(boxes(j, 2)));
+  const float xmin_j = Eigen::numext::mini<float>(
+      static_cast<float>(boxes(j, 1)), static_cast<float>(boxes(j, 3)));
+  const float ymax_j = Eigen::numext::maxi<float>(
+      static_cast<float>(boxes(j, 0)), static_cast<float>(boxes(j, 2)));
+  const float xmax_j = Eigen::numext::maxi<float>(
+      static_cast<float>(boxes(j, 1)), static_cast<float>(boxes(j, 3)));
+  const float area_i = (ymax_i - ymin_i) * (xmax_i - xmin_i);
+  const float area_j = (ymax_j - ymin_j) * (xmax_j - xmin_j);
+  if (area_i <= 0 || area_j <= 0) {
+    return 0.0;
   }
-  const T intersection_ymin = std::max<T>(ymin_i, ymin_j);
-  const T intersection_xmin = std::max<T>(xmin_i, xmin_j);
-  const T intersection_ymax = std::min<T>(ymax_i, ymax_j);
-  const T intersection_xmax = std::min<T>(xmax_i, xmax_j);
-  const T intersection_area =
-      std::max<T>(intersection_ymax - intersection_ymin, static_cast<T>(0.0)) *
-      std::max<T>(intersection_xmax - intersection_xmin, static_cast<T>(0.0));
+  const float intersection_ymin = Eigen::numext::maxi<float>(ymin_i, ymin_j);
+  const float intersection_xmin = Eigen::numext::maxi<float>(xmin_i, xmin_j);
+  const float intersection_ymax = Eigen::numext::mini<float>(ymax_i, ymax_j);
+  const float intersection_xmax = Eigen::numext::mini<float>(xmax_i, xmax_j);
+  const float intersection_area =
+      Eigen::numext::maxi<float>(intersection_ymax - intersection_ymin, 0.0) *
+      Eigen::numext::maxi<float>(intersection_xmax - intersection_xmin, 0.0);
+  return intersection_area / (area_i + area_j - intersection_area);
+}
+
+static inline float IOU(const float* boxes, int i, int j) {
+  const float ymin_i = Eigen::numext::mini<float>(boxes[i], boxes[i + 2]);
+  const float xmin_i = Eigen::numext::mini<float>(boxes[i + 1], boxes[i + 3]);
+  const float ymax_i = Eigen::numext::maxi<float>(boxes[i], boxes[i + 2]);
+  const float xmax_i = Eigen::numext::maxi<float>(boxes[i + 1], boxes[i + 3]);
+  const float ymin_j = Eigen::numext::mini<float>(boxes[j], boxes[j + 2]);
+  const float xmin_j = Eigen::numext::mini<float>(boxes[j + 1], boxes[j + 3]);
+  const float ymax_j = Eigen::numext::maxi<float>(boxes[j], boxes[j + 2]);
+  const float xmax_j = Eigen::numext::maxi<float>(boxes[j + 1], boxes[j + 3]);
+  const float area_i = (ymax_i - ymin_i) * (xmax_i - xmin_i);
+  const float area_j = (ymax_j - ymin_j) * (xmax_j - xmin_j);
+  if (area_i <= 0 || area_j <= 0) {
+    return 0.0;
+  }
+  const float intersection_ymin = Eigen::numext::maxi<float>(ymin_i, ymin_j);
+  const float intersection_xmin = Eigen::numext::maxi<float>(xmin_i, xmin_j);
+  const float intersection_ymax = Eigen::numext::mini<float>(ymax_i, ymax_j);
+  const float intersection_xmax = Eigen::numext::mini<float>(xmax_i, xmax_j);
+  const float intersection_area =
+      Eigen::numext::maxi<float>(intersection_ymax - intersection_ymin, 0.0) *
+      Eigen::numext::maxi<float>(intersection_xmax - intersection_xmin, 0.0);
   return intersection_area / (area_i + area_j - intersection_area);
 }
 
@@ -142,7 +175,7 @@ static inline T Overlap(typename TTypes<T, 2>::ConstTensor overlaps, int i,
 }
 
 template <typename T>
-static inline std::function<T(int, int)> CreateIOUSimilarityFn(
+static inline std::function<float(int, int)> CreateIOUSimilarityFn(
     const Tensor& boxes) {
   typename TTypes<T, 2>::ConstTensor boxes_data = boxes.tensor<T, 2>();
   return std::bind(&IOU<T>, boxes_data, std::placeholders::_1,
@@ -163,11 +196,13 @@ void DoNonMaxSuppressionOp(OpKernelContext* context, const Tensor& scores,
                            int num_boxes, const Tensor& max_output_size,
                            const T similarity_threshold,
                            const T score_threshold, const T soft_nms_sigma,
-                           const std::function<T(int, int)>& similarity_fn,
+                           const std::function<float(int, int)>& similarity_fn,
                            bool return_scores_tensor = false,
                            bool pad_to_max_output_size = false,
                            int* ptr_num_valid_outputs = nullptr) {
   const int output_size = max_output_size.scalar<int>()();
+  OP_REQUIRES(context, output_size >= 0,
+              errors::InvalidArgument("output size must be non-negative"));
 
   std::vector<T> scores_data(num_boxes);
   std::copy_n(scores.flat<T>().data(), num_boxes, scores_data.begin());
@@ -199,15 +234,15 @@ void DoNonMaxSuppressionOp(OpKernelContext* context, const Tensor& scores,
 
   auto suppress_weight = [similarity_threshold, scale,
                           is_soft_nms](const T sim) {
-    const T weight =
-        static_cast<T>(std::exp(static_cast<float>(scale * sim * sim)));
+    const T weight = Eigen::numext::exp<T>(scale * sim * sim);
     return is_soft_nms || sim <= similarity_threshold ? weight
                                                       : static_cast<T>(0.0);
   };
 
   std::vector<int> selected;
   std::vector<T> selected_scores;
-  T similarity, original_score;
+  float similarity;
+  T original_score;
   Candidate next_candidate;
 
   while (selected.size() < output_size && !candidate_priority_queue.empty()) {
@@ -228,10 +263,10 @@ void DoNonMaxSuppressionOp(OpKernelContext* context, const Tensor& scores,
          j >= next_candidate.suppress_begin_index; --j) {
       similarity = similarity_fn(next_candidate.box_index, selected[j]);
 
-      next_candidate.score *= suppress_weight(similarity);
+      next_candidate.score *= suppress_weight(static_cast<T>(similarity));
 
       // First decide whether to perform hard suppression
-      if (!is_soft_nms && similarity > static_cast<T>(similarity_threshold)) {
+      if (!is_soft_nms && static_cast<T>(similarity) > similarity_threshold) {
         should_hard_suppress = true;
         break;
       }
@@ -306,23 +341,6 @@ void DoNMSPerClass(int batch_idx, int class_idx, const float* boxes_data,
                    int num_classes, const int size_per_class,
                    const float score_threshold, const float iou_threshold,
                    std::vector<ResultCandidate>& result_candidate_vec) {
-  std::vector<float> class_scores_data;
-  class_scores_data.reserve(num_boxes);
-  std::vector<float> class_boxes_data;
-  class_boxes_data.reserve(num_boxes * 4);
-
-  for (int box_idx = 0; box_idx < num_boxes; ++box_idx) {
-    class_scores_data.push_back(scores_data[box_idx * num_classes + class_idx]);
-    for (int cid = 0; cid < 4; ++cid) {
-      if (q > 1) {
-        class_boxes_data.push_back(
-            boxes_data[(box_idx * q + class_idx) * 4 + cid]);
-      } else {
-        class_boxes_data.push_back(boxes_data[box_idx * 4 + cid]);
-      }
-    }
-  }
-
   // Do NMS, get the candidate indices of form vector<int>
   // Data structure for selection candidate in NMS.
   struct Candidate {
@@ -334,31 +352,35 @@ void DoNMSPerClass(int batch_idx, int class_idx, const float* boxes_data,
   };
   std::priority_queue<Candidate, std::vector<Candidate>, decltype(cmp)>
       candidate_priority_queue(cmp);
+  float temp_score;
   for (int i = 0; i < num_boxes; ++i) {
-    if (class_scores_data[i] > score_threshold) {
-      candidate_priority_queue.emplace(Candidate({i, class_scores_data[i]}));
+    temp_score = scores_data[i * num_classes + class_idx];
+    if (temp_score > score_threshold) {
+      candidate_priority_queue.emplace(Candidate({i, temp_score}));
     }
   }
 
   std::vector<int> selected;
-  std::vector<float> selected_boxes;
   Candidate next_candidate;
 
-  // Move class_boxes_data to a tensor
-  Eigen::array<Eigen::DenseIndex, 2> boxesShape = {num_boxes, 4};
-  typename TTypes<float, 2>::ConstTensor boxes_data_t(class_boxes_data.data(),
-                                                      boxesShape);
+  int candidate_box_data_idx, selected_box_data_idx, class_box_idx;
+  class_box_idx = (q > 1) ? class_idx : 0;
+
   float iou;
   while (selected.size() < size_per_class &&
          !candidate_priority_queue.empty()) {
     next_candidate = candidate_priority_queue.top();
     candidate_priority_queue.pop();
+
+    candidate_box_data_idx = (next_candidate.box_index * q + class_box_idx) * 4;
+
     // Overlapping boxes are likely to have similar scores,
     // therefore we iterate through the previously selected boxes backwards
     // in order to see if `next_candidate` should be suppressed.
     bool should_select = true;
     for (int j = selected.size() - 1; j >= 0; --j) {
-      iou = IOU<float>(boxes_data_t, next_candidate.box_index, selected[j]);
+      selected_box_data_idx = (selected[j] * q + class_box_idx) * 4;
+      iou = IOU(boxes_data, candidate_box_data_idx, selected_box_data_idx);
       if (iou > iou_threshold) {
         should_select = false;
         break;
@@ -367,13 +389,14 @@ void DoNMSPerClass(int batch_idx, int class_idx, const float* boxes_data,
 
     if (should_select) {
       // Add the selected box to the result candidate. Sorted by score
-      int id = next_candidate.box_index;
       result_candidate_vec[selected.size() + size_per_class * class_idx] = {
           next_candidate.box_index,
           next_candidate.score,
           class_idx,
-          {boxes_data_t(id, 0), boxes_data_t(id, 1), boxes_data_t(id, 2),
-           boxes_data_t(id, 3)}};
+          {boxes_data[candidate_box_data_idx],
+           boxes_data[candidate_box_data_idx + 1],
+           boxes_data[candidate_box_data_idx + 2],
+           boxes_data[candidate_box_data_idx + 3]}};
       selected.push_back(next_candidate.box_index);
     }
   }
@@ -571,6 +594,27 @@ void BatchedNonMaxSuppressionOp(
   d.parallelFor(length, cost_copy_result, shard_copy_result);
 }
 
+// Extract a scalar of type T from a tensor, with correct type checking.
+// This is necessary because several of the kernels here assume
+// T == T_threshold.
+template <typename T>
+T GetScalar(const Tensor& tensor) {
+  switch (tensor.dtype()) {
+    case DT_FLOAT:
+      return static_cast<T>(tensor.scalar<float>()());
+    case DT_DOUBLE:
+      return static_cast<T>(tensor.scalar<double>()());
+    case DT_BFLOAT16:
+      return static_cast<T>(tensor.scalar<Eigen::bfloat16>()());
+    case DT_HALF:
+      return static_cast<T>(tensor.scalar<Eigen::half>()());
+    default:
+      DCHECK(false) << "Unsupported type " << tensor.dtype();
+      break;
+  }
+  return static_cast<T>(0);
+}
+
 }  // namespace
 
 template <typename Device>
@@ -636,7 +680,7 @@ class NonMaxSuppressionV2Op : public OpKernel {
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(iou_threshold.shape()),
                 errors::InvalidArgument("iou_threshold must be 0-D, got shape ",
                                         iou_threshold.shape().DebugString()));
-    const T iou_threshold_val = iou_threshold.scalar<T>()();
+    const T iou_threshold_val = GetScalar<T>(iou_threshold);
 
     OP_REQUIRES(context,
                 iou_threshold_val >= static_cast<T>(0.0) &&
@@ -684,7 +728,7 @@ class NonMaxSuppressionV3Op : public OpKernel {
                                         iou_threshold.shape().DebugString(),
                                         " (Shape must be rank 0 but is rank ",
                                         iou_threshold.dims(), ")"));
-    const T iou_threshold_val = iou_threshold.scalar<T>()();
+    const T iou_threshold_val = GetScalar<T>(iou_threshold);
     OP_REQUIRES(context,
                 iou_threshold_val >= static_cast<T>(0.0) &&
                     iou_threshold_val <= static_cast<T>(1.0),
@@ -695,7 +739,7 @@ class NonMaxSuppressionV3Op : public OpKernel {
         context, TensorShapeUtils::IsScalar(score_threshold.shape()),
         errors::InvalidArgument("score_threshold must be 0-D, got shape ",
                                 score_threshold.shape().DebugString()));
-    const T score_threshold_val = score_threshold.scalar<T>()();
+    const T score_threshold_val = GetScalar<T>(score_threshold);
 
     int num_boxes = 0;
     ParseAndCheckBoxSizes(context, boxes, &num_boxes);
@@ -738,7 +782,7 @@ class NonMaxSuppressionV4Op : public OpKernel {
     OP_REQUIRES(context, TensorShapeUtils::IsScalar(iou_threshold.shape()),
                 errors::InvalidArgument("iou_threshold must be 0-D, got shape ",
                                         iou_threshold.shape().DebugString()));
-    const T iou_threshold_val = iou_threshold.scalar<T>()();
+    const T iou_threshold_val = GetScalar<T>(iou_threshold);
     OP_REQUIRES(context,
                 iou_threshold_val >= static_cast<T>(0.0) &&
                     iou_threshold_val <= static_cast<T>(1.0),
@@ -749,7 +793,7 @@ class NonMaxSuppressionV4Op : public OpKernel {
         context, TensorShapeUtils::IsScalar(score_threshold.shape()),
         errors::InvalidArgument("score_threshold must be 0-D, got shape ",
                                 score_threshold.shape().DebugString()));
-    const T score_threshold_val = score_threshold.scalar<T>()();
+    const T score_threshold_val = GetScalar<T>(score_threshold);
 
     int num_boxes = 0;
     ParseAndCheckBoxSizes(context, boxes, &num_boxes);
@@ -767,6 +811,9 @@ class NonMaxSuppressionV4Op : public OpKernel {
         context, scores, num_boxes, max_output_size, iou_threshold_val,
         score_threshold_val, dummy_soft_nms_sigma, similarity_fn,
         return_scores_tensor_, pad_to_max_output_size_, &num_valid_outputs);
+    if (!context->status().ok()) {
+      return;
+    }
 
     // Allocate scalar output tensor for number of indices computed.
     Tensor* num_outputs_t = nullptr;
@@ -844,6 +891,9 @@ class NonMaxSuppressionV5Op : public OpKernel {
         context, scores, num_boxes, max_output_size, iou_threshold_val,
         score_threshold_val, soft_nms_sigma_val, similarity_fn,
         return_scores_tensor_, pad_to_max_output_size_, &num_valid_outputs);
+    if (!context->status().ok()) {
+      return;
+    }
 
     // Allocate scalar output tensor for number of indices computed.
     Tensor* num_outputs_t = nullptr;
@@ -929,6 +979,8 @@ class CombinedNonMaxSuppressionOp : public OpKernel {
         errors::InvalidArgument("max_size_per_class must be 0-D, got shape ",
                                 max_output_size.shape().DebugString()));
     const int max_size_per_class = max_output_size.scalar<int>()();
+    OP_REQUIRES(context, max_size_per_class > 0,
+                errors::InvalidArgument("max_size_per_class must be positive"));
     // max_total_size: scalar
     const Tensor& max_total_size = context->input(3);
     OP_REQUIRES(

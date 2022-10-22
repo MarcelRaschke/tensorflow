@@ -14,16 +14,11 @@
 # ==============================================================================
 """Functional tests for XLA Concat Op."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import numpy as np
 
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
-from tensorflow.python.framework import test_util
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import gen_array_ops
 from tensorflow.python.ops import gradients_impl
@@ -122,9 +117,9 @@ class ConcatTest(xla_test.XLATestCase):
                               cur_offset + params[p[i]].shape[concat_dim])
       cur_offset += params[p[i]].shape[concat_dim]
       if dtype == dtype_feed:
-        self.assertAllEqual(result[ind], params[p[i]])
+        self.assertAllEqual(result[tuple(ind)], params[p[i]])
       else:
-        self.assertAllClose(result[ind], params[p[i]], 0.01)
+        self.assertAllClose(result[tuple(ind)], params[p[i]], 0.01)
 
   def testRandom(self):
     self._testRandom(dtypes.float32)
@@ -294,7 +289,6 @@ class ConcatTest(xla_test.XLATestCase):
 
   # The purpose of this is to ensure that XLA on GPU will not run out of memory
   # with too many arguments.
-  @test_util.disable_mlir_bridge("TODO(b/153895138): Debug.")
   def testConcatLargeNumberOfTensors(self):
     if "CPU" in self.device:
       self.skipTest("This test can time out on CPU, so we will just allow "
@@ -329,7 +323,7 @@ class ConcatTest(xla_test.XLATestCase):
             index[concat_dim] = slice(
                 cur_offset, cur_offset + params[p[i]].shape[concat_dim])
             cur_offset += params[p[i]].shape[concat_dim]
-            self.assertAllEqual(result[index], params[p[i]])
+            self.assertAllEqual(result[tuple(index)], params[p[i]])
 
 
 class ConcatOffsetTest(xla_test.XLATestCase):

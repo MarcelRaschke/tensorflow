@@ -1,9 +1,4 @@
-package(
-    default_visibility = [
-        "//tensorflow:internal",
-    ],
-    licenses = ["notice"],  # Apache 2.0
-)
+package(licenses = ["notice"])
 
 py_binary(
     name = "micro_benchmarks",

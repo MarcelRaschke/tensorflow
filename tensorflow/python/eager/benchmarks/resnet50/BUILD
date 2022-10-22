@@ -2,7 +2,7 @@ load("//tensorflow:tensorflow.bzl", "cuda_py_test")
 
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 py_library(
@@ -71,7 +71,6 @@ cuda_py_test(
         ":resnet50_test_util",
         "//tensorflow:tensorflow_py_no_contrib",
         "//tensorflow/python/eager:forwardprop",
-        "@six_archive//:six",
     ],
 )
 

@@ -16,7 +16,7 @@ load(
 package(
     default_visibility = ["//tensorflow/core:__pkg__"],
     features = ["-parse_headers"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -25,6 +25,7 @@ cc_library(
         "jpeg_handle.cc",
         "jpeg_mem.cc",
         "//tensorflow/core/platform:jpeg_hdrs",
+        "//tensorflow/tsl/platform:jpeg_hdrs",
     ],
     hdrs = [
         "jpeg_handle.h",
@@ -50,14 +51,16 @@ cc_library(
         "jpeg_handle.cc",
         "jpeg_mem.cc",
         "//tensorflow/core/platform:jpeg_hdrs",
+        "//tensorflow/tsl/platform:jpeg_hdrs",
     ]),
     hdrs = [
         "jpeg_handle.h",
         "jpeg_mem.h",
         "//tensorflow/core/lib/core:legacy_lib_core_stringpiece_header",
         "//tensorflow/core/platform:jpeg_internal_hdrs",
-        "//tensorflow/core/platform/default:integral_types.h",
-        "//tensorflow/core/platform/default:logging.h",
+        "//tensorflow/tsl/platform:jpeg_internal_hdrs",
+        "//tensorflow/tsl/platform/default:integral_types.h",
+        "//tensorflow/tsl/platform/default:logging.h",
     ],
     copts = tf_copts(),
     linkopts = if_android(["-ldl"]),

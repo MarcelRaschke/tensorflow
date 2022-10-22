@@ -28,23 +28,34 @@ limitations under the License.
 
 #include <Python.h>
 
+#include <algorithm>
 #include <exception>
 #include <memory>
+#include <optional>
 #include <stdexcept>
+#include <string>
+#include <thread>  // NOLINT
 #include <utility>
 
 #include "absl/container/flat_hash_map.h"
 #include "absl/container/inlined_vector.h"
 #include "absl/strings/str_cat.h"
+#include "absl/strings/str_format.h"
 #include "absl/synchronization/notification.h"
-#include "absl/types/optional.h"
+#include "absl/types/span.h"
 #include "pybind11/cast.h"
 #include "pybind11/numpy.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/pytypes.h"
+#include "tensorflow/compiler/xla/pjrt/lru_cache.h"
 #include "tensorflow/compiler/xla/pjrt/pjrt_client.h"
+#include "tensorflow/compiler/xla/python/exceptions.h"
+#include "tensorflow/compiler/xla/python/py_array.h"
 #include "tensorflow/compiler/xla/python/py_buffer.h"
 #include "tensorflow/compiler/xla/python/py_executable.h"
+#include "tensorflow/compiler/xla/python/py_values.h"
+#include "tensorflow/compiler/xla/python/python_ref_manager.h"
+#include "tensorflow/compiler/xla/python/python_utils.h"
 #include "tensorflow/compiler/xla/python/pytree.h"
 #include "tensorflow/compiler/xla/python/types.h"
 #include "tensorflow/compiler/xla/shape_util.h"
@@ -52,7 +63,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/platform/status.h"
+#include "tensorflow/core/profiler/lib/traceme.h"
+#include "tensorflow/tsl/platform/status.h"
 
 namespace jax {
 
@@ -60,823 +72,375 @@ namespace py = pybind11;
 
 // TODO(phawkins): Add support for Tracers.
 // TODO(jblespiau): Use absl Status.
-// TODO(jblespiau): Remove the "xla::" prefixes when not needed.
-
-std::string ArgSignature::DebugString() const {
-  std::string result = "";
-  if (weak_type) {
-    absl::StrAppend(&result, "weak_");
-  }
-  absl::StrAppend(&result, xla::PrimitiveType_Name(dtype));
-  absl::StrAppend(&result, "[", absl::StrJoin(shape, ","), "]");
-  return result;
-}
-
-bool CallSignature::operator==(const CallSignature& other) const {
-  return std::tie(dynamic_positional_args_treedef, keyword_args,
-                  dynamic_args_signatures, device) ==
-             std::tie(other.dynamic_positional_args_treedef, other.keyword_args,
-                      other.dynamic_args_signatures, other.device) &&
-         // `==` on py:objects is the Python `is`. We need equal.
-         std::equal(
-             static_args.begin(), static_args.end(), other.static_args.begin(),
-             other.static_args.end(),
-             [](const py::object& a, const py::object& b) {
-               try {
-                 return a.equal(b);
-               } catch (const py::error_already_set& e) {
-                 throw std::invalid_argument(absl::StrCat(
-                     "static arguments should be comparable using __eq__."
-                     "The following error was raised when comparing two "
-                     "objects of types ",
-                     py::cast<std::string>(py::str(py::type::of(a))), " and ",
-                     py::cast<std::string>(py::str(py::type::of(b))),
-                     ". The error was:\n", e.what()));
-               }
-             });
-}
-
-void CallSignature::IncRef() const {
-  for (const auto& kw : keyword_args) {
-    kw.key.inc_ref();
-  }
-}
-
-void CallSignature::DecRef() const {
-  for (const auto& kw : keyword_args) {
-    kw.key.dec_ref();
-  }
-}
 
 namespace {
 
-// These 2 constants are protected by the GIL.
-ABSL_CONST_INIT bool disable_jit_flag = false;
-ABSL_CONST_INIT bool enable_x64_flag = false;
-
-ABSL_CONST_INIT thread_local absl::optional<bool> disable_jit_thread_local =
-    absl::nullopt;
-ABSL_CONST_INIT thread_local absl::optional<bool> jax_enable_x64_thread_local =
-    absl::nullopt;
-
-// The x64 mode is controlled by:
-// - a global flag value, associated to --jax_enable_x64
-// - possibly a thread-local value, which initially is absl::nullopt and which
-//   will default to the flag value as long as it's not set.
-void SetEnableX64Flag(bool jax_enable_x64) { enable_x64_flag = jax_enable_x64; }
-bool GetEnableX64Flag() { return enable_x64_flag; }
-void SetEnableX64ThreadLocal(absl::optional<bool> jax_enable_x64) {
-  jax_enable_x64_thread_local = jax_enable_x64;
-}
-absl::optional<bool> GetEnableX64ThreadLocal() {
-  return jax_enable_x64_thread_local;
-}
-
-void SetDisableJitFlag(bool disable_jit) { disable_jit_flag = disable_jit; }
-bool GetDisableJitFlag() { return disable_jit_flag; }
-void SetDisableJitThreadLocal(absl::optional<bool> disable_jit) {
-  disable_jit_thread_local = disable_jit;
-}
-absl::optional<bool> GetDisableJitThreadLocal() {
-  return disable_jit_thread_local;
-}
-
-bool JitIsDisabled() {
-  if (disable_jit_thread_local != absl::nullopt) {
-    return disable_jit_thread_local.value();
-  } else {
-    return disable_jit_flag;
-  }
-}
+// `thread_local_state.extra_jit_context` is set from Python. It's done when
+// loading the Python jax modules on the main-thread. For other threads, we
+// need to initialize the field the first time we access `thread_local_state`.
+py::object& initialize_local_state = *new py::object();
 
 }  // namespace
 
+JitState& GlobalJitState() {
+  // Protected by the GIL.
+  static JitState& global_state = *new JitState();
+  return global_state;
+}
+
+JitState& ThreadLocalJitState() {
+  // TODO(phawkins): Google style guide forbids thread-local values with
+  // non-trivial destructors.
+  ABSL_CONST_INIT thread_local JitState thread_local_state;  // NOLINT
+  DCHECK(PyGILState_Check());
+  if (thread_local_state.extra_jit_context == std::nullopt) {
+    CHECK(initialize_local_state.ptr() != nullptr);
+    // Avoids reentrant calls to the initialization function.
+    thread_local_state.extra_jit_context = py::none();
+    initialize_local_state();
+  }
+  return thread_local_state;
+}
+
+bool GetDisableJit() {
+  auto& global_state = GlobalJitState();
+  auto& thread_local_state = ThreadLocalJitState();
+  CHECK(global_state.disable_jit.has_value());
+  return thread_local_state.disable_jit.value_or(*global_state.disable_jit);
+}
+
 bool GetEnableX64() {
-  if (jax_enable_x64_thread_local != absl::nullopt) {
-    return jax_enable_x64_thread_local.value();
+  auto& global_state = GlobalJitState();
+  auto& thread_local_state = ThreadLocalJitState();
+  CHECK(global_state.enable_x64.has_value());
+  return thread_local_state.enable_x64.value_or(*global_state.enable_x64);
+}
+
+bool GetEnableJaxArray() {
+  auto& global_state = GlobalJitState();
+  auto& thread_local_state = ThreadLocalJitState();
+  CHECK(global_state.jax_array.has_value());
+  return thread_local_state.jax_array.value_or(*global_state.jax_array);
+}
+
+std::optional<py::object> GetDefaultDevice() {
+  auto& global_state = GlobalJitState();
+  auto& thread_local_state = ThreadLocalJitState();
+  return thread_local_state.default_device.has_value()
+             ? thread_local_state.default_device
+             : global_state.default_device;
+}
+
+std::optional<pybind11::function> GetPostHook() {
+  auto& global_state = GlobalJitState();
+  auto& thread_local_state = ThreadLocalJitState();
+  return thread_local_state.post_hook.has_value() ? thread_local_state.post_hook
+                                                  : global_state.post_hook;
+}
+
+static std::string OptionalDebugString(
+    const std::optional<py::object> optional) {
+  if (optional.has_value()) {
+    return py::cast<std::string>(py::str(optional.value()));
   } else {
-    return enable_x64_flag;
+    return "None";
   }
 }
 
 std::string CallSignature::DebugString() const {
-  std::vector<std::string> static_args_str;
-  static_args_str.reserve(static_args.size());
-  for (auto& static_arg : static_args) {
-    static_args_str.emplace_back(py::cast<std::string>(py::str(static_arg)));
-  }
-
-  std::vector<std::string> signature_str;
-  signature_str.reserve(dynamic_args_signatures.size());
-
-  for (auto& arg_signature : dynamic_args_signatures) {
-    signature_str.emplace_back(arg_signature.DebugString());
-  }
-  std::vector<std::string> tree_def_str;
-  signature_str.reserve(dynamic_positional_args_treedef.size());
-  for (auto& tree_def : dynamic_positional_args_treedef) {
-    tree_def_str.emplace_back(tree_def.ToString());
-  }
-  std::vector<std::string> keyword_names;
-  keyword_names.reserve(keyword_args.size());
-  for (auto& kwarg_entry : keyword_args) {
-    keyword_names.emplace_back(py::cast<std::string>(kwarg_entry.key));
-    tree_def_str.emplace_back(kwarg_entry.value_treedef.ToString());
-  }
-  return absl::StrCat(
-      static_args.size(), " static_args: ", absl::StrJoin(static_args_str, ","),
-      "\n",  // new line
-      keyword_args.size(), " keyword args:", absl::StrJoin(keyword_names, ","),
-      "\n",  // new-line
-      dynamic_positional_args_treedef.size(), " positional args.\n",
-      dynamic_args_signatures.size(),
-      " dynamic args (positional+keyword):\n   - ",
-      absl::StrJoin(signature_str, ", "), "\n   - ",
-      absl::StrJoin(tree_def_str, " | "));
+  auto py_object_formatter = [](std::string* out, const py::object& o) {
+    out->append(py::cast<std::string>(py::str(o)));
+  };
+  auto treedef_formatter = [](std::string* out, const xla::PyTreeDef& d) {
+    out->append(d.ToString());
+  };
+  auto signature_formatter = [](std::string* out,
+                                const xla::PyArgSignature& s) {
+    out->append(s.DebugString());
+  };
+  return absl::StrFormat(
+      "static args (positional + keyword): %s\nstatic arg keyword names: %s\n"
+      "dynamic arg signatures (positional + keyword): %s\n"
+      "dynamic arg shardings: %s\n"
+      "dynamic arg keyword names: %s\ndynamic arg treedefs: %s\n"
+      "device: %s\n"
+      "jax_enable_x64: %d\n"
+      "jax_array: %d\n"
+      "global_extra_jit_context: %s\n"
+      "thread_local_extra_jit_context: %s\n",
+      absl::StrJoin(static_args, ",", py_object_formatter),
+      absl::StrJoin(static_arg_names, ",", py_object_formatter),
+      absl::StrJoin(dynamic_arg_signatures, ", ", signature_formatter),
+      absl::StrJoin(dynamic_arg_shardings, ", ", py_object_formatter),
+      absl::StrJoin(dynamic_arg_names, ",", py_object_formatter),
+      absl::StrJoin(dynamic_arg_treedefs, "| ", treedef_formatter),  // new line
+      device != nullptr ? device->DebugString() : "nullptr", jax_enable_x64,
+      jax_array, OptionalDebugString(global_extra_jit_context),
+      OptionalDebugString(thread_local_extra_jit_context));
 }
 
-template <typename H>
-H AbslHashValue(H h, const CallSignature& s) {
-  h = H::combine_contiguous(std::move(h),
-                            s.dynamic_positional_args_treedef.data(),
-                            s.dynamic_positional_args_treedef.size());
-  h = H::combine_contiguous(std::move(h), s.keyword_args.data(),
-                            s.keyword_args.size());
-  h = H::combine_contiguous(std::move(h), s.dynamic_args_signatures.data(),
-                            s.dynamic_args_signatures.size());
-  h = H::combine(std::move(h), s.device);
-  for (const auto& static_arg : s.static_args) {
-    ssize_t hash;
-    try {
-      hash = py::hash(static_arg);
-    } catch (const py::error_already_set& e) {
-      throw std::invalid_argument(absl::StrCat(
-          "Non-hashable static arguments are not supported. An error occured "
-          "while trying to hash an object of type ",
-          py::cast<std::string>(py::str(py::type::of(static_arg))), ", ",
-          py::cast<std::string>(py::str(static_arg)), ". The error was:\n",
-          e.what(), "\n"));
-    }
-    h = H::combine(std::move(h), hash);
-  }
-  return h;
+bool CallSignature::operator==(const CallSignature& other) const {
+  // TODO(chky): Consider implementing hashing and equality for sharding in cpp
+  // instead of hashing and checking sharding's pointer values.
+  return std::tie(dynamic_arg_treedefs, dynamic_arg_names,
+                  dynamic_arg_signatures, dynamic_arg_shardings, device,
+                  jax_enable_x64, jax_array, static_arg_names) ==
+             std::tie(other.dynamic_arg_treedefs, other.dynamic_arg_names,
+                      other.dynamic_arg_signatures, other.dynamic_arg_shardings,
+                      other.device, other.jax_enable_x64, other.jax_array,
+                      other.static_arg_names) &&
+         // `==` on py:objects is the Python `is`. We need equal.
+         std::equal(
+             static_args.begin(), static_args.end(), other.static_args.begin(),
+             other.static_args.end(),
+             [this](const py::object& a, const py::object& b) {
+               try {
+                 return py::type::handle_of(a) == py::type::handle_of(b) &&
+                        a.equal(b);
+               } catch (const py::error_already_set& e) {
+                 throw std::invalid_argument(absl::StrCat(
+                     "static arguments should be comparable using __eq__."
+                     "The following error was raised during a call to '",
+                     function_name, "' when comparing two objects of types ",
+                     py::cast<std::string>(py::str(py::type::of(a))), " and ",
+                     py::cast<std::string>(py::str(py::type::of(b))),
+                     ". The error was:\n", e.what()));
+               }
+             }) &&
+         (global_extra_jit_context.has_value() ==
+          other.global_extra_jit_context.has_value()) &&
+         (!global_extra_jit_context.has_value() ||
+          global_extra_jit_context->equal(*other.global_extra_jit_context)) &&
+         (thread_local_extra_jit_context.has_value() ==
+          other.thread_local_extra_jit_context.has_value()) &&
+         (!thread_local_extra_jit_context.has_value() ||
+          thread_local_extra_jit_context->equal(
+              *other.thread_local_extra_jit_context));
 }
 
 // Filter out static arguments, flatten and concatenate other arguments (i.e.
 // dynamic positional and keyword arguments), filling `arguments` in place.
-xla::Status ParseArguments(const py::args& args, const py::kwargs& py_kwargs,
+xla::Status ParseArguments(py::handle args,
+                           const std::optional<py::kwargs>& py_kwargs,
                            absl::Span<int const> static_argnums,
+                           absl::Span<py::str const> static_argnames,
                            ParsedArgumentsAsBuffers& arguments) {
-  if (static_argnums.size() > args.size()) {
-    return xla::InvalidArgument(
-        "%s", "[jaxjit] Error with static argnums, executing the Python path.");
-  }
-  arguments.flat_dynamic_args.reserve(args.size() + py_kwargs.size() -
-                                      static_argnums.size());
-  arguments.signature.dynamic_positional_args_treedef.reserve(
-      args.size() - static_argnums.size());
+  tensorflow::profiler::TraceMe traceme("ParseArguments");
+  int num_args = PyTuple_GET_SIZE(args.ptr());
+  int num_kwargs = py_kwargs ? py_kwargs->size() : 0;
 
-  // Positional arguments.
-  for (size_t i = 0; i < args.size(); ++i) {
-    if (std::find(static_argnums.begin(), static_argnums.end(), i) ==
-        static_argnums.end()) {
-      xla::PyTreeDef pytree_def;
-      pytree_def.FlattenInto(args[i], arguments.flat_dynamic_args);
-      arguments.signature.dynamic_positional_args_treedef.push_back(pytree_def);
-    } else {
-      arguments.signature.static_args.emplace_back(
-          // borrow is mandatory here.
-          py::reinterpret_borrow<py::object>(args[i]));
+  arguments.flat_dynamic_args.reserve(num_args + num_kwargs);
+  if (static_argnums.empty()) {
+    arguments.signature.dynamic_arg_treedefs.resize(num_args);
+
+    // Positional arguments.
+    for (int i = 0; i < num_args; ++i) {
+      xla::PyTreeDef& pytree_def = arguments.signature.dynamic_arg_treedefs[i];
+      pytree_def.FlattenInto(PyTuple_GET_ITEM(args.ptr(), i),
+                             arguments.flat_dynamic_args);
+    }
+  } else {
+    arguments.signature.dynamic_arg_treedefs.reserve(num_args);
+
+    // Positional arguments.
+    for (int i = 0; i < num_args; ++i) {
+      if (std::find(static_argnums.begin(), static_argnums.end(), i) ==
+          static_argnums.end()) {
+        arguments.signature.dynamic_arg_treedefs.emplace_back();
+        xla::PyTreeDef& pytree_def =
+            arguments.signature.dynamic_arg_treedefs.back();
+        pytree_def.FlattenInto(PyTuple_GET_ITEM(args.ptr(), i),
+                               arguments.flat_dynamic_args);
+      } else {
+        arguments.signature.static_args.emplace_back(
+            py::reinterpret_borrow<py::object>(
+                PyTuple_GET_ITEM(args.ptr(), i)));
+      }
     }
   }
 
   // Keyword arguments.
-  std::vector<std::pair<py::handle, py::handle>> kwargs(py_kwargs.begin(),
-                                                        py_kwargs.end());
-  // We first intern the keys, then sort them (by name, as in the Python path)
-  // (see also xla::PyTreeDef::Flatten) and then create the signatures.
-  // TODO(jblespiau): We should be able to sort the keys by interned-key
-  // pointers, but this requires the Python compilation to do the same.
-  arguments.signature.keyword_args.resize(kwargs.size());
-  for (size_t i = 0; i < kwargs.size(); ++i) {
-    // Intern the key if not already interned.
-    if (!PyUnicode_CHECK_INTERNED(kwargs[i].first.ptr())) {
-      PyObject* key = kwargs[i].first.ptr();
+  if (py_kwargs) {
+    std::vector<std::pair<py::handle, py::handle>> kwargs(py_kwargs->begin(),
+                                                          py_kwargs->end());
+    // We first intern the keys, then sort them (by name, as in the Python path)
+    // (see also xla::PyTreeDef::Flatten) and then create the signatures.
+    // TODO(jblespiau): We should be able to sort the keys by interned-key
+    // pointers, but this requires the Python compilation to do the same.
+    for (int i = 0; i < num_kwargs; ++i) {
+      // Intern the key if not already interned.
       kwargs[i].first.inc_ref();
-      PyUnicode_InternInPlace(&key);
-      arguments.keep_alive_objects.push_back(
-          py::reinterpret_steal<py::object>(key));
-      kwargs[i].first = py::handle(key);
+      if (!PyUnicode_CHECK_INTERNED(kwargs[i].first.ptr())) {
+        PyUnicode_InternInPlace(&kwargs[i].first.ptr());
+      }
     }
-  }
 
-  std::sort(kwargs.begin(), kwargs.end(),
-            [](const std::pair<py::handle, py::handle>& a,
-               const std::pair<py::handle, py::handle>& b) {
-              return a.first < b.first;
-            });
-  for (size_t i = 0; i < kwargs.size(); ++i) {
-    arguments.signature.keyword_args[i].key = kwargs[i].first;
-    arguments.signature.keyword_args[i].value_treedef.FlattenInto(
-        kwargs[i].second, arguments.flat_dynamic_args);
-  }
-  return xla::Status::OK();
-}
-
-namespace {
-
-struct NumpyScalarTypes {
-  py::object np_bool;
-  py::object np_int8;
-  py::object np_int16;
-  py::object np_int32;
-  py::object np_int64;
-  py::object np_uint8;
-  py::object np_uint16;
-  py::object np_uint32;
-  py::object np_uint64;
-  py::object np_float16;
-  py::object np_float32;
-  py::object np_float64;
-  py::object np_complex64;
-  py::object np_complex128;
-  py::object np_longlong;
-  py::object np_intc;
-};
-
-const NumpyScalarTypes& GetNumpyScalarTypes() {
-  static const NumpyScalarTypes* singleton = []() {
-    // Use Designated initializers when they are available.
-    const auto numpy = py::module::import("numpy");
-    NumpyScalarTypes* dtypes = new NumpyScalarTypes();
-    dtypes->np_bool = py::object(numpy.attr("bool_"));
-    dtypes->np_int8 = py::object(numpy.attr("int8"));
-    dtypes->np_int16 = py::object(numpy.attr("int16"));
-    dtypes->np_int32 = py::object(numpy.attr("int32"));
-    dtypes->np_int64 = py::object(numpy.attr("int64"));
-    dtypes->np_uint8 = py::object(numpy.attr("uint8"));
-    dtypes->np_uint16 = py::object(numpy.attr("uint16"));
-    dtypes->np_uint32 = py::object(numpy.attr("uint32"));
-    dtypes->np_uint64 = py::object(numpy.attr("uint64"));
-    dtypes->np_float16 = py::object(numpy.attr("float16"));
-    dtypes->np_float32 = py::object(numpy.attr("float32"));
-    dtypes->np_float64 = py::object(numpy.attr("float64"));
-    dtypes->np_complex64 = py::object(numpy.attr("complex64"));
-    dtypes->np_complex128 = py::object(numpy.attr("complex128"));
-    dtypes->np_longlong = py::object(numpy.attr("longlong"));
-    dtypes->np_intc = py::object(numpy.attr("intc"));
-
-    return dtypes;
-  }();
-
-  return *singleton;
-}
-
-const py::dtype* DtypeTo32BitDtype(const py::dtype& dtype) {
-  // TODO(jblespiau): Use GetNumpyScalarTypes instead.
-  static const auto* int64_dt = new py::dtype("int64");
-  static const auto* int32_dt = new py::dtype("int32");
-  static const auto* uint64_dt = new py::dtype("uint64");
-  static const auto* uint32_dt = new py::dtype("uint32");
-  static const auto* float64_dt = new py::dtype("float64");
-  static const auto* float32_dt = new py::dtype("float32");
-  static const auto* complex64_dt = new py::dtype("complex64");
-  static const auto* complex128_dt = new py::dtype("complex128");
-
-  if (dtype.equal(*int64_dt)) {
-    return int32_dt;
-  }
-  if (dtype.equal(*float64_dt)) {
-    return float32_dt;
-  }
-  if (dtype.equal(*uint64_dt)) {
-    return uint32_dt;
-  }
-  if (dtype.equal(*complex128_dt)) {
-    return complex64_dt;
-  }
-
-  return nullptr;
-}
-
-// The equivalent of the Python jax/lazy.py::is_trivial:
-// return (type(lexpr.input) is ArrayVar and
-//         lexpr.dims == tuple(range(len(lexpr.shape))))
-//
-// Expects *only* `None` or a LazyExpr` object.
-bool IsTrivialLazyExpr(py::handle lexpr) {
-  if (lexpr.is_none()) {
-    return true;
-  }
-
-  static const auto* lazy_module =
-      new py::module(py::module::import("jax.lazy"));
-  auto input = py::getattr(lexpr, "input");
-  if (!input.get_type().is(lazy_module->attr("ArrayVar"))) {
-    return false;
-  }
-  py::tuple dims = py::cast<py::tuple>(lexpr.attr("dims"));
-  py::tuple shape = py::cast<py::tuple>(lexpr.attr("shape"));
-
-  for (int i = 0; i < shape.size(); ++i) {
-    if (dims[i].is_none()) {
+    std::sort(kwargs.begin(), kwargs.end(),
+              [](const std::pair<py::handle, py::handle>& a,
+                 const std::pair<py::handle, py::handle>& b) {
+                return a.first < b.first;
+              });
+    auto kwarg_is_static = [&](py::handle name) {
+      for (const auto& kw : static_argnames) {
+        if (kw.ptr() == name.ptr()) return true;
+      }
       return false;
-    }
-    if (py::cast<int>(dims[i]) != i) {
-      return false;
-    }
-  }
-  return true;
-}
-
-bool IsFloat0(py::array arg) {
-  static const auto* dtypes_module =
-      new py::module(py::module::import("jax.dtypes"));
-  static const auto* float0_dtype =
-      new py::handle(dtypes_module->attr("float0"));
-  return float0_dtype->is(arg.attr("dtype"));
-}
-
-template <typename CppType, typename Pybind11Type>
-std::unique_ptr<xla::PjRtBuffer> ConvertToScalarBuffer(
-    const py::handle& scalar, xla::PjRtClient* client,
-    xla::PjRtDevice* device) {
-  CppType data = py::cast<Pybind11Type>(scalar);
-  // Work around for https://github.com/pybind/pybind11/issues/2786
-  if (PyErr_Occurred()) {
-    throw py::error_already_set();
-  }
-  xla::Shape shape = xla::ShapeUtil::MakeShapeWithType<CppType>({});
-  return ValueOrThrow(client->BufferFromHostBuffer(
-      &data, shape,
-      xla::PjRtClient::HostBufferSemantics::kImmutableOnlyDuringCall, nullptr,
-      device));
-}
-
-}  // namespace
-
-namespace {
-
-using ToArgSignatureHandler =
-    std::function<xla::StatusOr<ArgSignature>(py::handle, bool)>;
-}
-
-xla::StatusOr<ArgSignature> ArgSignatureOfValue(pybind11::handle arg,
-                                                bool jax_enable_x64) {
-  static const absl::flat_hash_map<PyObject*,
-                                   ToArgSignatureHandler>* const handlers = [] {
-    auto p = new absl::flat_hash_map<PyObject*, ToArgSignatureHandler>();
-
-    const auto xla_module = py::module::import("jax.interpreters.xla");
-    const auto& device_array = xla_module.attr("_DeviceArray");
-
-    const NumpyScalarTypes& dtypes = GetNumpyScalarTypes();
-
-    // The 4 Python native types.
-    ToArgSignatureHandler bool_handler =
-        [](py::handle, bool) -> xla::StatusOr<ArgSignature> {
-      return ArgSignature(xla::PrimitiveType::PRED, {}, true);
     };
-    ToArgSignatureHandler int_handler =
-        [](py::handle h, bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      if (jax_enable_x64) {
-        return ArgSignature(xla::PrimitiveType::S64, {}, true);
+
+    arguments.signature.dynamic_arg_names.reserve(num_kwargs);
+    for (int i = 0; i < num_kwargs; ++i) {
+      if (kwarg_is_static(kwargs[i].first)) {
+        arguments.signature.static_arg_names.push_back(
+            py::reinterpret_steal<py::object>(kwargs[i].first));
+        arguments.signature.static_args.push_back(
+            py::reinterpret_borrow<py::object>(kwargs[i].second));
       } else {
-        return ArgSignature(xla::PrimitiveType::S32, {}, true);
-      }
-    };
-    ToArgSignatureHandler float_handler =
-        [&dtypes](py::handle h,
-                  bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      // Only Python native types has a True weak_type.
-      bool weak_type = !py::isinstance(h, dtypes.np_float64);
-      if (jax_enable_x64) {
-        return ArgSignature(xla::PrimitiveType::F64, {}, weak_type);
-      } else {
-        return ArgSignature(xla::PrimitiveType::F32, {}, weak_type);
-      }
-    };
-    ToArgSignatureHandler complex_handler =
-        [&dtypes](py::handle h,
-                  bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      // Note that this branch is also taken  for np.complex128:
-      // isinstance(np.complex128(3), complex) returns True
-      // isinstance(np.complex64(3), complex) returns False
-      bool weak_type = !py::isinstance(h, dtypes.np_complex128);
-      if (jax_enable_x64) {
-        return ArgSignature(xla::PrimitiveType::C128, {}, weak_type);
-      } else {
-        return ArgSignature(xla::PrimitiveType::C64, {}, weak_type);
-      }
-    };
-
-    (*p)[reinterpret_cast<PyObject*>(&PyBool_Type)] = bool_handler;
-    (*p)[reinterpret_cast<PyObject*>(&PyLong_Type)] = int_handler;
-    (*p)[reinterpret_cast<PyObject*>(&PyFloat_Type)] = float_handler;
-    (*p)[reinterpret_cast<PyObject*>(&PyComplex_Type)] = complex_handler;
-
-    // The Buffer types
-    // PyBuffer necessarily has a trivial LazyExpr, no need to check it.
-    ToArgSignatureHandler buffer_handler =
-        [](py::handle h, bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      xla::PyBuffer* buffer = py::cast<xla::PyBuffer*>(h);
-      bool weak_type = py::cast<py::bool_>(h.attr("aval").attr("weak_type"));
-      return ArgSignature(buffer->buffer()->on_device_shape().element_type(),
-                          buffer->buffer()->on_device_shape().dimensions(),
-                          weak_type);
-    };
-    (*p)[py::type::handle_of<xla::DeviceArrayBase>().ptr()] = buffer_handler;
-    ToArgSignatureHandler device_array_handler =
-        [](py::handle h, bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      py::handle aval = h.attr("aval");
-      TF_ASSIGN_OR_RETURN(auto dtype,
-                          xla::DtypeToPrimitiveType(aval.attr("dtype")));
-      return ArgSignature(dtype,
-                          py::cast<std::vector<xla::int64>>(aval.attr("shape")),
-                          py::cast<py::bool_>(aval.attr("weak_type")));
-    };
-    // ShardedDeviceArray is covered by the MRO fallback on _DeviceArray.
-    (*p)[device_array.ptr()] = device_array_handler;
-
-    ToArgSignatureHandler numpy_handler =
-        [](py::handle h, bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      py::array numpy_array = py::cast<py::array>(h);
-      if (IsFloat0(numpy_array)) {
-        return xla::InvalidArgument(
-            "float0 numpy arrays not supported in C++. "
-            "Falling back to Python.");
-      }
-      if (!jax_enable_x64) {
-        const py::dtype raw_dtype = numpy_array.dtype();
-        const py::dtype* to_dtype = DtypeTo32BitDtype(raw_dtype);
-
-        xla::PrimitiveType dtype;
-        if (to_dtype) {
-          TF_ASSIGN_OR_RETURN(dtype, xla::DtypeToPrimitiveType(*to_dtype));
-        } else {
-          TF_ASSIGN_OR_RETURN(dtype, xla::DtypeToPrimitiveType(raw_dtype));
-        }
-        // We need the reinterpret_cast for the OSS version to build.
-        return ArgSignature(
-            dtype,
-            absl::MakeConstSpan(
-                reinterpret_cast<const xla::int64*>(numpy_array.shape()),
-                numpy_array.ndim()),
-            /*weak_type=*/false);
-      }
-      TF_ASSIGN_OR_RETURN(auto dtype,
-                          xla::DtypeToPrimitiveType(numpy_array.dtype()));
-      return ArgSignature(
-          dtype,
-          absl::MakeConstSpan(
-              reinterpret_cast<const xla::int64*>(numpy_array.shape()),
-              numpy_array.ndim()),
-          /*weak_type=*/false);
-    };
-    const auto numpy = py::module::import("numpy");
-    const auto& ndarray = numpy.attr("ndarray");
-    (*p)[ndarray.ptr()] = numpy_handler;
-
-    ToArgSignatureHandler np_uint64_handler =
-        [](py::handle h, bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      if (jax_enable_x64) {
-        return ArgSignature(xla::PrimitiveType::U64, {}, /*weak_type=*/false);
-      } else {
-        return ArgSignature(xla::PrimitiveType::U32, {}, /*weak_type=*/false);
-      }
-    };
-    ToArgSignatureHandler np_int_handler =
-        [](py::handle h, bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      if (jax_enable_x64) {
-        return ArgSignature(xla::PrimitiveType::S64, {}, /*weak_type=*/false);
-      } else {
-        return ArgSignature(xla::PrimitiveType::S32, {}, /*weak_type=*/false);
-      }
-    };
-    ToArgSignatureHandler numpy_array_handler =
-        [](py::handle h, bool jax_enable_x64) -> xla::StatusOr<ArgSignature> {
-      // This block deals with all numpy scalar types, except for int64_dt,
-      // float64_dt and complex128_dt which are taken care of in previous if
-      // blocks.
-      TF_ASSIGN_OR_RETURN(auto dtype,
-                          xla::DtypeToPrimitiveType(h.attr("dtype")));
-      return ArgSignature(dtype, {}, /*weak_type=*/false);
-    };
-
-    // This block deals with all numpy scalar types, except for int64_dt,
-    // float64_dt and complex128_dt which are taken care of in previous if
-    // blocks.
-    (*p)[dtypes.np_bool.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_int8.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_int16.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_int32.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_int64.ptr()] = np_int_handler;
-    (*p)[dtypes.np_uint8.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_uint16.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_uint32.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_uint64.ptr()] = np_uint64_handler;
-    (*p)[dtypes.np_float16.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_float32.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_float64.ptr()] = float_handler;
-    (*p)[dtypes.np_complex64.ptr()] = numpy_array_handler;
-    (*p)[dtypes.np_complex128.ptr()] = complex_handler;
-    (*p)[dtypes.np_longlong.ptr()] = np_int_handler;
-    (*p)[dtypes.np_intc.ptr()] = numpy_array_handler;
-
-    return p;
-  }();
-
-  auto res = handlers->find(arg.get_type().ptr());
-  if (res == handlers->end()) {
-    // We attempt to look at the MRO classes
-    for (auto base_class : arg.get_type().attr("mro")()) {
-      res = handlers->find(base_class.ptr());
-      if (res != handlers->end()) {
-        return res->second(arg, jax_enable_x64);
+        arguments.signature.dynamic_arg_names.push_back(
+            py::reinterpret_steal<py::object>(kwargs[i].first));
+        arguments.signature.dynamic_arg_treedefs.emplace_back();
+        xla::PyTreeDef& pytree_def =
+            arguments.signature.dynamic_arg_treedefs.back();
+        pytree_def.FlattenInto(kwargs[i].second, arguments.flat_dynamic_args);
       }
     }
-    return xla::InvalidArgument(
-        "%s", absl::StrCat("Not supported: The C++ ToArgSignature only accepts "
-                           "Buffer/DeviceArray/ShardedDeviceArray, Numpy "
-                           "arrays scalars of supported types "
-                           "(see implementation), or Python scalars. Got type ",
-                           py::cast<std::string>(py::str(arg.get_type()))));
-  } else {
-    return res->second(arg, jax_enable_x64);
   }
-}
-
-namespace {
-using DevicePutFunc = std::function<xla::StatusOr<DevicePutResult>(
-    py::handle, xla::PjRtDevice*, bool, xla::PyClient&)>;
-
-DevicePutResult HandleBool(py::handle h, xla::PjRtDevice* to_device,
-                           bool jax_enable_x64, xla::PyClient& pyclient) {
-  return DevicePutResult(ConvertToScalarBuffer<bool, py::bool_>(
-                             h, pyclient.pjrt_client(), to_device),
-                         /*weak_type=*/true);
-}
-
-DevicePutResult HandleInt(py::handle obj, xla::PjRtDevice* to_device,
-                          bool jax_enable_x64, xla::PyClient& pyclient) {
-  if (jax_enable_x64) {
-    return DevicePutResult(ConvertToScalarBuffer<xla::int64, py::int_>(
-                               obj, pyclient.pjrt_client(), to_device),
-                           /*weak_type=*/true);
-  } else {
-    return DevicePutResult(ConvertToScalarBuffer<int, py::int_>(
-                               obj, pyclient.pjrt_client(), to_device),
-                           /*weak_type=*/true);
-  }
-}
-
-template <bool weak_type>
-xla::StatusOr<DevicePutResult> HandleFloat(py::handle h,
-                                           xla::PjRtDevice* to_device,
-                                           bool jax_enable_x64,
-                                           xla::PyClient& pyclient) {
-  if (jax_enable_x64) {
-    return DevicePutResult(ConvertToScalarBuffer<double, py::float_>(
-                               h, pyclient.pjrt_client(), to_device),
-                           /*weak_type=*/weak_type);
-  } else {
-    return DevicePutResult(ConvertToScalarBuffer<float, py::float_>(
-                               h, pyclient.pjrt_client(), to_device),
-                           /*weak_type=*/weak_type);
-  }
-}
-
-template <bool weak_type>
-xla::StatusOr<DevicePutResult> HandleComplex(py::handle h,
-                                             xla::PjRtDevice* to_device,
-                                             bool jax_enable_x64,
-                                             xla::PyClient& pyclient) {
-  // This branch is also taken  for np.complex128:
-  // isinstance(np.complex128(3), complex) returns True
-  // isinstance(np.complex64(3), complex) returns False
-  Py_complex result = PyComplex_AsCComplex(h.ptr());
-  if (result.real == -1.0 && PyErr_Occurred()) {
-    PyErr_Clear();
-    throw std::runtime_error("Could not convert the complex number");
-  }
-  if (jax_enable_x64) {
-    xla::complex128 data(result.real, result.imag);
-    xla::Shape shape = xla::ShapeUtil::MakeShapeWithType<xla::complex128>({});
-    return DevicePutResult(
-        ValueOrThrow(pyclient.pjrt_client()->BufferFromHostBuffer(
-            &data, shape,
-            xla::PjRtClient::HostBufferSemantics::kImmutableOnlyDuringCall,
-            nullptr, to_device)),
-        /*weak_type=*/weak_type);
-  } else {
-    xla::complex64 data(result.real, result.imag);
-    xla::Shape shape = xla::ShapeUtil::MakeShapeWithType<xla::complex64>({});
-    return DevicePutResult(
-        ValueOrThrow(pyclient.pjrt_client()->BufferFromHostBuffer(
-            &data, shape,
-            xla::PjRtClient::HostBufferSemantics::kImmutableOnlyDuringCall,
-            nullptr, to_device)),
-        /*weak_type=*/weak_type);
-  }
-}
-
-xla::StatusOr<DevicePutResult> HandleDeviceArray(py::handle obj,
-                                                 xla::PjRtDevice* to_device,
-                                                 bool jax_enable_x64,
-                                                 xla::PyClient& pyclient) {
-  if (!IsTrivialLazyExpr(py::getattr(obj, "_lazy_expr"))) {
-    return xla::InvalidArgument(
-        "Non-trivial lazy expression not supported in C++. "
-        "Falling back to Python.");
-  }
-  xla::PyBuffer* buffer = py::cast<xla::PyBuffer*>(obj.attr("device_buffer"));
-  bool weak_type = py::cast<py::bool_>(obj.attr("aval").attr("weak_type"));
-  // Same block as in the previous `if (is_py_buffer)`.
-  if (buffer->device().contents == to_device) {
-    return DevicePutResult(buffer->buffer(), weak_type);
-  } else {
-    std::unique_ptr<xla::PjRtBuffer> copied_buffer =
-        ValueOrThrow(buffer->buffer()->CopyToDevice(to_device));
-    return DevicePutResult(std::move(copied_buffer), weak_type);
-  }
-}
-
-// Do not convert types, and only call PjRtBufferFromPyval, independently
-// of the value of jax_enable_x64.
-DevicePutResult HandleBufferFromPyval(py::handle h, xla::PjRtDevice* to_device,
-                                      bool jax_enable_x64,
-                                      xla::PyClient& pyclient) {
-  std::unique_ptr<xla::PjRtBuffer> buffer =
-      ValueOrThrow(pyclient.PjRtBufferFromPyval(
-          h, to_device,
-          /*force_copy=*/false, /*host_buffer_semantics=*/
-          xla::PjRtClient::HostBufferSemantics::kZeroCopy));
-  return DevicePutResult(std::move(buffer), /*weak_type=*/false);
-}
-
-DevicePutResult HandleNpBool(py::handle h, xla::PjRtDevice* to_device,
-                             bool jax_enable_x64, xla::PyClient& pyclient) {
-  if (jax_enable_x64) {
-    return DevicePutResult(ConvertToScalarBuffer<xla::int64, py::int_>(
-                               h, pyclient.pjrt_client(), to_device),
-                           /*weak_type=*/false);
-  } else {
-    return DevicePutResult(ConvertToScalarBuffer<int, py::int_>(
-                               h, pyclient.pjrt_client(), to_device),
-                           /*weak_type=*/false);
-  }
-}
-
-DevicePutResult HandleUint64(py::handle h, xla::PjRtDevice* to_device,
-                             bool jax_enable_x64, xla::PyClient& pyclient) {
-  if (jax_enable_x64) {
-    std::unique_ptr<xla::PjRtBuffer> buffer =
-        ValueOrThrow(pyclient.PjRtBufferFromPyval(
-            h, to_device,
-            /*force_copy=*/false, /*host_buffer_semantics=*/
-            xla::PjRtClient::HostBufferSemantics::kZeroCopy));
-    return DevicePutResult(std::move(buffer), /*weak_type=*/false);
-  } else {
-    static const auto* numpy = new py::module(py::module::import("numpy"));
-    const auto& np_array = numpy->attr("array");
-
-    // Note that this is calling back to Python!
-    std::unique_ptr<xla::PjRtBuffer> buffer =
-        ValueOrThrow(pyclient.PjRtBufferFromPyval(
-            np_array(h, py::dtype("uint32")), to_device,
-            /*force_copy=*/false, /*host_buffer_semantics=*/
-            xla::PjRtClient::HostBufferSemantics::kZeroCopy));
-    return DevicePutResult(std::move(buffer), /*weak_type=*/false);
-  }
-}
-
-xla::StatusOr<DevicePutResult> HandleNdarray(py::handle h,
-                                             xla::PjRtDevice* to_device,
-                                             bool jax_enable_x64,
-                                             xla::PyClient& pyclient) {
-  py::array numpy_array = py::cast<py::array>(h);
-  if (IsFloat0(numpy_array)) {
-    return xla::InvalidArgument("%s",
-                                "float0 numpy arrays not supported in C++. "
-                                "Falling back to Python.");
-  }
-  // If jax_enable_x64 is not set, we need to coerce 32 bits types.
-  // Note that this is calling back to Python!
-  if (!jax_enable_x64) {
-    const py::dtype* to_dtype = DtypeTo32BitDtype(numpy_array.dtype());
-    if (to_dtype) {
-      static const auto* numpy = new py::module(py::module::import("numpy"));
-      const auto& np_array = numpy->attr("array");
-      numpy_array = np_array(numpy_array, *to_dtype);
-    }
-  }
-  std::unique_ptr<xla::PjRtBuffer> buffer =
-      ValueOrThrow(pyclient.PjRtBufferFromPyval(
-          numpy_array, to_device,
-          /*force_copy=*/false, /*host_buffer_semantics=*/
-          xla::PjRtClient::HostBufferSemantics::kZeroCopy));
-  return DevicePutResult(std::move(buffer), /*weak_type=*/false);
-}
-
-}  // namespace
-
-xla::StatusOr<DevicePutResult> DevicePut(pybind11::handle arg,
-                                         xla::PjRtDevice* to_device,
-                                         bool jax_enable_x64,
-                                         xla::PyClient& pyclient) {
-  static const absl::flat_hash_map<PyObject*, DevicePutFunc>* const handlers =
-      [] {
-        auto p = new absl::flat_hash_map<PyObject*, DevicePutFunc>();
-
-        const NumpyScalarTypes& dtypes = GetNumpyScalarTypes();
-
-        const auto numpy = py::module::import("numpy");
-        const auto xla_module = py::module::import("jax.interpreters.xla");
-        const auto& device_array = xla_module.attr("_DeviceArray");
-
-        // Python base types.
-        (*p)[reinterpret_cast<PyObject*>(&PyBool_Type)] = HandleBool;
-        (*p)[reinterpret_cast<PyObject*>(&PyLong_Type)] = HandleInt;
-        (*p)[reinterpret_cast<PyObject*>(&PyFloat_Type)] = HandleFloat<true>;
-        (*p)[reinterpret_cast<PyObject*>(&PyComplex_Type)] =
-            HandleComplex<true>;
-
-        // DeviceArray and co.
-        const auto pxla_module = py::module::import("jax.interpreters.pxla");
-        const auto& sda = pxla_module.attr("ShardedDeviceArray");
-        (*p)[device_array.ptr()] = HandleDeviceArray;
-        (*p)[py::type::handle_of<xla::DeviceArrayBase>().ptr()] =
-            HandleDeviceArray;
-        (*p)[sda.ptr()] = HandleBufferFromPyval;
-        // Numpy arrays.
-        (*p)[numpy.attr("ndarray").ptr()] = HandleNdarray;
-
-        // Numpy scalar types. For some of them, we share the handler with
-        // Python types (np_int64, np_float64, np_complex128).
-        (*p)[dtypes.np_bool.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_int8.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_int16.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_int32.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_int64.ptr()] = HandleNpBool;
-        (*p)[dtypes.np_uint8.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_uint16.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_uint32.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_uint64.ptr()] = HandleUint64;
-        (*p)[dtypes.np_float16.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_float32.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_float64.ptr()] = HandleFloat<false>;
-        (*p)[dtypes.np_complex64.ptr()] = HandleBufferFromPyval;
-        (*p)[dtypes.np_complex128.ptr()] = HandleComplex<false>;
-        (*p)[dtypes.np_longlong.ptr()] = HandleNpBool;
-        (*p)[dtypes.np_intc.ptr()] = HandleBufferFromPyval;
-
-        return p;
-      }();
-
-  auto res = handlers->find(arg.get_type().ptr());
-  if (res == handlers->end()) {
-    for (auto base_class : arg.get_type().attr("mro")()) {
-      res = handlers->find(base_class.ptr());
-      if (res != handlers->end()) {
-        return res->second(arg, to_device, jax_enable_x64, pyclient);
-      }
-    }
-    return xla::InvalidArgument(
-        "%s", absl::StrCat(
-                  "Not supported: The C++ jax jit execution path, only accepts "
-                  "DeviceArray, Numpy arrays scalars of supported types "
-                  "(see implementation), or Python scalars. Got type ",
-                  py::cast<std::string>(py::str(arg.get_type()))));
-  } else {
-    return res->second(arg, to_device, jax_enable_x64, pyclient);
-  }
+  return ::tsl::OkStatus();
 }
 
 namespace {
 
+// Elements of CacheEntry are protected by the GIL.
 struct CacheEntry {
+  // Ensures a single thread performs the compilation for a given executable.
+  //
+  // The first thread (holding the GIL) will create the CacheEntry associated to
+  // a signature and fill it. Other threads will wait for the notification.
+  // If an error occurred during the compilation, `fall_back_to_python` is set
+  // to `true`, and other threads will fail with the same error.
+  absl::Notification compilation_complete;
+  std::thread::id thread_id = std::this_thread::get_id();
+
   std::shared_ptr<xla::PyExecutable> executable;
   xla::PyTreeDef out_pytree_def;
   // We use Python types within the vector because this is what we will be
   // returning to Python. No need to convert back and forth.
   // We need py::object to maintain the objects alive.
   std::vector<py::object> out_avals;
-  // The processing done in `AddCacheEntry` ensures that LazyExpr are stored as
-  // `py::none()`.
-  std::vector<py::object> out_lazy_exprs;
-  py::object sticky_device;
+  std::vector<bool> out_weak_types;
+  std::vector<py::dtype> out_dtypes;
+  std::vector<std::vector<int64_t>> out_shapes;
+  std::vector<py::object> out_shardings;
+  std::vector<bool> committed;
 
-  // Ensures a single thread performs the compilation for a given executable.
-  //
-  // The first thread (holding the GIL) will create the CacheEntry associated to
-  // a signature and if the object has been insterted already, other threads
-  // will wait for the notification.
-  absl::Notification compilation_complete;
-  absl::optional<xla::Status> compilation_error = absl::nullopt;
-  // Trivial computation will fallback to Python.
-  // Running a jax(pmap) will also fallback to Python.
+  // Bitvector of kept arguments from Jaxpr DCE pass. Used to drop some `args`
+  // in CompiledFunction::Call before calling into compiled computation.
+  std::optional<std::vector<bool>> kept_var_bitvec;
+  std::optional<xla::ClientAndPtr<xla::PjRtDevice>> sticky_device;
+
+  // Fallback to Python happens:
+  // - for trivial computations
+  // - when running a jax(pmap)
+  // - after a compilation error, for threads that did not compile it the first
+  //   time
   bool fall_back_to_python = false;
+
+  // Python objects (notably in the cache key) that must remain alive as long
+  // as the cache entry does. Currently this is the `key` values in the kwarg
+  // entries in the cache key.
+  std::vector<py::object> keepalive;
 };
+
+// A CompiledFunctionCache represents a cache of compiled functions that can be
+// shared between one or more CompiledFunction objects. It serves two goals:
+// - reduce the number of lru caches (hash map) across multiple JITs.
+// - make the cache global to increase cache hits (e.g. calling jit(f)(3) twice)
+//   keeping entries alive as long as the underlying function f is alive.
+// Assume the cache is protected by the GIL.
+class CompiledFunctionCache {
+ public:
+  static constexpr int kDefaultCapacity = 4096;
+  explicit CompiledFunctionCache(int capacity);
+
+  // Cache entries are shared_ptr<>s because it's possible the cache entry
+  // might be evicted before we finish tracing/compiling.
+  typedef xla::LRUCache<CallSignature, std::shared_ptr<CacheEntry>> Cache;
+
+  // We include as part of the cache key `donate_argnums` (and any other fields
+  // that aren't subsumed by the CallSignature we compute for each call).
+  std::shared_ptr<Cache> Lookup(py::handle function,
+                                absl::Span<const int> donate_argnums);
+
+  int Size() const { return lru_list_.Size(); }
+  int Capacity() const { return lru_list_.Capacity(); }
+  void Clear() { lru_list_.Clear(); }
+
+ private:
+  struct Key {
+    py::handle function;  // Does not hold a reference.
+
+    // Other fields that are part of the arguments to `jit`, but are not
+    // otherwise part of CallSignature.
+    std::vector<int> donate_argnums;
+
+    bool operator==(const Key& other) const {
+      return std::tie(function, donate_argnums) ==
+             std::tie(other.function, other.donate_argnums);
+    }
+  };
+  template <typename H>
+  friend H AbslHashValue(H h, const Key& key) {
+    h = H::combine(std::move(h), key.function.ptr());
+    h = H::combine_contiguous(std::move(h), key.donate_argnums.data(),
+                              key.donate_argnums.size());
+    return h;
+  }
+
+  struct Value {
+    explicit Value(std::shared_ptr<Cache> cache) : cache(std::move(cache)) {}
+    std::shared_ptr<Cache> cache;
+
+    // A weak reference to the key function. We use the weak reference to
+    // register a callback that is triggered when the key function is destroyed.
+    // We use a weak pointer because we want to allow caching across multiple
+    // calls to `jax.jit(f)` if `f` remains alive, but we do not want the cache
+    // to keep `f` alive if all other references are dropped.
+    py::weakref weakref;
+  };
+
+  Cache::LRUList lru_list_;
+  absl::flat_hash_map<Key, std::unique_ptr<Value>> functions_;
+};
+
+CompiledFunctionCache::CompiledFunctionCache(int capacity)
+    : lru_list_(capacity) {}
+
+std::shared_ptr<CompiledFunctionCache::Cache> CompiledFunctionCache::Lookup(
+    py::handle function, absl::Span<const int> donate_argnums) {
+  Key key;
+  key.function = function;
+  key.donate_argnums =
+      std::vector<int>(donate_argnums.begin(), donate_argnums.end());
+  auto insert = functions_.emplace(key, nullptr);
+  std::shared_ptr<Cache> cache = std::make_shared<Cache>(&lru_list_);
+  if (insert.second) {
+    py::cpp_function callback([this, key{std::move(key)}](py::handle weakref) {
+      functions_.erase(key);
+    });
+    PyObject* weakref = PyWeakref_NewRef(function.ptr(), callback.ptr());
+    if (weakref) {
+      std::unique_ptr<Value>& entry = insert.first->second;
+      entry = std::make_unique<Value>(cache);
+      entry->weakref = py::reinterpret_steal<py::weakref>(weakref);
+    } else {
+      PyErr_Clear();
+      // `function` is not weak-referenceable. Don't bother adding it to the
+      // shared cache in that case; the `jit` object will hold the only shared
+      // reference to the cache entry.
+      functions_.erase(insert.first);
+    }
+  }
+  return cache;
+}
 
 // A `CompiledFunction` is associated to a `jax.jit(f)` and takes care of the
 // bookkeeping of the different signatures used and the dispatch of calls to
@@ -884,8 +448,31 @@ struct CacheEntry {
 class CompiledFunction {
  public:
   CompiledFunction(py::function fun, py::function cache_miss,
-                   py::function get_device, std::vector<int> static_argnums);
+                   py::function get_device, bool has_explicit_device,
+                   std::vector<int> static_argnums,
+                   std::vector<py::str> static_argnames,
+                   std::vector<int> donate_argnums,
+                   std::shared_ptr<CompiledFunctionCache> cache);
   ~CompiledFunction();
+
+  // pybind11::object typed subclass for CompiledFunction objects.
+  class pyobject : public py::object {
+   public:
+    PYBIND11_OBJECT(pyobject,  // NOLINT
+                    py::object, CompiledFunction::IsCompiledFunction);
+    pyobject() = default;
+    CompiledFunction* func() const {
+      return CompiledFunction::AsCompiledFunctionUnchecked(*this);
+    }
+  };
+  // Alias as ::object; outside the scope above we won't confuse pybind11's
+  // macros.
+  using object = pyobject;
+
+  // Returns true if `h` is a CompiledFunction.
+  static bool IsCompiledFunction(py::handle handle);
+  // Converts `handle` to a CompiledFunction*. Does not do any checking.
+  static CompiledFunction* AsCompiledFunctionUnchecked(py::handle handle);
 
   // This function will:
   // (a) flatten the inputs using pytree
@@ -893,7 +480,8 @@ class CompiledFunction {
   // (c) call the executable
   // (d) construct `DeviceArray` objects from the outputs
   // (e) reconstruct the `PyTree`.
-  py::object Call(py::args args, py::kwargs kwargs);
+  xla::StatusOr<py::object> Call(py::handle args,
+                                 std::optional<py::kwargs> kwargs);
 
   // This allows `inspect.signature(cpp_jitted_f)` from Python.
   py::object PythonSignature() {
@@ -901,33 +489,73 @@ class CompiledFunction {
     return inspect->attr("signature")(fun_);
   }
 
-  int cache_size() const { return executables_.size(); }
+  int cache_size() const { return executables_->Size(); }
+  void ClearCache() {
+    // Setting `default_device_` to nullptr forces Call() to retrieve the
+    // device.
+    default_device_ = nullptr;
+    executables_->Clear();
+  }
+
+  const py::function& fun() const { return fun_; }
+  const py::function& cache_miss() const { return cache_miss_; }
+  const py::function& get_device() const { return get_device_; }
+  bool has_explicit_device() const { return has_explicit_device_; }
+  const std::vector<int>& static_argnums() const { return static_argnums_; }
+  const std::vector<py::str>& static_argnames() const {
+    return static_argnames_;
+  }
+  const std::vector<int>& donate_argnums() const { return donate_argnums_; }
+  const std::shared_ptr<CompiledFunctionCache>& cache() const { return cache_; }
+
+  // Helper function used by the tp_clear GC method.
+  void ClearPythonReferences() {
+    py::function fun, cache_miss, get_device;
+    // Swap values for nulls before they are destroyed. See the Python
+    // Py_CLEAR() documentation for a discussion of this topic.
+    std::swap(fun_, fun);
+    std::swap(cache_miss_, cache_miss);
+    std::swap(get_device_, get_device);
+  }
+
+  py::handle AsPyHandle();
+  const std::string& function_name() const { return function_name_; }
 
  private:
-  // Returns nullptr if not present in the cache.
-  CacheEntry* GetCacheEntryIfPresent(const CallSignature& signature);
-  // Should never return nullptr.
-  CacheEntry* AddCacheEntry(const py::args& args, const py::kwargs& kwargs,
-                            const CallSignature& signature,
-                            py::object out_and_fastpath_data);
+  // Attempts to populate default_device_. May release the GIL; is
+  // reentrant-safe.
+  void TryToPopulateDefaultDevice();
+
+  void PopulateCacheEntry(CacheEntry* entry, const CallSignature& signature,
+                          const py::tuple& out_and_fastpath_data);
   bool always_fallback_to_python_ = false;
 
-  const py::function fun_;  // The Python function to jit.
+  py::function fun_;  // The Python function to jit.
+  std::string function_name_;
+
   // See JAX _cpp_jit in api.py for documentation.
-  const py::function cache_miss_;
+  py::function cache_miss_;
 
   // We need to know the static arguments to remove them from the arguments
   // passed to the underlying PyExecutable. In sorted order.
   std::vector<int> static_argnums_;
-  // We need a `unique_ptr` here to ensure value pointer stability.
-  absl::flat_hash_map<CallSignature, std::unique_ptr<CacheEntry>> executables_;
+  // Keyword arguments, interned.
+  std::vector<py::str> static_argnames_;
+  std::vector<int> donate_argnums_;
+
+  // Whether this function has an explicit device set by either the `device` or
+  // `backend` arguments to jit.
+  bool has_explicit_device_;
 
   // A function taking no arguments and returning the default device and whether
   // jax.jit has been committed to it.
-  const py::function get_device_;
+  py::function get_device_;
 
-  // The writing of the following is protected by the mutex.
-  absl::Mutex mu_;
+  // Keeps the shared LRU cache alive as long as the CompiledFunction is alive.
+  std::shared_ptr<CompiledFunctionCache> cache_;
+
+  // The part of cache_ specific to this CompiledFunction.
+  std::shared_ptr<CompiledFunctionCache::Cache> executables_;
 
   // The logic if the following:
   // - if `device` or `backend` are not specified to `jax.jit`, we will use
@@ -936,48 +564,139 @@ class CompiledFunction {
   // - When one of `device` or `backend` is specified, this will determine
   //   the `default_device_` which will be used as the targeted device. In
   //   which case, we will always copy input buffers to this device.
-  std::shared_ptr<xla::PyClient> default_pyclient_ = nullptr;
-  xla::ClientAndPtr<xla::PjRtDevice> default_pydevice_;
+  // These fields are protected by the GIL.
   xla::PjRtDevice* default_device_ = nullptr;
   bool is_committed_;
 };
 
+// This class keeps references to all CompiledFunctions. This class is
+// thread-compatible.
+class CompiledFunctionStore {
+ public:
+  void Insert(CompiledFunction* function) {
+    compiled_functions_.insert(function);
+  }
+
+  void Erase(CompiledFunction* function) {
+    compiled_functions_.erase(function);
+  }
+
+  void ClearFunctionCache() {
+    for (auto* function : compiled_functions_) {
+      function->ClearCache();
+    }
+  }
+
+ private:
+  absl::flat_hash_set<CompiledFunction*> compiled_functions_;
+};
+
+// Protected by GIL.
+CompiledFunctionStore& GetGlobalCompiledFunctionStore() {
+  static auto* const store = new CompiledFunctionStore();
+  return *store;
+}
+
 CompiledFunction::CompiledFunction(py::function fun, py::function cache_miss,
                                    py::function get_device,
-                                   std::vector<int> static_argnums)
+                                   bool has_explicit_device,
+                                   std::vector<int> static_argnums,
+                                   std::vector<py::str> static_argnames,
+                                   std::vector<int> donate_argnums,
+                                   std::shared_ptr<CompiledFunctionCache> cache)
     : fun_(std::move(fun)),
       cache_miss_(std::move(cache_miss)),
       static_argnums_(std::move(static_argnums)),
-      get_device_(std::move(get_device)) {
+      static_argnames_(std::move(static_argnames)),
+      donate_argnums_(donate_argnums),
+      has_explicit_device_(std::move(has_explicit_device)),
+      get_device_(std::move(get_device)),
+      cache_(std::move(cache)) {
   std::sort(static_argnums_.begin(), static_argnums_.end());
+  for (py::str& s : static_argnames) {
+    PyUnicode_InternInPlace(&s.ptr());
+  }
+  executables_ = cache_->Lookup(fun_, donate_argnums);
+  function_name_ = py::str(py::getattr(fun_, "__name__", fun));
+
+  GetGlobalCompiledFunctionStore().Insert(this);
 }
 
 CompiledFunction::~CompiledFunction() {
-  for (const auto& entry : executables_) {
-    entry.first.DecRef();
-  }
+  GetGlobalCompiledFunctionStore().Erase(this);
 }
 
-// Converts flattened arguments contained in ParsedArgumentsAsBuffers in
-// place. If arguments are `DeviceArray`, they must all be on the same `Device`.
+// Returns nullptr if arg has no sticky device
+static xla::StatusOr<xla::PjRtDevice*> GetJitArgumentStickyDevice(
+    py::handle arg) {
+  struct PythonTypes {
+    py::object device_array;
+  };
+  static const auto& types = *[]() -> PythonTypes* {
+    py::module xla_module(py::module::import("jax.interpreters.xla"));
+    py::object device_array;
+    if (py::hasattr(xla_module, "_DeviceArray")) {
+      device_array = xla_module.attr("_DeviceArray");
+    }
+    return new PythonTypes{device_array};
+  }();
+
+  if (arg.get_type() == xla::PyArray::type()) {
+    auto py_array = py::reinterpret_borrow<xla::PyArray>(arg);
+
+    if (py_array.num_shards() != 1) {
+      return xla::InvalidArgument(
+          "Only single-sharded Array is expected in C++ JIT.");
+    }
+
+    if (!py_array.committed()) {
+      return nullptr;
+    }
+    return py_array.GetBuffer(0)->device();
+  }
+
+  // We specically only deal with DeviceArray (not ShardedDeviceArray).
+  // (Can happen in jit(pmap), e.g. "test_jit_nested_donate_ignored").
+  if (arg.get_type().ptr() == xla::PyBuffer::type()) {
+    xla::PyBuffer* buffer = xla::PyBuffer::AsPyBufferUnchecked(arg);
+    if (!buffer->sticky_device()) {
+      return nullptr;
+    }
+    return buffer->sticky_device();
+  }
+
+  if (arg.get_type().ptr() == types.device_array.ptr()) {
+    if (arg.attr("_device").is_none()) {
+      return nullptr;
+    }
+    try {
+      // This can fail, e.g. for cloud TPU 2VM buffers.
+      TF_ASSIGN_OR_RETURN(xla::PyBuffer * buffer,
+                          xla::PyBuffer::AsPyBuffer(arg.attr("device_buffer")));
+      return buffer->buffer()->device();
+    } catch (const py::cast_error& e) {
+      return xla::InvalidArgument(
+          "%s", absl::StrCat("[jaxjit] Unsupported subclass of `DeviceArray`: "
+                             "`device_buffer` field is of type ",
+                             py::cast<std::string>(
+                                 arg.attr("device_buffer").get_type().str()),
+                             " while a `PyBuffer` was expected."));
+    }
+  }
+
+  return nullptr;
+}
+
+// Compute signature for arguments.
 //
-// Returns `Okxla::Status()` on success. Returning an error should lead to
+// Returns `OkStatus()` on success. Returning an error should lead to
 // calling the Python fallback.
-xla::Status ConvertArgsToBuffers(bool jax_enable_x64, xla::PyClient& pyclient,
-                                 xla::PjRtDevice* default_device,
-                                 bool is_committed,
-                                 ParsedArgumentsAsBuffers& arguments) {
-  std::vector<xla::PjRtBuffer*>& arg_buffers = arguments.arg_buffers;
-  auto& keep_alive = arguments.keep_alive;
+xla::Status ComputeSignature(bool jax_enable_x64,
+                             xla::PjRtDevice* default_device, bool is_committed,
+                             ParsedArgumentsAsBuffers& arguments) {
+  tensorflow::profiler::TraceMe traceme("ComputeSignature");
 
   int num_flat_dynamic_args = arguments.flat_dynamic_args.size();
-  arg_buffers.reserve(num_flat_dynamic_args);
-  arguments.signature.dynamic_args_signatures.reserve(num_flat_dynamic_args);
-
-  static const auto* xla_module =
-      new py::module(py::module::import("jax.interpreters.xla"));
-  const auto& device_array = xla_module->attr("_DeviceArray");
-
   // When the jitted function is not committed, we first check whether any
   // sticky `DeviceArray` is present and on which device they live. See also:
   // https://github.com/google/jax/pull/1884
@@ -988,30 +707,11 @@ xla::Status ConvertArgsToBuffers(bool jax_enable_x64, xla::PyClient& pyclient,
   if (is_committed) {
     data_device = default_device;
   } else {
-    for (py::handle arg : arguments.flat_dynamic_args) {
-      // We specically only deal with DeviceArray (not ShardedDeviceArray).
-      // (Can happen in jit(pmap), e.g. "test_jit_nested_donate_ignored").
-      if (py::isinstance<xla::PyBuffer>(arg) ||
-          arg.get_type().is(device_array)) {
-        xla::PyBuffer* buffer;
-        if (arg.attr("_device").is_none()) {  // Skip non-sticky devices.
-          continue;
-        }
-        try {
-          // This can fail, e.g. when device_buffer is a `DeviceConstant`.
-          buffer = py::cast<xla::PyBuffer*>(arg.attr("device_buffer"));
-        } catch (const py::cast_error& e) {
-          return xla::InvalidArgument(
-              "%s",
-              absl::StrCat("[jaxjit] Unsupported subclass of `DeviceArray`: "
-                           "`device_buffer` field is of type ",
-                           py::cast<std::string>(
-                               arg.attr("device_buffer").get_type().str()),
-                           " while a `PyBuffer` was expected."
-
-                           ));
-        }
-        xla::PjRtDevice* device = buffer->buffer()->device();
+    for (int i = 0; i < num_flat_dynamic_args; ++i) {
+      TF_ASSIGN_OR_RETURN(
+          xla::PjRtDevice * device,
+          GetJitArgumentStickyDevice(arguments.flat_dynamic_args[i]));
+      if (device) {
         if (data_device && (device != data_device)) {
           throw std::invalid_argument(absl::StrCat(
               "primitive arguments must be colocated on the same device ("
@@ -1030,296 +730,808 @@ xla::Status ConvertArgsToBuffers(bool jax_enable_x64, xla::PyClient& pyclient,
   CHECK(data_device);
   arguments.signature.device = data_device;
 
-  for (py::handle arg : arguments.flat_dynamic_args) {
-    TF_ASSIGN_OR_RETURN(DevicePutResult on_device,
-                        DevicePut(arg, data_device, jax_enable_x64, pyclient));
+  arguments.signature.dynamic_arg_signatures.reserve(num_flat_dynamic_args);
+  for (int i = 0; i < num_flat_dynamic_args; ++i) {
+    py::handle arg = arguments.flat_dynamic_args[i];
+    TF_ASSIGN_OR_RETURN(auto sig,
+                        xla::PyArgSignatureOfValue(arg, jax_enable_x64));
+    arguments.signature.dynamic_arg_signatures.push_back(std::move(sig));
+  }
+  return ::tsl::OkStatus();
+}
+
+// Copy buffers to device, skipping pruned arguments.
+// Returns `OkStatus()` on success. Returning an error should lead to
+// calling the Python fallback.
+xla::Status CopyBuffersToDevice(
+    bool jax_enable_x64, const std::optional<std::vector<bool>>& kept_args,
+    ParsedArgumentsAsBuffers& arguments) {
+  std::vector<xla::PjRtBuffer*>& arg_buffers = arguments.arg_buffers;
+  xla::PjRtDevice* data_device = arguments.signature.device;
+
+  int num_flat_dynamic_args = arguments.flat_dynamic_args.size();
+  xla::DevicePutOptions options;
+  options.squash_64bit_types = !jax_enable_x64;
+  options.allow_zero_copy = true;
+  arg_buffers.reserve(num_flat_dynamic_args);
+  bool input_pruning_enabled = kept_args.has_value();
+  for (int i = 0; i < num_flat_dynamic_args; ++i) {
+    if (input_pruning_enabled && !kept_args.value()[i]) {
+      continue;
+    }
+
+    py::handle arg = arguments.flat_dynamic_args[i];
+    TF_ASSIGN_OR_RETURN(xla::DevicePutResult on_device,
+                        DevicePut(arg, data_device, options));
 
     xla::PjRtBuffer* buffer = on_device.buffer;
     arg_buffers.push_back(buffer);
     if (on_device.owned_buffer) {
-      keep_alive.emplace_back(std::move(on_device.owned_buffer));
+      arguments.keep_alive.push_back(std::move(on_device.owned_buffer));
+    } else if (on_device.owning_pybuffer) {
+      arguments.keep_alive_objects.push_back(
+          std::move(on_device.owning_pybuffer));
     }
-
-    ArgSignature sig(buffer->on_device_shape().element_type(),
-                     buffer->on_device_shape().dimensions(),
-                     on_device.weak_type);
-    arguments.signature.dynamic_args_signatures.push_back(std::move(sig));
   }
-  return xla::Status::OK();
+  return ::tsl::OkStatus();
 }
 
-CacheEntry* CompiledFunction::GetCacheEntryIfPresent(
-    const CallSignature& signature) {
-  auto found_iterator = executables_.find(signature);
-  if (found_iterator != executables_.end()) {  // Cache hit!
-    if (!found_iterator->second->compilation_complete.HasBeenNotified()) {
-      py::gil_scoped_release gil_release;
-      found_iterator->second->compilation_complete.WaitForNotification();
-    }
-    if (found_iterator->second->compilation_error) {
-      throw std::invalid_argument(
-          found_iterator->second->compilation_error.value().error_message());
-    }
-    return found_iterator->second.get();
-  }
-  return nullptr;
-}
-
-CacheEntry* CompiledFunction::AddCacheEntry(const py::args& args,
-                                            const py::kwargs& kwargs,
-                                            const CallSignature& signature,
-                                            py::object out_and_fastpath_data) {
-  // We need to insert the element.
-  auto result = executables_.emplace(signature, std::make_unique<CacheEntry>());
-  auto it = result.first;
-  CacheEntry* cache_entry = it->second.get();
-  // CallSignatures in the cache own their keyword argument reference.
-  result.first->first.IncRef();
-
-  py::tuple tuple = py::cast<py::tuple>(out_and_fastpath_data);
-  CHECK_EQ(tuple.size(), 2);
-  if (tuple[1].is_none()) {
+void CompiledFunction::PopulateCacheEntry(
+    CacheEntry* cache_entry, const CallSignature& signature,
+    const py::tuple& out_and_fastpath_data) {
+  CHECK_EQ(out_and_fastpath_data.size(), 2);
+  if (out_and_fastpath_data[1].is_none()) {
     cache_entry->fall_back_to_python = true;
-    cache_entry->compilation_complete.Notify();
-    return cache_entry;
+    return;
   }
 
-  py::tuple executable_handlers_out_tree = py::cast<py::tuple>(tuple[1]);
-  if (executable_handlers_out_tree.size() != 5) {
-    throw std::runtime_error(absl::StrCat(
-        "The versions of jaxlib and Jax are incompatible (jaxlib is too recent "
-        "compared to Jax. Upgrade Jax is advised. The C++ code expects "
-        "5 arguments but ",
-        executable_handlers_out_tree.size(), " where provided: ",
-        py::cast<std::string>(
-            py::str(py::repr(executable_handlers_out_tree)))));
-  }
-  // (xla_executable, out_pytree_def, sticky_device, avals, lazy_exprs)
+  py::tuple executable_handlers_out_tree =
+      py::cast<py::tuple>(out_and_fastpath_data[1]);
   auto executable = py::cast<std::shared_ptr<xla::PyExecutable>>(
-      executable_handlers_out_tree[0]);
+      executable_handlers_out_tree.attr("xla_executable"));
   cache_entry->executable = std::move(executable);
   int num_devices =
       cache_entry->executable->pjrt_executable().addressable_devices().size();
   // The presence of jit(pmap) is detected from Python.
   CHECK_EQ(num_devices, 1);
 
-  auto out_tree = py::cast<xla::PyTreeDef>(executable_handlers_out_tree[1]);
+  auto out_tree = py::cast<xla::PyTreeDef>(
+      executable_handlers_out_tree.attr("out_pytree_def"));
   cache_entry->out_pytree_def = std::move(out_tree);
 
   cache_entry->sticky_device =
-      py::cast<py::object>(executable_handlers_out_tree[2]);
-  auto avals = py::cast<py::list>(executable_handlers_out_tree[3]);
-  auto lazy_exprs = py::cast<py::list>(executable_handlers_out_tree[4]);
-  CHECK_EQ(avals.size(), lazy_exprs.size());
+      py::cast<std::optional<xla::ClientAndPtr<xla::PjRtDevice>>>(
+          executable_handlers_out_tree.attr("sticky_device"));
+  auto avals = py::cast<py::list>(executable_handlers_out_tree.attr("avals"));
 
   cache_entry->out_avals.reserve(avals.size());
-  cache_entry->out_lazy_exprs.reserve(avals.size());
+  cache_entry->out_weak_types.reserve(avals.size());
+  cache_entry->out_dtypes.reserve(avals.size());
+  cache_entry->out_shapes.reserve(avals.size());
   for (int i = 0; i < avals.size(); ++i) {
     py::object shaped_array = py::reinterpret_borrow<py::object>(avals[i]);
-    py::object lazy_expr = py::reinterpret_borrow<py::object>(lazy_exprs[i]);
 
     cache_entry->out_avals.push_back(shaped_array);
-    CHECK(lazy_expr.is_none() || !IsTrivialLazyExpr(lazy_expr));
-    cache_entry->out_lazy_exprs.push_back(lazy_expr);
+    cache_entry->out_weak_types.push_back(
+        py::cast<bool>(shaped_array.attr("weak_type")));
+    cache_entry->out_dtypes.push_back(shaped_array.attr("dtype"));
+    cache_entry->out_shapes.push_back(
+        py::cast<std::vector<int64_t>>(shaped_array.attr("shape")));
   }
 
-  cache_entry->compilation_complete.Notify();
-  return cache_entry;
-}
-
-py::object CompiledFunction::Call(py::args args, py::kwargs kwargs) {
-  if (always_fallback_to_python_) {
-    return py::cast<py::tuple>(cache_miss_(*args, **kwargs))[0];
+  auto shardings =
+      py::cast<py::list>(executable_handlers_out_tree.attr("shardings"));
+  cache_entry->out_shardings.reserve(shardings.size());
+  for (const auto& sharding : shardings) {
+    cache_entry->out_shardings.push_back(
+        py::reinterpret_borrow<py::object>(sharding));
   }
-  // Delayed values are retrieved on the first call to `Call`.
-  if (!default_device_) {
-    // As we are calling Python code, that may release the GIL, we first hold
-    // mu_ before holding the GIL.
-    py::gil_scoped_release gil_release;
-    {
-      absl::MutexLock lock1(&mu_);
-      py::gil_scoped_acquire gil_aquire;
 
-      if (!default_device_) {
-        py::object device_and_is_committed = get_device_();
-        try {
-          default_pydevice_ = py::cast<xla::ClientAndPtr<xla::PjRtDevice>>(
-              device_and_is_committed.attr("default_device"));
-        } catch (const py::cast_error& e) {
-          // Pathways and Cloud TPU 2VM runtime.
-          always_fallback_to_python_ = true;
-          return py::cast<py::tuple>(cache_miss_(*args, **kwargs))[0];
-        }
-        default_pyclient_ = default_pydevice_.client;
-        default_device_ = default_pydevice_.contents;
-        if (!default_device_) {  // UPTC
-          always_fallback_to_python_ = true;
-          return py::cast<py::tuple>(cache_miss_(*args, **kwargs))[0];
-        }
-        is_committed_ =
-            py::cast<bool>(device_and_is_committed.attr("committed_to_device"));
-      }
+  auto committed =
+      py::cast<py::list>(executable_handlers_out_tree.attr("committed"));
+  cache_entry->committed.reserve(shardings.size());
+  for (const auto& c : committed) {
+    cache_entry->committed.push_back(c.cast<bool>());
+  }
+
+  auto kept_var_bitvec_attr =
+      py::getattr(executable_handlers_out_tree, "kept_var_bitvec", py::none());
+  if (!kept_var_bitvec_attr.is_none()) {
+    auto kept_var_bitvec = py::cast<py::list>(kept_var_bitvec_attr);
+    cache_entry->kept_var_bitvec =
+        std::make_optional<std::vector<bool>>(kept_var_bitvec.size(), false);
+    for (int i = 0; i < kept_var_bitvec.size(); ++i) {
+      cache_entry->kept_var_bitvec.value()[i] =
+          py::cast<bool>(kept_var_bitvec[i]);
     }
   }
-  CHECK(default_device_);
-  if (JitIsDisabled()) {
-    return fun_(*args, **kwargs);
+}
+
+void CompiledFunction::TryToPopulateDefaultDevice() {
+  // The following line calls Python and may release the GIL.
+  py::object device_and_is_committed;
+  try {
+    device_and_is_committed = get_device_();
+  } catch (py::error_already_set& e) {
+    // Backend or device initialization failed. Handle this in Python.
+    always_fallback_to_python_ = true;
+    return;
   }
+  // If the GIL was released by the call to get_device_, another thread may
+  // have filled in default_device_.
+  if (!default_device_) {
+    try {
+      auto default_pydevice = py::cast<xla::ClientAndPtr<xla::PjRtDevice>>(
+          device_and_is_committed.attr("default_device"));
+      is_committed_ =
+          py::cast<bool>(device_and_is_committed.attr("committed_to_device"));
+      default_device_ = default_pydevice.contents;
+    } catch (const py::cast_error& e) {
+      // Pathways, Cloud TPU 2VM, and UPTC runtime.
+      always_fallback_to_python_ = true;
+    }
+  }
+}
+
+xla::StatusOr<py::object> CompiledFunction::Call(
+    py::handle args, std::optional<py::kwargs> kwargs) {
+  VLOG(3) << "Calling CompiledFunction " << function_name_;
+
+  // Make sure we trigger a garbage collection on JIT function calls. Otherwise
+  // code like
+  // f = jit(...)
+  // while True:
+  //   f(x)
+  // may never free temporary buffers for copies of arguments.
+  xla::GlobalPyRefManager()->MaybeCollectGarbage();
+
+  auto& global_state = GlobalJitState();
+  auto& tls = ThreadLocalJitState();
+  if (GetDisableJit()) {
+    return fun_(*py::reinterpret_borrow<py::args>(args),
+                **kwargs.value_or(py::kwargs()));
+  }
+  if (always_fallback_to_python_) {
+    return py::object(
+        py::cast<py::tuple>(cache_miss_(*py::reinterpret_borrow<py::args>(args),
+                                        **kwargs.value_or(py::kwargs())))[0]);
+  }
+
+  xla::PjRtDevice* device = nullptr;
+  // Whether `device` should override an input with a sticky device.
+  bool is_committed;
+  if (!has_explicit_device_ && GetDefaultDevice().has_value()) {
+    xla::ClientAndPtr<xla::PjRtDevice> pjrt_device_ptr;
+    bool cast_success = true;
+    try {
+      pjrt_device_ptr =
+          GetDefaultDevice()->cast<xla::ClientAndPtr<xla::PjRtDevice>>();
+    } catch (py::cast_error& e) {
+      // We assume GetDefaultDevice() returned a non-PJRT device object. Leave
+      // `device` unset so we fallback to Python path and handle default device
+      // there.
+      cast_success = false;
+    }
+    if (cast_success) {
+      device = pjrt_device_ptr.get();
+      is_committed = false;
+      VLOG(3) << "Using config.default_device (uncommitted): "
+              << device->DebugString();
+    }
+  }
+  if (device == nullptr) {
+    // Call back into Python to find system default device, which will be stored
+    // in default_device_.
+    if (!default_device_) {
+      // On the first call to `Call`, compute a default device. We need to wait
+      // until after platform initialization is complete before doing so, but
+      // @jit may be used as a decorator.
+      TryToPopulateDefaultDevice();
+      if (!default_device_) {
+        return py::object(py::cast<py::tuple>(
+            cache_miss_(*py::reinterpret_borrow<py::args>(args),
+                        **kwargs.value_or(py::kwargs())))[0]);
+      }
+    }
+    device = default_device_;
+    is_committed = is_committed_;
+    VLOG(3) << "Using device from Python): " << device->DebugString()
+            << ", committed: " << is_committed;
+  }
+  CHECK(device != nullptr);
+
   ParsedArgumentsAsBuffers arguments;
-  if (!ParseArguments(args, kwargs, static_argnums_, arguments).ok()) {
-    return py::cast<py::tuple>(cache_miss_(*args, **kwargs))[0];
+  arguments.signature.function_name = function_name_;
+  xla::Status status = ParseArguments(args, kwargs, static_argnums_,
+                                      static_argnames_, arguments);
+  if (!status.ok()) {
+    VLOG(2) << "ParseArguments failed: " << status;
+    return py::object(
+        py::cast<py::tuple>(cache_miss_(*py::reinterpret_borrow<py::args>(args),
+                                        **kwargs.value_or(py::kwargs())))[0]);
   }
 
   bool jax_enable_x64 = GetEnableX64();
   arguments.signature.jax_enable_x64 = jax_enable_x64;
+  arguments.signature.jax_array = GetEnableJaxArray();
   // The C++ jit do not support Tracers arguments inputs yet. The Python-based
   // jit function will be called if any of the dynamic arguments is unsupported.
-  if (!ConvertArgsToBuffers(jax_enable_x64, *default_pyclient_, default_device_,
-                            is_committed_, arguments)
-           .ok()) {
-    return py::cast<py::tuple>(cache_miss_(*args, **kwargs))[0];
+  status = ComputeSignature(jax_enable_x64, device, is_committed, arguments);
+  if (!status.ok()) {
+    VLOG(2) << "ComputeSignature failed: " << status;
+    return py::object(
+        py::cast<py::tuple>(cache_miss_(*py::reinterpret_borrow<py::args>(args),
+                                        **kwargs.value_or(py::kwargs())))[0]);
   }
+  arguments.signature.global_extra_jit_context = global_state.extra_jit_context;
+  arguments.signature.thread_local_extra_jit_context = tls.extra_jit_context;
 
-  CacheEntry* cache_entry = GetCacheEntryIfPresent(arguments.signature);
+  VLOG(3) << "CallSignature:\n" << arguments.signature.DebugString();
+  bool inserted = false;
+  std::shared_ptr<CacheEntry> cache_entry = executables_->GetOrCreateIfAbsent(
+      arguments.signature, [&inserted](const CallSignature& key) {
+        inserted = true;
+        return std::make_shared<CacheEntry>();
+      });
 
-  if (!cache_entry) {
-    py::object out_and_fastpath_data = cache_miss_(*args, **kwargs);
-    cache_entry = GetCacheEntryIfPresent(arguments.signature);
-    if (!cache_entry) {
-      cache_entry = AddCacheEntry(args, kwargs, arguments.signature,
-                                  out_and_fastpath_data);
-    }
-    CHECK(cache_entry);
-    if (cache_entry->fall_back_to_python) {
-      return py::cast<py::tuple>(out_and_fastpath_data)[0];
-    }
-    // As we have already computed the results, we can return it.
-    // It's even *required* e.g. if there are donated arguments, because
-    // otherwise the buffer which has been donated already will be invalid.
-    return py::cast<py::tuple>(out_and_fastpath_data)[0];
-  }
-  CHECK(cache_entry);
-  if (cache_entry->fall_back_to_python) {
-    return py::cast<py::tuple>(cache_miss_(*args, **kwargs))[0];
-  }
-  std::vector<std::unique_ptr<xla::PyBuffer>> outputs =
-      ValueOrThrow(cache_entry->executable->PjRtExecute(arguments.arg_buffers));
+  if (!cache_entry->compilation_complete.HasBeenNotified()) {
+    // In case of several threads attempting to compile the executable, only
+    // the one that inserted the item will perform the compilation.
+    if (inserted) {
+      py::object out_and_fastpath_data;
+      py::tuple out_tuple;
+      VLOG(2) << "Cache miss for\n" << arguments.signature.DebugString();
+      try {
+        // Calls Python and may release the GIL. May also throw if
+        // compilation/tracing fails.
+        out_and_fastpath_data =
+            cache_miss_(*py::reinterpret_borrow<py::args>(args),
+                        **kwargs.value_or(py::kwargs()));
+        out_tuple = py::cast<py::tuple>(out_and_fastpath_data);
+        PopulateCacheEntry(cache_entry.get(), arguments.signature, out_tuple);
+      } catch (const std::exception& e) {
+        cache_entry->fall_back_to_python = true;
+        cache_entry->compilation_complete.Notify();
+        throw;
+      }
+      cache_entry->compilation_complete.Notify();
 
-  const std::vector<py::object>& out_avals = cache_entry->out_avals;
-  const std::vector<py::object>& out_lazy_exprs = cache_entry->out_lazy_exprs;
-  const py::object& sticky_device = cache_entry->sticky_device;
-
-  py::list flat_device_arrays;
-  for (int i = 0; i < outputs.size(); ++i) {
-    auto& buffer = outputs[i];
-    if (out_lazy_exprs[i].is_none()) {  // No LazyExpr.
-      buffer->SetAval(out_avals[i]);
-      buffer->SetStickyDevice(sticky_device);
-      flat_device_arrays.append(py::cast(std::move(outputs[i])));
+      // We have already computed the result in the miss path so we can return
+      // it. We are even *required* to do so if there are donated arguments,
+      // because any donated buffers will now be invalid.
+      return py::object(out_tuple[0]);
     } else {
-      static const auto* xla_module =
-          new py::module(py::module::import("jax.interpreters.xla"));
-      static const auto* device_array =
-          new py::handle(xla_module->attr("_DeviceArray"));
-      flat_device_arrays.append(
-          (*device_array)(out_avals[i], sticky_device, out_lazy_exprs[i],
-                          py::cast(std::move(outputs[i]))));
+      if (cache_entry->thread_id == std::this_thread::get_id()) {
+        auto error_string = absl::StrCat("Recursively calling jit: ",
+                                         arguments.signature.DebugString());
+        PyErr_SetString(PyExc_RecursionError, error_string.c_str());
+        throw pybind11::error_already_set();
+      }
+      // Release the GIL while we wait, making sure the compile thread can
+      // lock it.
+      py::gil_scoped_release release;
+      cache_entry->compilation_complete.WaitForNotification();
     }
   }
-  return cache_entry->out_pytree_def.Unflatten(flat_device_arrays);
+  // It's hard to reraise the exact same kind of errors when a compilation error
+  // occurred. If the first compilation failed, other threads will also execute
+  // the Python path.
+  if (cache_entry->fall_back_to_python) {
+    VLOG(2) << "fallback to python: " << function_name_;
+    return py::object(
+        py::cast<py::tuple>(cache_miss_(*py::reinterpret_borrow<py::args>(args),
+                                        **kwargs.value_or(py::kwargs())))[0]);
+  }
+
+  status = CopyBuffersToDevice(jax_enable_x64, cache_entry->kept_var_bitvec,
+                               arguments);
+  if (!status.ok()) {
+    VLOG(2) << "CopyBuffersToDevice failed: " << status;
+    return py::object(
+        py::cast<py::tuple>(cache_miss_(*py::reinterpret_borrow<py::args>(args),
+                                        **kwargs.value_or(py::kwargs())))[0]);
+  }
+
+  // Executes the computation.
+  std::vector<std::vector<std::unique_ptr<xla::PjRtBuffer>>> output_buffers;
+  {
+    py::gil_scoped_release gil_release;
+    TF_ASSIGN_OR_RETURN(
+        output_buffers,
+        cache_entry->executable->mutable_pjrt_executable()->Execute(
+            {arguments.arg_buffers}, cache_entry->executable->options()));
+  }
+  auto traceback = xla::Traceback::Get();
+
+  int num_outputs = output_buffers[0].size();
+  absl::InlinedVector<py::object, 1> flat_device_arrays;
+  flat_device_arrays.reserve(num_outputs);
+
+  if (!cache_entry->out_shardings.empty()) {
+    for (int i = 0; i < output_buffers[0].size(); ++i) {
+      std::vector<std::shared_ptr<xla::PjRtBuffer>> pjrt_buffers{
+          std::move(output_buffers[0][i])};
+      xla::PyArray array(
+          cache_entry->out_avals[i], cache_entry->out_weak_types[i],
+          cache_entry->out_dtypes[i], cache_entry->out_shapes[i],
+          cache_entry->out_shardings.at(i), cache_entry->executable->client(),
+          traceback, std::move(pjrt_buffers),
+          /*committed=*/cache_entry->committed.at(i), /*skip_checks=*/true);
+      flat_device_arrays.push_back(std::move(array));
+    }
+  } else {
+    for (int i = 0; i < output_buffers[0].size(); ++i) {
+      bool last = (i == (num_outputs - 1));
+      xla::PyBuffer::object buffer = xla::PyBuffer::Make(
+          cache_entry->executable->client(), std::move(output_buffers[0][i]),
+          last ? std::move(traceback) : traceback);
+      buffer.buf()->SetAval(cache_entry->out_avals[i]);
+      buffer.buf()->set_weak_type(cache_entry->out_weak_types[i]);
+      if (cache_entry->sticky_device.has_value()) {
+        TF_RETURN_IF_ERROR(buffer.buf()->set_sticky_device(
+            (*cache_entry->sticky_device).get()));
+      }
+      flat_device_arrays.push_back(std::move(buffer));
+    }
+  }
+  py::object out = cache_entry->out_pytree_def.Unflatten(flat_device_arrays);
+
+  // If there is a post-hook function, call it with the inputs and the outputs.
+  std::optional<py::object> post_hook = GetPostHook();
+  if (post_hook) {
+    (*post_hook)(AsPyHandle(), args,
+                 py::cast<py::dict>(kwargs.value_or(py::kwargs())), out);
+  }
+  return std::move(out);
 }
+
+struct JaxCompiledFunctionObject {
+  PyObject_HEAD;
+  PyObject* dict;      // Dictionary for __dict__
+  PyObject* weakrefs;  // Weak references; for use by the Python interpreter.
+  CompiledFunction fun;
+};
+
+PyObject* JaxCompiledFunction_Type = nullptr;
+
+bool CompiledFunction::IsCompiledFunction(py::handle handle) {
+  return handle.get_type() == JaxCompiledFunction_Type;
+}
+
+CompiledFunction* CompiledFunction::AsCompiledFunctionUnchecked(
+    py::handle handle) {
+  return &(reinterpret_cast<JaxCompiledFunctionObject*>(handle.ptr())->fun);
+}
+
+xla::StatusOr<CompiledFunction*> AsCompiledFunction(py::handle handle) {
+  if (!CompiledFunction::IsCompiledFunction(handle)) {
+    return xla::InvalidArgument("Expected a CompiledFunction");
+  }
+  return CompiledFunction::AsCompiledFunctionUnchecked(handle);
+}
+
+py::handle CompiledFunction::AsPyHandle() {
+  return reinterpret_cast<PyObject*>(reinterpret_cast<char*>(this) -
+                                     offsetof(JaxCompiledFunctionObject, fun));
+}
+
+extern "C" {
+
+PyObject* JaxCompiledFunction_tp_new(PyTypeObject* subtype, PyObject* args,
+                                     PyObject* kwds) {
+  JaxCompiledFunctionObject* self =
+      reinterpret_cast<JaxCompiledFunctionObject*>(
+          subtype->tp_alloc(subtype, 0));
+  if (!self) return nullptr;
+  self->dict = nullptr;
+  self->weakrefs = nullptr;
+  return reinterpret_cast<PyObject*>(self);
+}
+
+void JaxCompiledFunction_tp_dealloc(PyObject* self) {
+  PyTypeObject* tp = Py_TYPE(self);
+  JaxCompiledFunctionObject* o =
+      reinterpret_cast<JaxCompiledFunctionObject*>(self);
+  if (o->weakrefs) {
+    PyObject_ClearWeakRefs(self);
+  }
+  Py_CLEAR(o->dict);
+  o->fun.~CompiledFunction();
+  tp->tp_free(self);
+  Py_DECREF(tp);
+}
+
+int JaxCompiledFunction_tp_traverse(PyObject* self, visitproc visit,
+                                    void* arg) {
+  JaxCompiledFunctionObject* o =
+      reinterpret_cast<JaxCompiledFunctionObject*>(self);
+  Py_VISIT(o->dict);
+  Py_VISIT(o->fun.fun().ptr());
+  Py_VISIT(o->fun.cache_miss().ptr());
+  Py_VISIT(o->fun.get_device().ptr());
+  return 0;
+}
+
+int JaxCompiledFunction_tp_clear(PyObject* self) {
+  JaxCompiledFunctionObject* o =
+      reinterpret_cast<JaxCompiledFunctionObject*>(self);
+  Py_CLEAR(o->dict);
+  o->fun.ClearPythonReferences();
+  return 0;
+}
+
+// Implements the Python descriptor protocol so JIT-compiled functions can be
+// used as bound methods. See:
+// https://docs.python.org/3/howto/descriptor.html#functions-and-methods
+PyObject* JaxCompiledFunction_tp_descr_get(PyObject* self, PyObject* obj,
+                                           PyObject* type) {
+  if (obj == nullptr || obj == Py_None) {
+    Py_INCREF(self);
+    return self;
+  }
+  return PyMethod_New(self, obj);
+}
+
+// Support d = instance.__dict__.
+PyObject* JaxCompiledFunction_get_dict(PyObject* self, void*) {
+  JaxCompiledFunctionObject* o =
+      reinterpret_cast<JaxCompiledFunctionObject*>(self);
+  if (!o->dict) {
+    o->dict = PyDict_New();
+  }
+  Py_XINCREF(o->dict);
+  return o->dict;
+}
+
+int JaxCompiledFunction_set_dict(PyObject* self, PyObject* new_dict, void*) {
+  JaxCompiledFunctionObject* o =
+      reinterpret_cast<JaxCompiledFunctionObject*>(self);
+  if (!PyDict_Check(new_dict)) {
+    PyErr_Format(PyExc_TypeError,
+                 "__dict__ must be set to a dictionary, not a '%s'",
+                 Py_TYPE(new_dict)->tp_name);
+    return -1;
+  }
+  Py_INCREF(new_dict);
+  Py_CLEAR(o->dict);
+  o->dict = new_dict;
+  return 0;
+}
+
+static PyGetSetDef JaxCompiledFunction_tp_getset[] = {
+    // Having a __dict__ seems necessary to allow !functool.wraps to override
+    // __doc__.
+    {const_cast<char*>("__dict__"), JaxCompiledFunction_get_dict,
+     JaxCompiledFunction_set_dict, nullptr, nullptr},
+    {nullptr, nullptr, nullptr, nullptr, nullptr}};
+
+PyObject* JaxCompiledFunction_tp_call(PyObject* self, PyObject* args,
+                                      PyObject* kwargs) {
+  JaxCompiledFunctionObject* o =
+      reinterpret_cast<JaxCompiledFunctionObject*>(self);
+  tensorflow::profiler::TraceMe traceme([&] {
+    return absl::StrCat("JaxCompiledFunction(", o->fun.function_name(), ")");
+  });
+  std::optional<py::kwargs> py_kwargs;
+  if (kwargs) {
+    py_kwargs = py::reinterpret_borrow<py::kwargs>(kwargs);
+  }
+  try {
+    xla::StatusOr<py::object> out = o->fun.Call(args, std::move(py_kwargs));
+    if (!out.ok()) {
+      PyErr_SetString(PyExc_ValueError, out.status().ToString().c_str());
+      return nullptr;
+    }
+    return out.value().release().ptr();
+  } catch (py::error_already_set& e) {
+    e.restore();
+    return nullptr;
+  } catch (py::cast_error& e) {
+    PyErr_SetString(PyExc_ValueError, e.what());
+    return nullptr;
+  } catch (std::invalid_argument& e) {
+    PyErr_SetString(PyExc_ValueError, e.what());
+    return nullptr;
+  } catch (std::runtime_error& e) {
+    PyErr_SetString(PyExc_ValueError, e.what());
+    return nullptr;
+  }
+}
+
+PyObject* JaxCompiledFunction_tp_repr(PyObject* self) {
+  try {
+    const std::string& repr = absl::StrFormat(
+        "<CompiledFunction of %s>",
+        static_cast<std::string>(py::repr(py::getattr(self, "__wrapped__"))));
+    return PyUnicode_FromString(repr.c_str());
+  } catch (...) {
+    // Ignore all errors when accessing a repr.
+    return PyUnicode_FromString("<CompiledFunction>");
+  }
+}
+
+void InitializeCompiledFunction(JaxCompiledFunctionObject* cfun,
+                                py::function fun, py::function cache_miss,
+                                py::function get_device,
+                                bool has_explicit_device,
+                                std::vector<int> static_argnums,
+                                std::vector<py::str> static_argnames,
+                                std::vector<int> donate_argnums,
+                                std::shared_ptr<CompiledFunctionCache> cache) {
+  new (&cfun->fun) CompiledFunction(
+      std::move(fun), std::move(cache_miss), std::move(get_device),
+      has_explicit_device, std::move(static_argnums),
+      std::move(static_argnames), std::move(donate_argnums), std::move(cache));
+}
+
+}  // extern "C"
+
+py::object MakeCompiledFunction(py::function fun, py::function cache_miss,
+                                py::function get_device,
+                                bool has_explicit_device,
+                                std::vector<int> static_argnums,
+                                std::vector<py::str> static_argnames,
+                                std::vector<int> donate_argnums,
+                                std::shared_ptr<CompiledFunctionCache> cache) {
+  py::object obj = py::reinterpret_steal<py::object>(JaxCompiledFunction_tp_new(
+      reinterpret_cast<PyTypeObject*>(JaxCompiledFunction_Type), nullptr,
+      nullptr));
+  JaxCompiledFunctionObject* buf =
+      reinterpret_cast<JaxCompiledFunctionObject*>(obj.ptr());
+  if (!cache) {
+    cache = std::make_shared<CompiledFunctionCache>(
+        CompiledFunctionCache::kDefaultCapacity);
+  }
+  InitializeCompiledFunction(
+      buf, std::move(fun), std::move(cache_miss), std::move(get_device),
+      has_explicit_device, std::move(static_argnums),
+      std::move(static_argnames), std::move(donate_argnums), std::move(cache));
+  return obj;
+}
+
+// Version numbers for the pickled representations of
+// CompiledFunction/CompiledFunctionCache. Increment these if changing them.
+const int kCompiledFunctionCachePickleVersion = 1;
+const int kCompiledFunctionPickleVersion = 1;
 
 }  // namespace
 
-void BuildJaxjitSubmodule(pybind11::module& m) {
+void BuildJaxjitSubmodule(py::module& m) {
   py::module jitlib = m.def_submodule("jax_jit", "Jax C++ jit library");
 
-  py::class_<CompiledFunction, std::unique_ptr<CompiledFunction>> cfun(
-      jitlib, "CompiledFunction");
-  cfun.def("__call__", &CompiledFunction::Call);
-  cfun.def_property_readonly("__signature__",
-                             &CompiledFunction::PythonSignature);
+  py::class_<CompiledFunctionCache, std::shared_ptr<CompiledFunctionCache>>
+      cache(jitlib, "CompiledFunctionCache");
+  cache.def(py::init<int>(),
+            py::arg("capacity") = CompiledFunctionCache::kDefaultCapacity);
+  cache.def("size", &CompiledFunctionCache::Size);
+  cache.def("capacity", &CompiledFunctionCache::Capacity);
+  cache.def("clear", &CompiledFunctionCache::Clear);
+  cache.def_static("clear_all", []() {
+    GetGlobalCompiledFunctionStore().ClearFunctionCache();
+  });
+  cache.def(py::pickle(
+      // __getstate__
+      // Pickles as an empty cache; the client can repopulate as needed.
+      [](const CompiledFunctionCache& cache) {
+        py::dict pickle;
+        pickle["version"] = kCompiledFunctionCachePickleVersion;
+        pickle["capacity"] = cache.Capacity();
+        return pickle;
+      },
+      // __setstate__
+      [](const py::dict& pickle) {
+        int version = py::cast<int>(pickle["version"]);
+        if (version != kCompiledFunctionCachePickleVersion) {
+          throw std::invalid_argument(absl::StrFormat(
+              "Invalid CompiledFunction pickle version, got %d, expected %d",
+              version, kCompiledFunctionCachePickleVersion));
+        }
+        int capacity = py::cast<int>(pickle["capacity"]);
+        return std::make_shared<CompiledFunctionCache>(capacity);
+      }));
 
-  jitlib.def("set_disable_jit_cpp_flag", &SetDisableJitFlag);
-  jitlib.def("get_disable_jit_cpp_flag", &GetDisableJitFlag);
-  jitlib.def("set_disable_jit_thread_local", &SetDisableJitThreadLocal);
-  jitlib.def("get_disable_jit_thread_local", &GetDisableJitThreadLocal);
-  jitlib.def("jit_is_disabled", &JitIsDisabled);
-  // TODO(jblespiau): Remove from the Python code and remove this
-  jitlib.def("set_disable_jit", &SetDisableJitThreadLocal);
-  jitlib.def("get_disable_jit", &GetDisableJitThreadLocal);
+  // We need to use heap-allocated type objects because we want to add
+  // additional methods dynamically.
+  py::object cfun;
+  {
+    py::str name = py::str("CompiledFunction");
+    py::str qualname = py::str("CompiledFunction");
+    PyHeapTypeObject* heap_type = reinterpret_cast<PyHeapTypeObject*>(
+        PyType_Type.tp_alloc(&PyType_Type, 0));
+    // Caution: we must not call any functions that might invoke the GC until
+    // PyType_Ready() is called. Otherwise the GC might see a half-constructed
+    // type object.
+    CHECK(heap_type) << "Unable to create heap type object";
+    heap_type->ht_name = name.release().ptr();
+    heap_type->ht_qualname = qualname.release().ptr();
+    PyTypeObject* type = &heap_type->ht_type;
+    type->tp_name = "CompiledFunction";
+    type->tp_basicsize = sizeof(JaxCompiledFunctionObject);
+    type->tp_flags =
+        Py_TPFLAGS_DEFAULT | Py_TPFLAGS_HEAPTYPE | Py_TPFLAGS_HAVE_GC;
+    type->tp_new = JaxCompiledFunction_tp_new;
+    type->tp_dealloc = JaxCompiledFunction_tp_dealloc;
+    type->tp_dictoffset = offsetof(JaxCompiledFunctionObject, dict);
+    type->tp_traverse = JaxCompiledFunction_tp_traverse;
+    type->tp_clear = JaxCompiledFunction_tp_clear;
+    type->tp_weaklistoffset = offsetof(JaxCompiledFunctionObject, weakrefs);
+    type->tp_getset = JaxCompiledFunction_tp_getset;
+    type->tp_descr_get = JaxCompiledFunction_tp_descr_get;
+    type->tp_call = JaxCompiledFunction_tp_call;
+    type->tp_repr = JaxCompiledFunction_tp_repr;
+    CHECK_EQ(PyType_Ready(type), 0);
+    JaxCompiledFunction_Type = reinterpret_cast<PyObject*>(type);
+    cfun = py::reinterpret_borrow<py::object>(JaxCompiledFunction_Type);
+  }
+  py::object cfun_type =
+      py::reinterpret_borrow<py::object>(JaxCompiledFunction_Type);
 
-  jitlib.def("set_enable_x64_cpp_flag", &SetEnableX64Flag);
-  jitlib.def("get_enable_x64_cpp_flag", &GetEnableX64Flag);
-  jitlib.def("set_enable_x64_thread_local", &SetEnableX64ThreadLocal);
-  jitlib.def("get_enable_x64_thread_local", &GetEnableX64ThreadLocal);
+  // Add CompiledFunction to the xla_extension module so it can be pickled.
+  m.attr("CompiledFunction") = cfun_type;
+  cfun.attr("__module__") = m.attr("__name__");
+
+  cfun.attr("__signature__") =
+      property_readonly([](py::handle self) -> xla::StatusOr<py::object> {
+        TF_ASSIGN_OR_RETURN(CompiledFunction * fun, AsCompiledFunction(self));
+        return fun->PythonSignature();
+      });
+  cfun.attr("_cache_miss") =
+      property_readonly([](py::handle self) -> xla::StatusOr<py::object> {
+        TF_ASSIGN_OR_RETURN(CompiledFunction * fun, AsCompiledFunction(self));
+        return fun->cache_miss();
+      });
+  cfun.attr("__getstate__") = py::cpp_function(
+      [](const CompiledFunction::object& self) {
+        CompiledFunction* fn = self.func();
+        py::dict pickle;
+        pickle["version"] = kCompiledFunctionPickleVersion;
+        pickle["fun"] = fn->fun();
+        pickle["cache_miss"] = fn->cache_miss();
+        pickle["get_device"] = fn->get_device();
+        pickle["has_explicit_device"] = fn->has_explicit_device();
+        pickle["static_argnums"] = fn->static_argnums();
+        pickle["static_argnames"] = fn->static_argnames();
+        pickle["donate_argnums"] = fn->donate_argnums();
+        pickle["cache"] = fn->cache();
+        return pickle;
+      },
+      py::is_method(cfun_type));
+  cfun.attr("__setstate__") = py::cpp_function(
+      [](CompiledFunction::object& self, const py::dict& pickle) {
+        int version = py::cast<int>(pickle["version"]);
+        if (version != kCompiledFunctionPickleVersion) {
+          throw std::invalid_argument(absl::StrFormat(
+              "Invalid CompiledFunction pickle version, got %d, expected %d. "
+              "Pickling/Unpickling jitted functions using different JAX "
+              "versions is not supported.",
+              version, kCompiledFunctionPickleVersion));
+        }
+        py::function fun = py::cast<py::function>(pickle["fun"]);
+        py::function cache_miss = py::cast<py::function>(pickle["cache_miss"]);
+        py::function get_device = py::cast<py::function>(pickle["get_device"]);
+        bool has_explicit_device =
+            py::cast<bool>(pickle["has_explicit_device"]);
+        std::vector<int> static_argnums =
+            py::cast<std::vector<int>>(pickle["static_argnums"]);
+        std::vector<py::str> static_argnames =
+            py::cast<std::vector<py::str>>(pickle["static_argnames"]);
+        std::vector<int> donate_argnums =
+            py::cast<std::vector<int>>(pickle["donate_argnums"]);
+        std::shared_ptr<CompiledFunctionCache> cache =
+            py::cast<std::shared_ptr<CompiledFunctionCache>>(pickle["cache"]);
+        InitializeCompiledFunction(
+            reinterpret_cast<JaxCompiledFunctionObject*>(self.ptr()),
+            std::move(fun), std::move(cache_miss), std::move(get_device),
+            has_explicit_device, std::move(static_argnums),
+            std::move(static_argnames), std::move(donate_argnums),
+            std::move(cache));
+      },
+      py::is_method(cfun_type));
+
+  py::class_<JitState> jit_state_(jitlib, "JitState");
+  jit_state_.def_readwrite("disable_jit", &JitState::disable_jit);
+  jit_state_.def_readwrite("enable_x64", &JitState::enable_x64);
+  jit_state_.def_readwrite("jax_array", &JitState::jax_array);
+  jit_state_.def_readwrite("default_device", &JitState::default_device);
+  jit_state_.def_readwrite("extra_jit_context", &JitState::extra_jit_context);
+  jit_state_.def_readwrite("post_hook", &JitState::post_hook);
+
+  jitlib.def(
+      "global_state", [&]() { return &GlobalJitState(); },
+      py::return_value_policy::reference);
+  jitlib.def(
+      "thread_local_state", [&]() { return &ThreadLocalJitState(); },
+      py::return_value_policy::reference);
+
+  jitlib.def("jit_is_disabled", &GetDisableJit);
   jitlib.def("get_enable_x64", &GetEnableX64);
+  jitlib.def("set_thread_local_state_initialization_callback",
+             [](py::object f) { initialize_local_state = f; });
 
   jitlib.def(
       "jit",
       [](py::function fun, py::function cache_miss, py::function get_device,
-         std::vector<int> static_argnums) -> std::unique_ptr<CompiledFunction> {
-        return std::make_unique<CompiledFunction>(
+         std::vector<int> static_argnums, std::vector<py::str> static_argnames,
+         std::vector<int> donate_argnums, bool has_explicit_device,
+         std::shared_ptr<CompiledFunctionCache> cache) -> py::object {
+        return MakeCompiledFunction(
             std::move(fun), std::move(cache_miss), std::move(get_device),
-            std::move(static_argnums));
-      });
+            has_explicit_device, std::move(static_argnums),
+            std::move(static_argnames), std::move(donate_argnums),
+            std::move(cache));
+      },
+      py::arg("fun"), py::arg("cache_miss"), py::arg("get_device"),
+      py::arg("static_argnums"),
+      py::arg("static_argnames") = std::vector<py::str>(),
+      py::arg("donate_argnums") = std::vector<int>(),
+      py::arg("has_explicit_device") = false, py::arg("cache") = nullptr);
 
-  // This function is yet a full replacement for the Python one, because:
+  // This function is not yet a full replacement for the Python one, because:
   // (a) it does not support abstract types,
   // (b) it does not set the device stickiness yet.
   // TODO(jblespiau): Finish the replacement of the Python feature.
-  jitlib.def("device_put", [](py::handle obj, bool jax_enable_x64,
-                              xla::ClientAndPtr<xla::PjRtDevice> to_device) {
-    std::shared_ptr<xla::PyClient>& pyclient = to_device.client;
-    xla::StatusOr<DevicePutResult> results =
-        DevicePut(obj, to_device.contents, jax_enable_x64, *pyclient);
-    if (!results.ok()) {
-      throw std::runtime_error(results.status().error_message());
-    }
-    if (results->owned_buffer) {
-      auto buffer = std::make_unique<xla::PyBuffer>(
-          pyclient, std::move(results->owned_buffer), xla::Traceback::Get());
+  jitlib.def("device_put",
+             [](py::handle obj, bool jax_enable_x64,
+                xla::ClientAndPtr<xla::PjRtDevice> to_device)
+                 -> xla::StatusOr<py::object> {
+               std::shared_ptr<xla::PyClient>& pyclient = to_device.client;
+               xla::DevicePutOptions options;
+               options.squash_64bit_types = !jax_enable_x64;
+               options.allow_zero_copy = true;
+               xla::StatusOr<xla::DevicePutResult> results =
+                   DevicePut(obj, to_device.contents, options);
+               if (!results.ok()) {
+                 throw xla::XlaRuntimeError(results.status().error_message());
+               }
+               if (results->owned_buffer) {
+                 auto buffer = xla::PyBuffer::Make(
+                     pyclient, std::move(results->owned_buffer),
+                     xla::Traceback::Get());
 
-      static const auto* jax_core =
-          new py::module(py::module::import("jax.core"));
-      static const auto* shaped_array =
-          new py::handle(jax_core->attr("ShapedArray"));
-      buffer->SetAval((*shaped_array)(
-          buffer->python_shape(), buffer->python_dtype(), results->weak_type));
-      buffer->SetStickyDevice(py::none());
+                 static const auto* jax_core =
+                     new py::module(py::module::import("jax.core"));
+                 static const auto* shaped_array =
+                     new py::handle(jax_core->attr("ShapedArray"));
+                 buffer.buf()->SetAval((*shaped_array)(
+                     buffer.buf()->python_shape(), buffer.buf()->python_dtype(),
+                     results->weak_type));
+                 TF_RETURN_IF_ERROR(buffer.buf()->set_sticky_device(nullptr));
 
-      return py::cast(std::move(buffer));
-    } else {
-      return py::cast<py::object>(obj);
-    }
-  });
+                 return std::move(buffer);
+               } else {
+                 return py::cast<py::object>(obj);
+               }
+             });
 
-  py::class_<ArgSignature> arg_signature(jitlib, "ArgSignature");
+  py::class_<xla::PyArgSignature> arg_signature(jitlib, "PyArgSignature");
   arg_signature
       .def_property_readonly("dtype",
-                             [](const ArgSignature& sig) {
+                             [](const xla::PyArgSignature& sig) {
                                return PrimitiveTypeToDtype(sig.dtype);
                              })
-      .def_property_readonly("shape",
-                             [](const ArgSignature& sig) {
-                               return xla::IntSpanToTuple(sig.shape);
-                             })
-      .def_readonly("weak_type", &ArgSignature::weak_type);
-  jitlib.def("_ArgSignatureOfValue", &ArgSignatureOfValue);
+      .def_property_readonly(
+          "shape",
+          [](const xla::PyArgSignature& sig) {
+            return xla::SpanToTuple(absl::MakeConstSpan(sig.shape));
+          })
+      .def_readonly("weak_type", &xla::PyArgSignature::weak_type);
+  jitlib.def("_ArgSignatureOfValue", &xla::PyArgSignatureOfValue);
 
-  // All private members are only for testing purposes
-  cfun.def("_cache_size", &CompiledFunction::cache_size);
-  jitlib.def("_DtypeTo32BitDtype", [](const py::object obj) -> py::object {
-    py::dtype dtype = py::dtype::from_args(obj);
-    const py::dtype* res = DtypeTo32BitDtype(dtype);
-    if (res) {
-      return *res;
-    } else {
-      return py::none();
-    }
-  });
-  jitlib.def("_is_float0", &IsFloat0);
-  jitlib.def("_is_trivial", &IsTrivialLazyExpr);
+  // All private members are only for testing/debugging purposes
+  cfun.attr("_cache_size") = py::cpp_function(
+      [](py::handle self) -> xla::StatusOr<int> {
+        TF_ASSIGN_OR_RETURN(CompiledFunction * fun, AsCompiledFunction(self));
+        return fun->cache_size();
+      },
+      py::is_method(cfun));
+  cfun.attr("_clear_cache") = py::cpp_function(
+      [](py::handle self) -> xla::Status {
+        TF_ASSIGN_OR_RETURN(CompiledFunction * fun, AsCompiledFunction(self));
+        fun->ClearCache();
+        return ::tsl::OkStatus();
+      },
+      py::is_method(cfun));
+  jitlib.def("_is_float0", &xla::IsFloat0);
 }
 
 }  // namespace jax

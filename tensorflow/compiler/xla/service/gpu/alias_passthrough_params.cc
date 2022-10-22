@@ -21,15 +21,17 @@ limitations under the License.
 namespace xla {
 namespace gpu {
 
-StatusOr<bool> AliasPassthroughParams::Run(HloModule* module) {
+StatusOr<bool> AliasPassthroughParams::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   const HloInstruction* root = module->entry_computation()->root_instruction();
   if (module->entry_computation()->num_parameters() == 0 ||
       root->opcode() != HloOpcode::kTuple) {
     return false;
   }
   bool changed = false;
-  absl::flat_hash_set<int64> used_params;
-  for (int64 i = 0; i < root->operand_count(); ++i) {
+  absl::flat_hash_set<int64_t> used_params;
+  for (int64_t i = 0; i < root->operand_count(); ++i) {
     if (root->operand(i)->opcode() == HloOpcode::kParameter &&
         used_params.count(root->operand(i)->parameter_number()) == 0) {
       VLOG(2) << "Parameter " << root->operand(i)->parameter_number()
@@ -37,6 +39,15 @@ StatusOr<bool> AliasPassthroughParams::Run(HloModule* module) {
               << " in module " << module->name()
               << " is passed-through to root tuple element " << i << ": "
               << root->shape().ToString();
+
+      if (module->input_output_alias_config().OutputHasAlias({i}) ||
+          module->input_output_alias_config().ParameterHasAlias(
+              root->operand(i)->parameter_number(), /*param_index=*/{})) {
+        VLOG(2) << "Skip setting the above pass-through alias as an alias may"
+                << " have been set up for alising resource update.";
+        continue;
+      }
+
       TF_RETURN_IF_ERROR(module->input_output_alias_config().SetUpAlias(
           /*output_index=*/{i},
           /*param_number=*/root->operand(i)->parameter_number(),

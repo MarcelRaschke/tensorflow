@@ -13,7 +13,7 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
-#ifdef INTEL_MKL
+#if defined(INTEL_MKL) && defined(ENABLE_MKL)
 
 #include "tensorflow/core/common_runtime/device_mgr.h"
 #include "tensorflow/core/common_runtime/eager/eager_op_rewrite_registry.h"
@@ -35,7 +35,7 @@ class EagerOpRewriteTest : public ::testing::Test {
   // Creates a new op to be used as input to MKL eager rewrite.
   std::unique_ptr<tensorflow::EagerOperation> CreateOp(const string op_name) {
     std::unique_ptr<DeviceMgr> device_mgr =
-        absl::make_unique<StaticDeviceMgr>(DeviceFactory::NewDevice(
+        std::make_unique<StaticDeviceMgr>(DeviceFactory::NewDevice(
             "CPU", {}, "/job:localhost/replica:0/task:0/device:CPU:0"));
     bool async = false;
     tensorflow::Rendezvous* rendezvous =
@@ -48,17 +48,19 @@ class EagerOpRewriteTest : public ::testing::Test {
     EagerExecutor executor_(false);
     std::unique_ptr<tensorflow::EagerOperation> op(
         new tensorflow::EagerOperation(eager_ctx_));
-    EXPECT_EQ(Status::OK(),
+    EXPECT_EQ(OkStatus(),
               op.get()->Reset(op_name.c_str(), nullptr, false, &executor_));
+    EXPECT_EQ(OkStatus(), op.get()->SetDeviceName(
+                              "/job:localhost/replica:0/task:0/device:CPU:0"));
     return op;
   }
 
   // Validates the result of MKL eager rewrite.
   void CheckRewrite(EagerOperation* orig_op, string expected_op_name) {
     std::unique_ptr<tensorflow::EagerOperation> out_op;
-    EXPECT_EQ(Status::OK(),
+    EXPECT_EQ(OkStatus(),
               EagerOpRewriteRegistry::Global()->RunRewrite(
-                  EagerOpRewriteRegistry::PRE_EXECUTION, orig_op, &out_op));
+                  EagerOpRewriteRegistry::POST_PLACEMENT, orig_op, &out_op));
 
     // actual_op_name is same as original op name if rewrite didn't happen.
     string actual_op_name = orig_op->Name();
@@ -130,6 +132,7 @@ REGISTER_TEST_ALL_TYPES(ConvOpsExplicitPadding_Negative);
                                "AvgPool3D",                      \
                                "AvgPool3DGrad",                  \
                                "BatchMatMul",                    \
+                               "Einsum",                         \
                                "FusedBatchNorm",                 \
                                "FusedBatchNormV2",               \
                                "FusedBatchNormV3",               \
@@ -170,4 +173,4 @@ REGISTER_TEST_ALL_TYPES(FusedBatchNormV3_5D_Negative_2);
 
 }  // namespace tensorflow
 
-#endif  // INTEL_MKL
+#endif  // INTEL_MKL && ENABLE_MKL

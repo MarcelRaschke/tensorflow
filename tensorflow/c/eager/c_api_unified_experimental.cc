@@ -52,7 +52,7 @@ Status SetDefaultTracingEngine(const char* name) {
   auto entry = GetFactories().find(name);
   if (entry != GetFactories().end()) {
     default_factory = GetFactories().find(name)->second;
-    return Status::OK();
+    return OkStatus();
   }
   string msg = absl::StrCat(
       "No tracing engine factory has been registered with the key '", name,
@@ -149,7 +149,7 @@ TF_AbstractTensor* TF_AddFunctionParameter(TF_ExecutionContext* func,
   if (shape.num_dims != -1) {
     DCHECK(shape.dim_sizes != nullptr);
     Status status = tensorflow::PartialTensorShape::MakePartialShape(
-        reinterpret_cast<tensorflow::int64*>(shape.dim_sizes), shape.num_dims,
+        reinterpret_cast<int64_t*>(shape.dim_sizes), shape.num_dims,
         &partial_shape);
     if (!status.ok()) {
       Set_TF_Status_from_Status(s, status);
@@ -236,7 +236,7 @@ void TF_ExecuteOperation(TF_AbstractOp* op, int num_inputs,
 }
 
 void TF_DeleteAbstractFunction(TF_AbstractFunction* func) {
-  delete unwrap(func);
+  unwrap(func)->Unref();
 }
 
 void TF_ExecutionContextRegisterFunction(TF_ExecutionContext* ctx,

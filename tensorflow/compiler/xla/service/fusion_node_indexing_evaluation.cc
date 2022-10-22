@@ -20,12 +20,12 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/types.h"
-#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/tsl/platform/logging.h"
 
 namespace xla {
 
 FusionNodeIndexingEvaluation::FusionNodeIndexingEvaluation(
-    const HloInstruction* fusion, int64 root_usage_count)
+    const HloInstruction* fusion, int64_t root_usage_count)
     : fusion_(fusion) {
   HloInstruction* root = fusion->fused_expression_root();
   indexing_users_[root].insert(fusion);
@@ -36,7 +36,7 @@ FusionNodeIndexingEvaluation::FusionNodeIndexingEvaluation(
 // This constant is arbitrarily chosen. Essentially we don't want to have too
 // much code duplication, because it slows down the compilation time. There is
 // a tradeoff between compilation time and runtime here.
-const int64 FusionNodeIndexingEvaluation::kAllowedCodeDuplication = 15;
+const int64_t FusionNodeIndexingEvaluation::kAllowedCodeDuplication = 15;
 
 namespace {
 
@@ -63,13 +63,13 @@ bool OpInvalidatesCache(const HloInstruction* hlo) {
 // Counts the number of "real" users of 'hlo'. When 'hlo' has a fusion node as
 // user, we consider the users of the fusion parameter corresponding to 'hlo' as
 // the real users.
-int64 UserCount(const HloInstruction* hlo) {
-  int64 cnt = 0;
+int64_t UserCount(const HloInstruction* hlo) {
+  int64_t cnt = 0;
   for (HloInstruction* user : hlo->users()) {
     if (user->opcode() == HloOpcode::kFusion) {
       // Count the number of users of the parameter corresponding to the fusion
       // operand.
-      int64 operand_index = user->operand_index(hlo);
+      int64_t operand_index = user->operand_index(hlo);
       cnt += user->fused_parameter(operand_index)->user_count();
     } else {
       ++cnt;
@@ -81,7 +81,15 @@ int64 UserCount(const HloInstruction* hlo) {
 
 bool FusionNodeIndexingEvaluation::CodeDuplicationTooHigh(
     const HloInstruction* producer) const {
-  int64 emitted_instructions = EvaluateEmittedInstructions(producer);
+  // We always allow to fuse broadcasts even if it causes code duplication,
+  // because the alternative is worse: We would have to materialize the
+  // broadcast in memory. Still, if our evaluation indicates that code
+  // duplication would be too high, this would propagate to the operand of the
+  // broadcast, so we would then not allow to fuse the operand of the broadcast.
+  if (producer->opcode() == HloOpcode::kBroadcast) {
+    return false;
+  }
+  int64_t emitted_instructions = EvaluateEmittedInstructions(producer);
   return emitted_instructions > kAllowedCodeDuplication ||
          (OpInvalidatesCache(producer) &&
           (emitted_instructions > 1 || UserCount(producer) > 1));
@@ -98,9 +106,9 @@ bool FusionNodeIndexingEvaluation::MaxCodeDuplicationTooHigh() const {
   return false;
 }
 
-int64 FusionNodeIndexingEvaluation::EvaluateEmittedInstructions(
+int64_t FusionNodeIndexingEvaluation::EvaluateEmittedInstructions(
     const HloInstruction* producer) const {
-  int64 total = 0;
+  int64_t total = 0;
   for (const auto* user : indexing_users_.at(producer)) {
     total += index_usage_count_.at(user);
   }
@@ -141,7 +149,7 @@ void FusionNodeIndexingEvaluation::RecomputeCache() {
 
 void FusionNodeIndexingEvaluation::UpdateIndexUsageCount(
     const HloInstruction* instruction) {
-  int64 total = 0;
+  int64_t total = 0;
   for (const auto* user : indexing_users_[instruction]) {
     total += index_usage_count_.at(user);
   }

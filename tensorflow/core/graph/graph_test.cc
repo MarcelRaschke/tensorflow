@@ -354,21 +354,21 @@ TEST_F(GraphTest, AddAttr) {
   n1->AddAttr("_a", "new_attr");
 
   string attr;
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->attrs(), "_a", &attr));
+  EXPECT_EQ(OkStatus(), GetNodeAttr(n1->attrs(), "_a", &attr));
   EXPECT_EQ("new_attr", attr);
 
   Node* n2 = graph_.CopyNode(n1);
 
   n1->AddAttr("_b", "new_attr_2");
 
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->attrs(), "_a", &attr));
+  EXPECT_EQ(OkStatus(), GetNodeAttr(n1->attrs(), "_a", &attr));
   EXPECT_EQ("new_attr", attr);
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n1->attrs(), "_b", &attr));
+  EXPECT_EQ(OkStatus(), GetNodeAttr(n1->attrs(), "_b", &attr));
   EXPECT_EQ("new_attr_2", attr);
 
-  EXPECT_EQ(Status::OK(), GetNodeAttr(n2->attrs(), "_a", &attr));
+  EXPECT_EQ(OkStatus(), GetNodeAttr(n2->attrs(), "_a", &attr));
   EXPECT_EQ("new_attr", attr);
-  EXPECT_NE(Status::OK(), GetNodeAttr(n2->attrs(), "_b", &attr));
+  EXPECT_NE(OkStatus(), GetNodeAttr(n2->attrs(), "_b", &attr));
 }
 
 // Convert edge iteration results into a sorted string.
@@ -661,6 +661,19 @@ TEST_F(GraphTest, BuildNodeNameIndex) {
   }
 }
 
+TEST_F(GraphTest, Clear) {
+  const int num_nodes = 10;
+  const int num_edges_per_node = 2;
+  const GraphDef graph_def =
+      test::CreateGraphDef(num_nodes, num_edges_per_node);
+  const auto registry = OpRegistry::Global();
+  GraphConstructorOptions opts;
+  Graph graph(registry);
+  TF_CHECK_OK(ConvertGraphDefToGraph(opts, graph_def, &graph));
+  graph.Clear();
+  EXPECT_EQ(graph.num_nodes(), 2);
+}
+
 void BM_InEdgeIteration(::testing::benchmark::State& state) {
   const int num_nodes = state.range(0);
   const int num_edges_per_node = state.range(1);
@@ -670,7 +683,7 @@ void BM_InEdgeIteration(::testing::benchmark::State& state) {
   GraphConstructorOptions opts;
   TF_CHECK_OK(ConvertGraphDefToGraph(opts, graph_def, &graph));
 
-  int64 sum = 0;
+  int64_t sum = 0;
   for (auto s : state) {
     for (const Node* node : graph.nodes()) {
       for (auto e : node->in_edges()) {
@@ -711,7 +724,7 @@ void BM_GraphCreation(::testing::benchmark::State& state) {
   // Warmup step.
   Graph graph(registry);
   TF_CHECK_OK(ConvertGraphDefToGraph(opts, graph_def, &graph));
-  int64 sum = 0;
+  int64_t sum = 0;
   for (auto s : state) {
     Graph graph(registry);
     TF_CHECK_OK(ConvertGraphDefToGraph(opts, graph_def, &graph));
@@ -750,7 +763,7 @@ void BM_ToGraphDef(::testing::benchmark::State& state) {
   // Warmup step.
   Graph graph(registry);
   TF_CHECK_OK(ConvertGraphDefToGraph(opts, graph_def, &graph));
-  int64 sum = 0;
+  int64_t sum = 0;
   for (auto s : state) {
     GraphDef graph_def;
     graph.ToGraphDef(&graph_def);

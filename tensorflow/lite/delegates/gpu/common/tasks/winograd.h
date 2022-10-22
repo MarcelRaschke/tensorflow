@@ -16,11 +16,12 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_DELEGATES_GPU_COMMON_TASKS_WINOGRAD_H_
 #define TENSORFLOW_LITE_DELEGATES_GPU_COMMON_TASKS_WINOGRAD_H_
 
+#include <string>
+
 #include "tensorflow/lite/delegates/gpu/common/data_type.h"
 #include "tensorflow/lite/delegates/gpu/common/operations.h"
 #include "tensorflow/lite/delegates/gpu/common/task/gpu_operation.h"
 #include "tensorflow/lite/delegates/gpu/common/task/tensor_desc.h"
-#include "tensorflow/lite/delegates/gpu/common/task/tensor_linear_desc.h"
 
 namespace tflite {
 namespace gpu {
@@ -50,13 +51,15 @@ class Winograd4x4To36 : public GPUOperation {
   Winograd4x4To36(const OperationDef& definition, const Padding2D& padding)
       : GPUOperation(definition), padding_(padding) {}
   friend Winograd4x4To36 CreateWinograd4x4To36(const OperationDef& definition,
-                                               const Padding2D& padding);
+                                               const Padding2D& padding,
+                                               const GpuInfo& gpu_info);
 
   Padding2D padding_;
 };
 
 Winograd4x4To36 CreateWinograd4x4To36(const OperationDef& definition,
-                                      const Padding2D& padding);
+                                      const Padding2D& padding,
+                                      const GpuInfo& gpu_info);
 
 class Winograd4x4To36TileX6 : public GPUOperation {
  public:
@@ -83,7 +86,8 @@ class Winograd4x4To36TileX6 : public GPUOperation {
 
   void UploadBt();
 
-  std::string GetWinograd4x4To36TileX6Code(const OperationDef& op_def);
+  std::string GetWinograd4x4To36TileX6Code(const OperationDef& op_def,
+                                           const GpuInfo& gpu_info);
 
   // Must be called after kernel compilation
   int3 SelectBestWorkGroup(const KernelInfo& kernel_info) const;
@@ -150,7 +154,8 @@ class Winograd36To4x4Tile4x1 : public GPUOperation {
 
   void UploadAt();
 
-  std::string GetWinograd36To4x4Tile4x1Code(const OperationDef& op_def);
+  std::string GetWinograd36To4x4Tile4x1Code(const OperationDef& op_def,
+                                            const GpuInfo& gpu_info);
 
   // Must be called after kernel compilation
   int3 SelectBestWorkGroup(const KernelInfo& kernel_info) const;

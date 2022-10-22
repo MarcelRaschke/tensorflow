@@ -21,15 +21,19 @@ limitations under the License.
 
 #include "tensorflow/core/distributed_runtime/worker_cache.h"
 #include "tensorflow/core/protobuf/cluster.pb.h"
+#include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/protobuf/tensorflow_server.pb.h"
 #include "tensorflow/core/public/session_options.h"
 
+namespace tsl {
+class Env;
+}  // namespace tsl
 namespace tensorflow {
+using Env = tsl::Env;
 
 class CollectiveExecutorMgrInterface;
 class Device;
 class DeviceSet;
-class Env;
 class MasterSession;
 class OpRegistryInterface;
 
@@ -39,6 +43,7 @@ struct WorkerCacheFactoryOptions {
   const string* job_name = nullptr;
   int task_index;
   const string* protocol = nullptr;
+  const RPCOptions* rpc_options = nullptr;
 
   WorkerCacheFactoryOptions() {}
 
@@ -51,6 +56,7 @@ struct WorkerCacheFactoryOptions {
       job_name = &server_def.job_name();
       task_index = server_def.task_index();
       protocol = &server_def.protocol();
+      rpc_options = &server_def.default_session_config().rpc_options();
     }
   }
 };
@@ -73,6 +79,12 @@ struct MasterEnv {
   //
   // REQUIRES: !local_devices.empty().
   std::vector<Device*> local_devices;
+
+  // In large scaled distributed training, many singleton components (e.g.
+  // Rendezvous) can becomes the bottleneck of the system. This field allows
+  // us to shard the single components. This number will scale up with number
+  // of tasks in this cluster. It is always greater than 1.
+  int experimental_num_shards = 1;
 
   // Factory for creating master sessions, given session options and a
   // vector of devices.

@@ -16,11 +16,12 @@ limitations under the License.
 #include "tensorflow/compiler/xla/executable_run_options.h"
 
 #include <atomic>
+#include <string>
 
 namespace xla {
 
 RunId::RunId() {
-  static std::atomic<int64> counter{0};
+  static std::atomic<int64_t> counter{0};
   data_ = counter.fetch_add(1);
 }
 
@@ -30,7 +31,7 @@ std::string RunId::ToString() const {
   return "RunId: " + std::to_string(data_);
 }
 
-int64 RunId::ToInt() const { return data_; }
+int64_t RunId::ToInt() const { return data_; }
 
 ExecutableRunOptions& ExecutableRunOptions::set_device_ordinal(
     int device_ordinal) {

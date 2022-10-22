@@ -23,10 +23,10 @@ limitations under the License.
 #include "tensorflow/core/distributed_runtime/recent_request_ids.h"
 #include "tensorflow/core/distributed_runtime/session_mgr.h"
 #include "tensorflow/core/distributed_runtime/worker_interface.h"
+#include "tensorflow/core/framework/cancellation.h"
 
 namespace tensorflow {
 
-class CancellationManager;
 class Device;
 struct WorkerEnv;
 class WorkerSession;
@@ -115,7 +115,7 @@ class Worker : public WorkerInterface {
   Status PrepareRecvTensor(const Rendezvous::ParsedKey& parsed,
                            Device** src_dev);
 
-  void AbortStep(int64);
+  void AbortStep(int64_t);
 
  private:
   PartialRunMgr partial_run_mgr_;

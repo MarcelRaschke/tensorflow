@@ -36,7 +36,7 @@ visibility = [
 
 package(
     default_visibility = visibility,
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 py_strict_library(
@@ -64,7 +64,6 @@ cc_library(
 tf_python_pybind_extension(
     name = "_pywrap_tfprof",
     srcs = ["tfprof_wrapper.cc"],
-    module_name = "_pywrap_tfprof",
     deps = [
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:lib_headers_for_pybind",
@@ -80,7 +79,6 @@ tf_python_pybind_extension(
     name = "_pywrap_utils",
     srcs = ["util_wrapper.cc"],
     hdrs = ["util.h"],
-    module_name = "_pywrap_utils",
     deps = [
         "//tensorflow/core/platform:platform_port",
         "//tensorflow/python:pybind11_lib",
@@ -93,7 +91,6 @@ tf_python_pybind_extension(
     name = "_pywrap_nest",
     srcs = ["nest_wrapper.cc"],
     hdrs = ["nest.h"],
-    module_name = "_pywrap_nest",
     deps = [
         "//tensorflow/python:pybind11_lib",
         "//third_party/python_runtime:headers",
@@ -121,7 +118,6 @@ tf_python_pybind_extension(
     name = "_pywrap_kernel_registry",
     srcs = ["kernel_registry_wrapper.cc"],
     hdrs = ["kernel_registry.h"],
-    module_name = "_pywrap_kernel_registry",
     deps = [
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:lib_headers_for_pybind",
@@ -135,7 +131,6 @@ tf_python_pybind_extension(
 tf_python_pybind_extension(
     name = "_pywrap_stat_summarizer",
     srcs = ["stat_summarizer_wrapper.cc"],
-    module_name = "_pywrap_stat_summarizer",
     deps = [
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:protos_all_cc",
@@ -151,7 +146,16 @@ tf_python_pybind_extension(
     srcs = ["tensor_float_32.cc"],
     hdrs = ["//tensorflow/core/platform:tensor_float_32_hdr"],
     compatible_with = get_compatible_with_portable(),
-    module_name = "_pywrap_tensor_float_32_execution",
+    deps = [
+        "@pybind11",
+    ],
+)
+
+tf_python_pybind_extension(
+    name = "_pywrap_determinism",
+    srcs = ["determinism.cc"],
+    hdrs = ["//tensorflow/core/util:determinism_hdr"],
+    compatible_with = get_compatible_with_portable(),
     deps = [
         "@pybind11",
     ],
@@ -161,7 +165,6 @@ tf_python_pybind_extension(
     name = "_pywrap_util_port",
     srcs = ["port_wrapper.cc"],
     hdrs = ["//tensorflow/core/util:port_hdrs"],
-    module_name = "_pywrap_util_port",
     deps = [
         "//tensorflow/core/util:port",
         "//third_party/python_runtime:headers",
@@ -173,7 +176,6 @@ tf_python_pybind_extension(
     name = "_pywrap_transform_graph",
     srcs = ["transform_graph_wrapper.cc"],
     hdrs = ["//tensorflow/tools/graph_transforms:transform_graph_hdrs"],
-    module_name = "_pywrap_transform_graph",
     deps = [
         "//tensorflow/core:framework_headers_lib",
         "//tensorflow/core:lib_headers_for_pybind",
@@ -195,7 +197,6 @@ tf_python_pybind_extension(
         "//tensorflow/python/lib/core:py_exception_registry_hdr",
         "//tensorflow/python/lib/core:safe_ptr_hdr",
     ],
-    module_name = "_pywrap_checkpoint_reader",
     deps = [
         "//tensorflow/core:lib_headers_for_pybind",
         "//tensorflow/core:op_gen_lib",
@@ -238,7 +239,11 @@ tf_py_test(
 
 tf_py_test(
     name = "deprecation_test",
-    srcs = ["deprecation_test.py"],
+    srcs = [
+        "deprecated_module.py",
+        "deprecated_module_new.py",
+        "deprecation_test.py",
+    ],
     python_version = "PY3",
     deps = [
         ":util",
@@ -335,8 +340,6 @@ tf_python_pybind_extension(
         # Using header directly is required to avoid ODR violations.
         "stack_trace.h",
     ],
-    # TODO(b/138203821): change to "util._tf_stack" once the bug is fixed.
-    module_name = "_tf_stack",
     deps = [
         "@com_google_absl//absl/algorithm:container",
         "@com_google_absl//absl/strings",
@@ -397,6 +400,11 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "function_parameter_canonicalizer_hdrs",
+    textual_hdrs = ["function_parameter_canonicalizer.h"],
+)
+
 tf_python_pybind_extension(
     name = "_function_parameter_canonicalizer_binding_for_test",
     testonly = True,
@@ -404,7 +412,6 @@ tf_python_pybind_extension(
     hdrs = [
         "function_parameter_canonicalizer.h",
     ],
-    module_name = "_function_parameter_canonicalizer_binding_for_test",
     deps = [
         "//tensorflow/core:lib",
         "//tensorflow/python/lib/core:safe_pyobject_ptr_required_hdrs",
@@ -431,7 +438,7 @@ tf_py_test(
 py_library(
     name = "util",
     srcs = glob(
-        ["**/*.py"],
+        ["*.py"],
         exclude = [
             "example_parser*",
             "tf_contextlib.py",
@@ -439,7 +446,7 @@ py_library(
             "tf_export.py",
             "tf_stack.py",
             "tf_decorator.py",
-            "**/*_test.py",
+            "*_test.py",
         ],
     ),
     compatible_with = get_compatible_with_portable(),
@@ -452,19 +459,32 @@ py_library(
     ],
     deps = [
         ":_pywrap_tensor_float_32_execution",
+        ":_pywrap_determinism",
         # global_test_configuration is added here because all major tests depend on this
         # library. It isn't possible to add these test dependencies via tensorflow.bzl's
         # py_test because not all tensorflow tests use tensorflow.bzl's py_test.
         "//tensorflow/python:global_test_configuration",
         ":tf_decorator",
         ":tf_export",
-        "@org_python_pypi_backports_weakref",
         "@com_google_protobuf//:protobuf_python",
         "//third_party/py/numpy",
         "@six_archive//:six",
         "@wrapt",
+        "//tensorflow/python/util/protobuf",
         "//tensorflow/tools/docs:doc_controls",
         "//tensorflow/tools/compatibility:all_renames_v2",
+    ],
+)
+
+tf_py_test(
+    name = "traceback_utils_test",
+    size = "small",
+    srcs = ["traceback_utils_test.py"],
+    python_version = "PY3",
+    deps = [
+        "//tensorflow/python:array_ops",
+        "//tensorflow/python:variables",
+        "//tensorflow/python/eager:def_function",
     ],
 )
 
@@ -497,6 +517,7 @@ py_library(
         "//tensorflow/python:framework",
         "//tensorflow/python:framework_for_generated_wrappers",
         "//tensorflow/python:math_ops",
+        "//tensorflow/python/ops/ragged:ragged_tensor",
         "//third_party/py/numpy",
         "@absl_py//absl/testing:parameterized",
     ],
@@ -608,7 +629,6 @@ tf_py_test(
 tf_python_pybind_extension(
     name = "fast_module_type",
     srcs = ["fast_module_type.cc"],
-    module_name = "fast_module_type",
     deps = [
         "//tensorflow/core/platform:logging",
         "//third_party/python_runtime:headers",
@@ -641,28 +661,6 @@ tf_py_test(
     ],
 )
 
-tf_proto_library(
-    name = "compare_test_proto",
-    testonly = 1,
-    srcs = ["protobuf/compare_test.proto"],
-    cc_api_version = 2,
-)
-
-tf_py_test(
-    name = "protobuf_compare_test",
-    size = "small",
-    srcs = ["protobuf/compare_test.py"],
-    main = "protobuf/compare_test.py",
-    python_version = "PY3",
-    tags = ["no_pip"],  # compare_test_pb2 proto is not available in pip.
-    deps = [
-        ":compare_test_proto_py",
-        ":util",
-        "//tensorflow/python:platform_test",
-        "@six_archive//:six",
-    ],
-)
-
 tf_py_test(
     name = "example_parser_configuration_test",
     size = "small",
@@ -679,22 +677,42 @@ tf_py_test(
     ],
 )
 
+tf_py_test(
+    name = "type_annotations_test",
+    size = "small",
+    srcs = ["type_annotations_test.py"],
+    python_version = "PY3",
+    deps = [
+    ],
+)
+
 filegroup(
     name = "util_hdr",
     srcs = ["util.h"],
 )
 
-filegroup(
-    name = "compare_test_proto_src",
-    srcs = ["protobuf/compare_test.proto"],
+tf_py_test(
+    name = "compat_test",
+    srcs = ["compat_test.py"],
+    python_version = "PY3",
+    deps = [
+        ":util",
+        "//tensorflow/python:client_testlib",
+        "//tensorflow/python:platform",
+    ],
 )
 
-# copybara:uncomment_begin(google-only)
-# py_proto_library(
-#     name = "compare_test_py_pb2",
-#     testonly = 1,
-#     has_services = 0,
-#     api_version = 2,
-#     deps = [":compare_test_proto"],
-# )
-# copybara:uncomment_end
+tf_py_test(
+    name = "variable_utils_test",
+    srcs = ["variable_utils_test.py"],
+    deps = [
+        ":util",
+        "//tensorflow/python:resource_variable_ops",
+        "//tensorflow/python:variables",
+        "//tensorflow/python/eager:context",
+        "//tensorflow/python/framework:constant_op",
+        "//tensorflow/python/framework:ops",
+        "//tensorflow/python/framework:test_lib",
+        "//tensorflow/python/platform:test",
+    ],
+)

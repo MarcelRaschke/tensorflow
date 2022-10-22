@@ -15,7 +15,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/memory_space_assignment_best_fit_repacker.h"
 
-#include "tensorflow/core/platform/test.h"
+#include "tensorflow/tsl/platform/test.h"
 
 namespace xla {
 
@@ -25,15 +25,17 @@ class MemorySpaceAssignmentBestFitRepackerTest : public ::testing::Test {
 
   MemorySpaceAssignmentBestFitRepackerTest() : repacker_(100, 1) {}
 
-  AllocationBlock* MakeAllocationBlock(int64 start_time, int64 end_time,
-                                       int64 size, int64 initial_offset = -1) {
-    allocation_blocks_.push_back({start_time,
-                                  end_time,
-                                  size,
-                                  -1,
-                                  initial_offset,
-                                  static_cast<int64>(allocation_blocks_.size()),
-                                  {}});
+  AllocationBlock* MakeAllocationBlock(int64_t start_time, int64_t end_time,
+                                       int64_t size,
+                                       int64_t initial_offset = -1) {
+    allocation_blocks_.push_back(
+        {start_time,
+         end_time,
+         size,
+         -1,
+         initial_offset,
+         static_cast<int64_t>(allocation_blocks_.size()),
+         {}});
     AllocationBlock* block = &allocation_blocks_.back();
     block->colocations.push_back(block);
     return block;
@@ -84,6 +86,23 @@ TEST_F(MemorySpaceAssignmentBestFitRepackerTest, TooLarge) {
   EXPECT_EQ(allocation_blocks[2]->offset, -1);
   EXPECT_EQ(allocation_blocks[3]->offset, -1);
   EXPECT_EQ(allocation_blocks[4]->offset, -1);
+}
+
+TEST_F(MemorySpaceAssignmentBestFitRepackerTest, ColocationDifferentSizes) {
+  std::vector<AllocationBlock*> allocation_blocks;
+  allocation_blocks.push_back(MakeAllocationBlock(0, 2, 5));
+  allocation_blocks.push_back(MakeAllocationBlock(10, 20, 10));
+  // Allocation blocks 0 and 1 are colocated.
+  allocation_blocks[0]->colocations.push_back(allocation_blocks[1]);
+  allocation_blocks[1]->colocations.push_back(allocation_blocks[0]);
+  allocation_blocks.push_back(MakeAllocationBlock(9, 11, 2));
+  allocation_blocks.push_back(MakeAllocationBlock(1, 2, 2));
+  EXPECT_TRUE(*repacker_.Repack(absl::MakeSpan(allocation_blocks)));
+
+  EXPECT_EQ(allocation_blocks[0]->offset, 0);
+  EXPECT_EQ(allocation_blocks[1]->offset, 0);
+  EXPECT_EQ(allocation_blocks[2]->offset, 10);
+  EXPECT_EQ(allocation_blocks[3]->offset, 5);
 }
 
 }  // namespace xla

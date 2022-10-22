@@ -19,12 +19,14 @@ limitations under the License.
 
 #include "tensorflow/compiler/tf2xla/kernels/random_ops_util.h"
 #include "tensorflow/compiler/tf2xla/lib/random.h"
+#include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/shape_util.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/xla_op_registry.h"
 #include "tensorflow/compiler/xla/client/lib/constants.h"
+#include "tensorflow/compiler/xla/client/lib/dynamic_shaped_ops.h"
 #include "tensorflow/compiler/xla/client/lib/math.h"
 #include "tensorflow/compiler/xla/client/lib/prng.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
@@ -39,32 +41,9 @@ namespace tensorflow {
 
 namespace {
 
-inline xla::RandomAlgorithm AlgorithmToRandomAlgorithm(Algorithm const& alg) {
-  if (alg == RNG_ALG_PHILOX) {
-    return xla::RandomAlgorithm::RNG_PHILOX;
-  } else if (alg == RNG_ALG_THREEFRY) {
-    return xla::RandomAlgorithm::RNG_THREE_FRY;
-  } else if (alg == RNG_ALG_XLA_DEFAULT) {
-    return xla::RandomAlgorithm::RNG_DEFAULT;
-  }
-  return xla::RandomAlgorithm::RNG_THREE_FRY;
-}
-
-inline Algorithm RandomAlgorithmToAlgorithm(xla::RandomAlgorithm const& alg) {
-  if (alg == xla::RandomAlgorithm::RNG_PHILOX) {
-    return RNG_ALG_PHILOX;
-  } else if (alg == xla::RandomAlgorithm::RNG_THREE_FRY) {
-    return RNG_ALG_THREEFRY;
-  } else if (alg == xla::RandomAlgorithm::RNG_DEFAULT) {
-    return RNG_ALG_XLA_DEFAULT;
-  }
-  return RNG_ALG_THREEFRY;
-}
-
 xla::XlaOp GetCounter(xla::RandomAlgorithm const& alg, xla::XlaOp state) {
-  Algorithm alg_ = RandomAlgorithmToAlgorithm(alg);
   return xla::Slice(state, {RNG_KEY_SIZE},
-                    {RNG_KEY_SIZE + GetCounterSize(alg_)}, {1});
+                    {RNG_KEY_SIZE + xla::GetCounterSize(alg)}, {1});
 }
 
 xla::RngOutput BitGenerator(xla::RandomAlgorithm const& alg, xla::XlaOp key,
@@ -95,14 +74,15 @@ std::tuple<xla::XlaOp, xla::XlaOp> GetKeyCounter(
   }
 }
 
-Algorithm GetAlg(absl::string_view device_type_string) {
+xla::RandomAlgorithm DefaultRngAlgForDeviceType(
+    absl::string_view device_type_string) {
   // The Philox algorithm may cause performance regression on other devices.
   // Turn on the Philox algorithm for the CPU and GPU backends only.
   if (device_type_string == DEVICE_GPU_XLA_JIT ||
       device_type_string == DEVICE_CPU_XLA_JIT) {
-    return RNG_ALG_PHILOX;
+    return xla::RandomAlgorithm::RNG_PHILOX;
   } else {
-    return RNG_ALG_XLA_DEFAULT;
+    return xla::RandomAlgorithm::RNG_DEFAULT;
   }
 }
 
@@ -167,25 +147,32 @@ xla::RngOutput StatelessRngUniformFullInt(xla::RandomAlgorithm const& alg,
   }
 }
 
-Status GetAlgorithm(XlaOpKernelContext* ctx, int alg_input_idx,
-                    xla::RandomAlgorithm* alg) {
-  auto alg_shape = ctx->InputShape(alg_input_idx);
-  if (alg_shape.dims() != 0) {
-    return errors::InvalidArgument("algorithm must be of shape [], not ",
-                                   alg_shape.DebugString());
+StatusOr<xla::RandomAlgorithm> ResolveAlg(
+    int alg_id, absl::string_view device_type_string) {
+  switch (alg_id) {
+    case RNG_ALG_PHILOX:
+      return xla::RandomAlgorithm::RNG_PHILOX;
+    case RNG_ALG_THREEFRY:
+      return xla::RandomAlgorithm::RNG_THREE_FRY;
+    case RNG_ALG_AUTO_SELECT:
+      return DefaultRngAlgForDeviceType(device_type_string);
+    default:
+      return errors::InvalidArgument("Unsupported algorithm id: ", alg_id);
   }
-  xla::Literal alg_literal;
-  TF_RETURN_IF_ERROR(ctx->ConstantInput(alg_input_idx, &alg_literal));
-  auto alg_ = Algorithm(alg_literal.Get<int>({}));
-  *alg = AlgorithmToRandomAlgorithm(alg_);
-  return Status::OK();
+}
+
+StatusOr<xla::RandomAlgorithm> AlgorithmFromInput(
+    XlaOpKernelContext* ctx, int alg_input_idx,
+    absl::string_view device_type_string) {
+  TF_ASSIGN_OR_RETURN(auto alg_id, GetAlgId(ctx, alg_input_idx));
+  return ResolveAlg(alg_id, device_type_string);
 }
 
 xla::XlaOp MaybeSliceCounter(xla::RandomAlgorithm const& alg,
                              TensorShape const& counter_shape,
                              xla::XlaOp counter) {
   auto input_counter_size = counter_shape.dim_size(0);
-  auto real_counter_size = GetCounterSize(RandomAlgorithmToAlgorithm(alg));
+  auto real_counter_size = xla::GetCounterSize(alg);
   if (input_counter_size > real_counter_size) {
     counter = xla::Slice(counter, {0}, {real_counter_size}, {1});
   }
@@ -195,7 +182,8 @@ xla::XlaOp MaybeSliceCounter(xla::RandomAlgorithm const& alg,
 class StatelessRandomUniformOp : public XlaOpKernel {
  public:
   explicit StatelessRandomUniformOp(OpKernelConstruction* ctx)
-      : XlaOpKernel(ctx) {
+      : XlaOpKernel(ctx),
+        device_type_string_(ctx->device_type().type_string()) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("dtype", &dtype_));
   }
 
@@ -203,7 +191,8 @@ class StatelessRandomUniformOp : public XlaOpKernel {
     xla::XlaBuilder* builder = ctx->builder();
 
     TensorShape shape;
-    OP_REQUIRES_OK(ctx, ctx->ConstantInputAsShape(0, &shape));
+    OP_REQUIRES_OK(ctx, ctx->ConstantInputAsShape(
+                            0, &shape, xla::ValueInferenceMode::kUpperBound));
 
     const int key_input_idx = 1;
     const int counter_input_idx = 2;
@@ -211,11 +200,12 @@ class StatelessRandomUniformOp : public XlaOpKernel {
     xla::XlaOp key = ctx->Input(key_input_idx);
     xla::XlaOp counter = ctx->Input(counter_input_idx);
 
-    xla::RandomAlgorithm alg;
-    OP_REQUIRES_OK(ctx, GetAlgorithm(ctx, alg_input_idx, &alg));
+    OP_REQUIRES_VALUE(
+        auto alg, ctx,
+        AlgorithmFromInput(ctx, alg_input_idx, device_type_string_));
 
     auto counter_shape = ctx->InputShape(counter_input_idx);
-    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(RandomAlgorithmToAlgorithm(alg),
+    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(GetCounterSize(alg),
                                              ctx->InputShape(key_input_idx),
                                              counter_shape));
 
@@ -231,11 +221,25 @@ class StatelessRandomUniformOp : public XlaOpKernel {
         xla::ConstantR0WithType(builder, rng_primitive_type, 0.0),
         xla::ConstantR0WithType(builder, rng_primitive_type, 1.0));
     auto uniform = MaybeConvertF32ToBF16(result.value, dtype_);
-    ctx->SetOutput(0, uniform);
+
+    // If the input shape is constant, no need to set dimension sizes.
+    // TODO(hinsu): Simplify this once MLIR bridge can handle bounded types.
+    TensorShape static_shape;
+    Status status = ctx->ConstantInputAsShape(0, &static_shape);
+    if (status.ok()) {
+      ctx->SetOutput(0, uniform);
+      return;
+    }
+
+    auto result_or = xla::SetAllDimensionSizes(&ctx->value_inference(), uniform,
+                                               ctx->Input(0));
+    OP_REQUIRES_OK(ctx, result_or.status());
+    ctx->SetOutput(0, result_or.value());
   }
 
  private:
   DataType dtype_;
+  string device_type_string_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(StatelessRandomUniformOp);
 };
@@ -250,7 +254,8 @@ REGISTER_XLA_OP(Name("StatelessRandomUniformV2")
 class StatelessRandomUniformIntOp : public XlaOpKernel {
  public:
   explicit StatelessRandomUniformIntOp(OpKernelConstruction* ctx)
-      : XlaOpKernel(ctx) {
+      : XlaOpKernel(ctx),
+        device_type_string_(ctx->device_type().type_string()) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("dtype", &dtype_));
   }
 
@@ -264,11 +269,12 @@ class StatelessRandomUniformIntOp : public XlaOpKernel {
     xla::XlaOp key = ctx->Input(key_input_idx);
     xla::XlaOp counter = ctx->Input(counter_input_idx);
 
-    xla::RandomAlgorithm alg;
-    OP_REQUIRES_OK(ctx, GetAlgorithm(ctx, alg_input_idx, &alg));
+    OP_REQUIRES_VALUE(
+        auto alg, ctx,
+        AlgorithmFromInput(ctx, alg_input_idx, device_type_string_));
 
     auto counter_shape = ctx->InputShape(counter_input_idx);
-    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(RandomAlgorithmToAlgorithm(alg),
+    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(xla::GetCounterSize(alg),
                                              ctx->InputShape(key_input_idx),
                                              counter_shape));
 
@@ -297,6 +303,7 @@ class StatelessRandomUniformIntOp : public XlaOpKernel {
 
  private:
   DataType dtype_;
+  string device_type_string_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(StatelessRandomUniformIntOp);
 };
@@ -311,7 +318,8 @@ REGISTER_XLA_OP(Name("StatelessRandomUniformIntV2")
 class StatelessRandomUniformFullIntOp : public XlaOpKernel {
  public:
   explicit StatelessRandomUniformFullIntOp(OpKernelConstruction* ctx)
-      : XlaOpKernel(ctx) {
+      : XlaOpKernel(ctx),
+        device_type_string_(ctx->device_type().type_string()) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("dtype", &dtype_));
   }
 
@@ -325,11 +333,12 @@ class StatelessRandomUniformFullIntOp : public XlaOpKernel {
     xla::XlaOp key = ctx->Input(key_input_idx);
     xla::XlaOp counter = ctx->Input(counter_input_idx);
 
-    xla::RandomAlgorithm alg;
-    OP_REQUIRES_OK(ctx, GetAlgorithm(ctx, alg_input_idx, &alg));
+    OP_REQUIRES_VALUE(
+        auto alg, ctx,
+        AlgorithmFromInput(ctx, alg_input_idx, device_type_string_));
 
     auto counter_shape = ctx->InputShape(counter_input_idx);
-    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(RandomAlgorithmToAlgorithm(alg),
+    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(xla::GetCounterSize(alg),
                                              ctx->InputShape(key_input_idx),
                                              counter_shape));
 
@@ -343,6 +352,7 @@ class StatelessRandomUniformFullIntOp : public XlaOpKernel {
 
  private:
   DataType dtype_;
+  string device_type_string_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(StatelessRandomUniformFullIntOp);
 };
@@ -357,13 +367,15 @@ REGISTER_XLA_OP(Name("StatelessRandomUniformFullIntV2")
 class StatelessRandomNormalOp : public XlaOpKernel {
  public:
   explicit StatelessRandomNormalOp(OpKernelConstruction* ctx)
-      : XlaOpKernel(ctx) {
+      : XlaOpKernel(ctx),
+        device_type_string_(ctx->device_type().type_string()) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("dtype", &dtype_));
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
     TensorShape shape;
-    OP_REQUIRES_OK(ctx, ctx->ConstantInputAsShape(0, &shape));
+    OP_REQUIRES_OK(ctx, ctx->ConstantInputAsShape(
+                            0, &shape, xla::ValueInferenceMode::kUpperBound));
 
     const int key_input_idx = 1;
     const int counter_input_idx = 2;
@@ -371,11 +383,12 @@ class StatelessRandomNormalOp : public XlaOpKernel {
     xla::XlaOp key = ctx->Input(key_input_idx);
     xla::XlaOp counter = ctx->Input(counter_input_idx);
 
-    xla::RandomAlgorithm alg;
-    OP_REQUIRES_OK(ctx, GetAlgorithm(ctx, alg_input_idx, &alg));
+    OP_REQUIRES_VALUE(
+        auto alg, ctx,
+        AlgorithmFromInput(ctx, alg_input_idx, device_type_string_));
 
     auto counter_shape = ctx->InputShape(counter_input_idx);
-    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(RandomAlgorithmToAlgorithm(alg),
+    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(xla::GetCounterSize(alg),
                                              ctx->InputShape(key_input_idx),
                                              counter_shape));
 
@@ -392,11 +405,25 @@ class StatelessRandomNormalOp : public XlaOpKernel {
     auto result = xla::NormalFloatingPointDistribution(key, counter, generator,
                                                        xla_shape);
     auto normal = MaybeConvertF32ToBF16(result.value, dtype_);
-    ctx->SetOutput(0, normal);
+
+    // If the input shape is constant, no need to set dimension sizes.
+    // TODO(hinsu): Simplify this once MLIR bridge can handle bounded types.
+    TensorShape static_shape;
+    Status status = ctx->ConstantInputAsShape(0, &static_shape);
+    if (status.ok()) {
+      ctx->SetOutput(0, normal);
+      return;
+    }
+
+    auto result_or = xla::SetAllDimensionSizes(&ctx->value_inference(), normal,
+                                               ctx->Input(0));
+    OP_REQUIRES_OK(ctx, result_or.status());
+    ctx->SetOutput(0, result_or.value());
   }
 
  private:
   DataType dtype_;
+  string device_type_string_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(StatelessRandomNormalOp);
 };
@@ -411,7 +438,8 @@ REGISTER_XLA_OP(Name("StatelessRandomNormalV2")
 class StatelessTruncatedNormalOp : public XlaOpKernel {
  public:
   explicit StatelessTruncatedNormalOp(OpKernelConstruction* ctx)
-      : XlaOpKernel(ctx) {
+      : XlaOpKernel(ctx),
+        device_type_string_(ctx->device_type().type_string()) {
     OP_REQUIRES_OK(ctx, ctx->GetAttr("dtype", &dtype_));
   }
 
@@ -425,11 +453,12 @@ class StatelessTruncatedNormalOp : public XlaOpKernel {
     xla::XlaOp key = ctx->Input(key_input_idx);
     xla::XlaOp counter = ctx->Input(counter_input_idx);
 
-    xla::RandomAlgorithm alg;
-    OP_REQUIRES_OK(ctx, GetAlgorithm(ctx, alg_input_idx, &alg));
+    OP_REQUIRES_VALUE(
+        auto alg, ctx,
+        AlgorithmFromInput(ctx, alg_input_idx, device_type_string_));
 
     auto counter_shape = ctx->InputShape(counter_input_idx);
-    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(RandomAlgorithmToAlgorithm(alg),
+    OP_REQUIRES_OK(ctx, CheckKeyCounterShape(xla::GetCounterSize(alg),
                                              ctx->InputShape(key_input_idx),
                                              counter_shape));
 
@@ -451,6 +480,7 @@ class StatelessTruncatedNormalOp : public XlaOpKernel {
 
  private:
   DataType dtype_;
+  string device_type_string_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(StatelessTruncatedNormalOp);
 };
@@ -461,42 +491,6 @@ REGISTER_XLA_OP(Name("StatelessTruncatedNormalV2")
                     .TypeConstraint("dtype",
                                     {DT_DOUBLE, DT_FLOAT, DT_BFLOAT16}),
                 StatelessTruncatedNormalOp);
-
-class GetKeyCounterAlgOp : public XlaOpKernel {
- public:
-  explicit GetKeyCounterAlgOp(OpKernelConstruction* ctx)
-      : XlaOpKernel(ctx),
-        device_type_string_(ctx->device_type().type_string()) {}
-
-  void Compile(XlaOpKernelContext* ctx) override {
-    TensorShape seed_shape = ctx->InputShape(0);
-    OP_REQUIRES(ctx, seed_shape == TensorShape({2}),
-                errors::InvalidArgument("seed must have shape [2], not ",
-                                        seed_shape.DebugString()));
-    xla::XlaOp seed = ctx->Input(0);
-
-    xla::XlaBuilder* builder = seed.builder();
-    xla::XlaOp seed0 = xla::Reshape(xla::Slice(seed, {0}, {1}, {1}), {});
-    xla::XlaOp seed1 = xla::Reshape(xla::Slice(seed, {1}, {2}, {1}), {});
-    xla::XlaOp key = GetU64FromS32Seeds(seed0, seed1);
-    auto key_counter = GetKeyCounter(device_type_string_, key);
-    key = std::get<0>(key_counter);
-    auto counter = std::get<1>(key_counter);
-    auto alg = GetAlg(device_type_string_);
-    key = xla::Reshape(key, {RNG_KEY_SIZE});
-    ctx->SetOutput(0, key);
-    ctx->SetOutput(1, counter);
-    ctx->SetOutput(2, ConstantR0(builder, static_cast<int>(alg)));
-  }
-
- private:
-  string device_type_string_;
-
-  TF_DISALLOW_COPY_AND_ASSIGN(GetKeyCounterAlgOp);
-};
-
-// TODO(hinsu): Dis-allow unsupported int64 seed types.
-REGISTER_XLA_OP(Name("StatelessRandomGetKeyCounterAlg"), GetKeyCounterAlgOp);
 
 class GetKeyCounterOp : public XlaOpKernel {
  public:
@@ -531,6 +525,20 @@ class GetKeyCounterOp : public XlaOpKernel {
 // TODO(hinsu): Dis-allow unsupported int64 seed types.
 REGISTER_XLA_OP(Name("StatelessRandomGetKeyCounter"), GetKeyCounterOp);
 
+Algorithm DecideOutputAlgorithm(xla::RandomAlgorithm alg) {
+  switch (alg) {
+    case xla::RandomAlgorithm::RNG_PHILOX:
+      return RNG_ALG_PHILOX;
+    case xla::RandomAlgorithm::RNG_THREE_FRY:
+      return RNG_ALG_THREEFRY;
+    case xla::RandomAlgorithm::RNG_DEFAULT:  // fall through
+    default:
+      // The output counter will have the maximal size, so it's safe to let
+      // downstream RNG ops choose the algorithm.
+      return RNG_ALG_AUTO_SELECT;
+  }
+}
+
 class GetAlgOp : public XlaOpKernel {
  public:
   explicit GetAlgOp(OpKernelConstruction* ctx)
@@ -538,9 +546,10 @@ class GetAlgOp : public XlaOpKernel {
         device_type_string_(ctx->device_type().type_string()) {}
 
   void Compile(XlaOpKernelContext* ctx) override {
-    auto alg = GetAlg(device_type_string_);
+    auto alg = DefaultRngAlgForDeviceType(device_type_string_);
     auto builder = ctx->builder();
-    ctx->SetOutput(0, ConstantR0(builder, static_cast<int>(alg)));
+    ctx->SetOutput(
+        0, ConstantR0(builder, static_cast<int>(DecideOutputAlgorithm(alg))));
   }
 
  private:
@@ -550,6 +559,49 @@ class GetAlgOp : public XlaOpKernel {
 };
 
 REGISTER_XLA_OP(Name("StatelessRandomGetAlg"), GetAlgOp);
+
+class GetKeyCounterAlgOp : public XlaOpKernel {
+ public:
+  explicit GetKeyCounterAlgOp(OpKernelConstruction* ctx)
+      : XlaOpKernel(ctx),
+        device_type_string_(ctx->device_type().type_string()) {}
+
+  void Compile(XlaOpKernelContext* ctx) override {
+    TensorShape seed_shape = ctx->InputShape(0);
+    OP_REQUIRES(ctx, seed_shape == TensorShape({2}),
+                errors::InvalidArgument("seed must have shape [2], not ",
+                                        seed_shape.DebugString()));
+    xla::XlaOp seed = ctx->Input(0);
+
+    xla::XlaBuilder* builder = seed.builder();
+    xla::XlaOp seed0 = xla::Reshape(xla::Slice(seed, {0}, {1}, {1}), {});
+    xla::XlaOp seed1 = xla::Reshape(xla::Slice(seed, {1}, {2}, {1}), {});
+    xla::XlaOp key = GetU64FromS32Seeds(seed0, seed1);
+    auto key_counter = GetKeyCounter(device_type_string_, key);
+    key = std::get<0>(key_counter);
+    auto counter = std::get<1>(key_counter);
+    auto alg = DefaultRngAlgForDeviceType(device_type_string_);
+    key = xla::Reshape(key, {RNG_KEY_SIZE});
+    ctx->SetOutput(0, key);
+    ctx->SetOutput(1, counter);
+    ctx->SetOutput(
+        2, ConstantR0(builder, static_cast<int>(DecideOutputAlgorithm(alg))));
+  }
+
+ private:
+  string device_type_string_;
+
+  TF_DISALLOW_COPY_AND_ASSIGN(GetKeyCounterAlgOp);
+};
+
+// TODO(hinsu): Dis-allow unsupported int64 seed types.
+REGISTER_XLA_OP(Name("StatelessRandomGetKeyCounterAlg"), GetKeyCounterAlgOp);
+
+REGISTER_XLA_OP(Name("XlaRngBitGenerator")
+                    .CompileTimeConstantInput("algorithm")
+                    .CompileTimeConstantInput("shape")
+                    .TypeConstraint("dtype", {DT_UINT32, DT_UINT64}),
+                MlirXlaOpKernel);
 
 }  // namespace
 }  // namespace tensorflow

@@ -86,11 +86,11 @@ string TRTEngineCacheResource::DebugString() const {
   for (const auto& item : cache_) {
     mutex_lock lock(item.second->mu);
     oss << TensorShapeUtils::ShapeListString(item.first) << ": " << hex
-        << "ICudaEngine: " << item.second->cuda_engine.get() << ", "
+        << "ICudaEngine: " << item.second->GetCudaEngine() << ", "
         << "IExecutionContext: ";
-    for (auto& ctx : item.second->execution_context) {
-      oss << ctx.GetIExecutionContext() << ", ";
-    }
+    absl::c_for_each(
+        item.second->execution_contexts,
+        [&](const ExecutionContext& ctx) { oss << ctx.get() << ","; });
     oss << dec << endl;
   }
   return oss.str();

@@ -96,7 +96,7 @@ class ImplementationSelector : public CustomGraphOptimizer {
   ~ImplementationSelector() override = default;
   Status Init(
       const tensorflow::RewriterConfig_CustomGraphOptimizer* config) override {
-    return Status::OK();
+    return OkStatus();
   }
   string name() const override {
     return "implementation_selector";
@@ -107,10 +107,6 @@ class ImplementationSelector : public CustomGraphOptimizer {
   // This call is not thread-safe.
   Status Optimize(Cluster* cluster, const GrapplerItem& item,
                   GraphDef* optimized_graph) override;
-
-  // Does not take any feedback.
-  void Feedback(Cluster* cluster, const GrapplerItem& item,
-                const GraphDef& optimized_graph, double result) override {}
 
  private:
   Status LoadFunctions(const GraphDef& graph);

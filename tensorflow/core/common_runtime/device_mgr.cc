@@ -121,10 +121,10 @@ Status StaticDeviceMgr::LookupDevice(StringPiece name, Device** device) const {
     return errors::InvalidArgument(name, " unknown device.");
   }
   *device = iter->second;
-  return Status::OK();
+  return OkStatus();
 }
 
-bool StaticDeviceMgr::ContainsDevice(int64 device_incarnation) const {
+bool StaticDeviceMgr::ContainsDevice(int64_t device_incarnation) const {
   return device_incarnation_set_.contains(device_incarnation);
 }
 

@@ -26,7 +26,8 @@ namespace graph_tests_utils {
 // Creates a test NodeDef for BatchDatasetV2.
 NodeDef MakeBatchV2Node(StringPiece name, StringPiece input_node_name,
                         StringPiece batch_size_node_name,
-                        StringPiece drop_remainder_node_name);
+                        StringPiece drop_remainder_node_name,
+                        bool parallel_copy);
 
 // Creates a test NodeDef for ParallelBatchDataset.
 NodeDef MakeParallelBatchNode(StringPiece name, StringPiece input_node_name,
@@ -97,6 +98,10 @@ NodeDef MakeShuffleV2Node(StringPiece name, StringPiece input_node_name,
 NodeDef MakeTakeNode(StringPiece name, StringPiece input_node_name,
                      StringPiece count_node_name);
 
+// Creates a test NodeDef for TensorSliceDataset.
+NodeDef MakeTensorSliceNode(StringPiece name, StringPiece tensor_node_name,
+                            bool replicate_on_split);
+
 // Creates a test NodeDef for SkipDataset.
 NodeDef MakeSkipNode(StringPiece name, StringPiece input_node_name,
                      StringPiece count_node_name);
@@ -105,6 +110,10 @@ NodeDef MakeSkipNode(StringPiece name, StringPiece input_node_name,
 NodeDef MakeShardNode(StringPiece name, StringPiece input_node_name,
                       StringPiece num_shards_node_name,
                       StringPiece index_node_name);
+
+// Creates a test NodeDef for PrefetchDataset.
+NodeDef MakePrefetchNode(StringPiece name, StringPiece input_node_name,
+                         StringPiece buffer_size);
 
 }  // namespace graph_tests_utils
 }  // namespace grappler

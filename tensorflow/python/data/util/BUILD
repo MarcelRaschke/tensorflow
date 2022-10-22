@@ -2,19 +2,14 @@ load("//tensorflow:tensorflow.bzl", "py_test")
 
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
-
-exports_files(["LICENSE"])
 
 py_library(
     name = "nest",
     srcs = ["nest.py"],
     srcs_version = "PY3",
-    deps = [
-        "//tensorflow/python:util",
-        "@six_archive//:six",
-    ],
+    deps = ["//tensorflow/python:util"],
 )
 
 py_test(
@@ -42,12 +37,11 @@ py_library(
     deps = [
         ":nest",
         "//tensorflow/python:dtypes",
-        "//tensorflow/python:ops",
         "//tensorflow/python:sparse_ops",
         "//tensorflow/python:sparse_tensor",
         "//tensorflow/python:tensor_shape",
         "//tensorflow/python:util",
-        "@six_archive//:six",
+        "//tensorflow/python/user_ops:ops",
     ],
 )
 
@@ -76,14 +70,14 @@ py_library(
         ":nest",
         "//tensorflow/python:dtypes",
         "//tensorflow/python:framework_ops",
-        "//tensorflow/python:ops",
         "//tensorflow/python:sparse_ops",
         "//tensorflow/python:sparse_tensor",
         "//tensorflow/python:tensor_array_ops",
         "//tensorflow/python:tensor_shape",
         "//tensorflow/python:tensor_util",
         "//tensorflow/python:util",
-        "//tensorflow/python/ops/ragged",
+        "//tensorflow/python/ops/ragged:ragged_tensor",
+        "//tensorflow/python/user_ops:ops",
         "@wrapt",
     ],
 )
@@ -209,6 +203,8 @@ py_test(
         ":traverse",
         "//tensorflow/python:client_testlib",
         "//tensorflow/python:framework_for_generated_wrappers",
+        "//tensorflow/python/data/experimental/kernel_tests/service:test_base",
+        "//tensorflow/python/data/experimental/ops:dataset_ops",
         "//tensorflow/python/data/kernel_tests:test_base",
         "//tensorflow/python/data/ops:dataset_ops",
     ],

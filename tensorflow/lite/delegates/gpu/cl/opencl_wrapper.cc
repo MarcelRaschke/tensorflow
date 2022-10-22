@@ -232,6 +232,17 @@ void LoadOpenCLFunctions(void* libopencl, bool use_wrapper) {
   LoadFunction(clCreateFromEGLImageKHR);
   LoadFunction(clEnqueueAcquireEGLObjectsKHR);
   LoadFunction(clEnqueueReleaseEGLObjectsKHR);
+
+  // cl_khr_command_buffer extension
+  LoadFunction(clCreateCommandBufferKHR);
+  LoadFunction(clRetainCommandBufferKHR);
+  LoadFunction(clReleaseCommandBufferKHR);
+  LoadFunction(clFinalizeCommandBufferKHR);
+  LoadFunction(clEnqueueCommandBufferKHR);
+  LoadFunction(clCommandNDRangeKernelKHR);
+  LoadFunction(clGetCommandBufferInfoKHR);
+
+  LoadQcomExtensionFunctions();
 }
 
 // No OpenCL support, do not set function addresses
@@ -351,6 +362,17 @@ PFN_clCreateEventFromEGLSyncKHR clCreateEventFromEGLSyncKHR;
 PFN_clCreateFromEGLImageKHR clCreateFromEGLImageKHR;
 PFN_clEnqueueAcquireEGLObjectsKHR clEnqueueAcquireEGLObjectsKHR;
 PFN_clEnqueueReleaseEGLObjectsKHR clEnqueueReleaseEGLObjectsKHR;
+
+// cl_khr_command_buffer extension
+PFN_clCreateCommandBufferKHR clCreateCommandBufferKHR;
+PFN_clRetainCommandBufferKHR clRetainCommandBufferKHR;
+PFN_clReleaseCommandBufferKHR clReleaseCommandBufferKHR;
+PFN_clFinalizeCommandBufferKHR clFinalizeCommandBufferKHR;
+PFN_clEnqueueCommandBufferKHR clEnqueueCommandBufferKHR;
+PFN_clCommandNDRangeKernelKHR clCommandNDRangeKernelKHR;
+PFN_clGetCommandBufferInfoKHR clGetCommandBufferInfoKHR;
+
+DEFINE_QCOM_FUNCTION_PTRS
 
 cl_mem CreateImage2DLegacy(cl_context context, cl_mem_flags flags,
                            const cl_image_format* image_format,

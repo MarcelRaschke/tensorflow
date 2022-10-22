@@ -15,7 +15,8 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/executable.h"
 
-#include "absl/memory/memory.h"
+#include <memory>
+
 #include "absl/strings/str_format.h"
 #include "tensorflow/compiler/xla/debug_options_flags.h"
 #include "tensorflow/compiler/xla/service/dump.h"
@@ -23,13 +24,11 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/maybe_owning_device_memory.h"
 #include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/status_macros.h"
-#include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/core/lib/hash/hash.h"
-#include "tensorflow/core/lib/io/path.h"
-#include "tensorflow/core/lib/strings/proto_serialization.h"
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/errors.h"
-#include "tensorflow/stream_executor/device_description.h"
+#include "tensorflow/compiler/xla/stream_executor/device_description.h"
+#include "tensorflow/tsl/lib/strings/proto_serialization.h"
+#include "tensorflow/tsl/platform/env.h"
+#include "tensorflow/tsl/platform/errors.h"
+#include "tensorflow/tsl/platform/status.h"
 
 namespace xla {
 
@@ -45,12 +44,12 @@ ExecutionInput::~ExecutionInput() {
 Status ExecutionInput::SetDynamicShape(Shape dynamic_shape) {
   const Shape& input_shape = shape();
   if (!ShapeUtil::DynamicShapeIsCompatible(input_shape, dynamic_shape)) {
-    return tensorflow::errors::InvalidArgument(
+    return tsl::errors::InvalidArgument(
         "Cannot set dynamic shape: ", input_shape.DebugString(), " vs. ",
         dynamic_shape.DebugString());
   }
-  dynamic_shape_ = absl::make_unique<Shape>(std::move(dynamic_shape));
-  return Status::OK();
+  dynamic_shape_ = std::make_unique<Shape>(std::move(dynamic_shape));
+  return OkStatus();
 }
 
 void ExecutionInput::SetUnownedBuffer(const ShapeIndex& index,
@@ -68,9 +67,9 @@ StatusOr<ShapedBuffer> ExecutionInput::ToShapedBuffer(
         index_buffer.second.AsOwningDeviceMemory();
     if (mem != nullptr && (mem->allocator() != allocator ||
                            mem->device_ordinal() != device_ordinal)) {
-      return tensorflow::errors::InvalidArgument(
-          "Device buffer at index ", index_buffer.first.ToString(),
-          " has mismatching allocator/device");
+      return tsl::errors::InvalidArgument("Device buffer at index ",
+                                          index_buffer.first.ToString(),
+                                          " has mismatching allocator/device");
     }
     shaped_buffer.set_buffer(index_buffer.second.AsDeviceMemoryBase(),
                              index_buffer.first);
@@ -235,7 +234,7 @@ Status ExecuteWrapperAfterExecution(
     // value may call back into the driver on GPU, which is not allowed.
     TF_RETURN_IF_ERROR(stream->BlockHostUntilDone());
 
-    const int64 executable_size_in_bytes =
+    const int64_t executable_size_in_bytes =
         executable->SizeOfGeneratedCodeInBytes();
     // Merge in run-time profile information from execution_profile.
 
@@ -268,7 +267,7 @@ Status ExecuteWrapperAfterExecution(
         &stream->parent()->GetDeviceDescription();
     std::shared_ptr<HloExecutionProfile> profile = state.profile_ptr;
     stream->ThenDoHostCallback([profile, device_description]() {
-      XLA_LOG_LINES(tensorflow::INFO,
+      XLA_LOG_LINES(tsl::INFO,
                     profile->ToString(device_description->clock_rate_ghz()));
     });
   }
@@ -298,13 +297,13 @@ StatusOr<ExecutionOutput> Executable::ExecuteAsyncOnStreamWrapper(
   return return_value;
 }
 
-int64 Executable::SizeOfGeneratedCodeInBytes() const { return -1; }
+int64_t Executable::SizeOfGeneratedCodeInBytes() const { return -1; }
 
 void Executable::MarkToBeReleasedArguments(absl::Span<ExecutionInput> arguments,
                                            ExecutionOutput& result) {
   for (ExecutionInput& argument : arguments) {
     for (auto& index_buffer : *argument.MutableBuffers()) {
-      if (absl::optional<se::OwningDeviceMemory> maybe_owning_buffer =
+      if (std::optional<se::OwningDeviceMemory> maybe_owning_buffer =
               index_buffer.second.Release()) {
         result.AddToBeReleased(std::move(*maybe_owning_buffer));
       }

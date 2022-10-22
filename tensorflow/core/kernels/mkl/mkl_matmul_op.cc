@@ -25,7 +25,7 @@ limitations under the License.
 
 #if defined(INTEL_MKL)
 
-#include "mkldnn.hpp"
+#include "dnnl.hpp"
 #include "tensorflow/core/framework/op.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/register_types.h"
@@ -61,9 +61,9 @@ class MklMatMulOp : public OpKernel {
     int d1 = a.dim_size(dim_pair[0].first);
     int d2 = b.dim_size(dim_pair[0].second);
     OP_REQUIRES(ctx, d1 == d2,
-                errors::InvalidArgument(
-                    "In[0] mismatch In[1] shape: ", d1, " vs. ", d2, ": ",
-                    a.shape().DebugString(), " ", b.shape().DebugString()));
+                errors::InvalidArgument("Matrix size-incompatible: In[0]: ",
+                                        a.shape().DebugString(),
+                                        ", In[1]: ", b.shape().DebugString()));
     int a_dim_remaining = 1 - dim_pair[0].first;
     int b_dim_remaining = 1 - dim_pair[0].second;
     TensorShape out_shape(
@@ -155,14 +155,25 @@ class MklMatMulOp : public OpKernel {
     char char_transa = transa ? 'T' : 'N';
     char char_transb = transb ? 'T' : 'N';
     VLOG(2) << "MKL DNN SGEMM called";
-#ifdef ENABLE_MKLDNN_THREADPOOL
+#ifndef ENABLE_ONEDNN_OPENMP
     MklDnnThreadPool eigen_tp(ctx);
-    dnnl_sgemm_tp(char_transa, char_transb, m, n, k, alpha, a, lda, b, ldb,
-                  beta, c, ldc, &eigen_tp);
+    // With threadpool , the runtime overhead is comparable to the kernel
+    // execution for small kernel sizes. For such sizes, it may be better to run
+    // the kernel single threaded. Here we are coming up with a cost model based
+    // on L1 sizes. If we find that matrices are small enough, we will execute
+    // single threaded. This may need tuning.
+    if (ExecuteSingleThreadedGemm(m, n, k, sizeof(float))) {
+      // For now, call single-threaded gemm.
+      dnnl::threadpool_interop::sgemm(char_transa, char_transb, m, n, k, alpha,
+                                      a, lda, b, ldb, beta, c, ldc, nullptr);
+    } else {
+      dnnl::threadpool_interop::sgemm(char_transa, char_transb, m, n, k, alpha,
+                                      a, lda, b, ldb, beta, c, ldc, &eigen_tp);
+    }
 #else
     dnnl_sgemm(char_transa, char_transb, m, n, k, alpha, a, lda, b, ldb, beta,
                c, ldc);
-#endif  // ENABLE_MKLDNN_THREADPOOL
+#endif  // !ENABLE_ONEDNN_OPENMP
   }
 
   void MklBlasGemm(OpKernelContext* ctx, bool transa, bool transb, const int m,
@@ -188,11 +199,9 @@ class MklMatMulOp : public OpKernel {
           .Label(mkl_op_registry::kMklNameChangeOpLabel), \
       MklMatMulOp<CPUDevice, T, false /* cublas, ignored for CPU */>);
 
-#ifdef ENABLE_MKL
-// TODO(inteltf) Consider template specialization when adding/removing
+// TODO(intel-tf): Consider template specialization when adding/removing
 // additional types
 TF_CALL_float(REGISTER_CPU);
 TF_CALL_bfloat16(REGISTER_CPU);
-#endif  // ENABLE_MKL
 }  // namespace tensorflow
 #endif  // INTEL_MKL

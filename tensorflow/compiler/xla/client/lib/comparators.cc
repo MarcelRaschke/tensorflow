@@ -32,13 +32,13 @@ limitations under the License.
 namespace xla {
 namespace {
 
-using XlaCompareOp = XlaOp (*)(XlaOp, XlaOp, absl::Span<const int64>);
+using XlaCompareOp = XlaOp (*)(XlaOp, XlaOp, absl::Span<const int64_t>);
 
 XlaComputation CreateScalarComparisonComputation(
-    const string& name, const std::vector<PrimitiveType>& operand_types,
+    const std::string& name, const std::vector<PrimitiveType>& operand_types,
     XlaBuilder* builder, XlaCompareOp generator) {
   CHECK_NE(operand_types.size(), 0);
-  std::vector<absl::optional<XlaCompareOp>> generators(operand_types.size());
+  std::vector<std::optional<XlaCompareOp>> generators(operand_types.size());
   generators[0] = generator;
   return CreateScalarComparisonComputation(name, operand_types, generators,
                                            builder);
@@ -46,8 +46,8 @@ XlaComputation CreateScalarComparisonComputation(
 }  // namespace
 
 XlaComputation CreateScalarComparisonComputation(
-    const string& name, const std::vector<PrimitiveType>& operand_types,
-    const std::vector<absl::optional<XlaCompareOp>>& generators,
+    const std::string& name, const std::vector<PrimitiveType>& operand_types,
+    const std::vector<std::optional<XlaCompareOp>>& generators,
     XlaBuilder* builder) {
   // Create a default computation where we compare only the first two
   // parameters of type 'operand_types[0]'.
@@ -58,8 +58,8 @@ XlaComputation CreateScalarComparisonComputation(
   }
 
   CHECK_EQ(operand_types.size(), generators.size());
-  int64 parameter_count = 0;
-  int64 last_generator_index = 0;
+  int64_t parameter_count = 0;
+  int64_t last_generator_index = 0;
   std::vector<XlaOp> lhs_params;
   std::vector<XlaOp> rhs_params;
 
@@ -89,13 +89,13 @@ XlaComputation CreateScalarComparisonComputation(
     b->ReportError(shape_or.status());
     return {};
   }
-  Shape shape = shape_or.ValueOrDie();
+  Shape shape = shape_or.value();
   shape.set_element_type(PRED);
-  XlaOp param_equal = Broadcast(One(b.get(), shape.element_type()),
-                                AsInt64Slice(shape.dimensions()));
+  XlaOp param_equal =
+      Broadcast(One(b.get(), shape.element_type()), shape.dimensions());
   XlaOp result = param_equal;
 
-  for (int64 i = 0; i < parameter_count; i++) {
+  for (int64_t i = 0; i < parameter_count; i++) {
     if (generators[i].has_value()) {
       result = Select(param_equal,
                       generators[i].value()(lhs_params[i], rhs_params[i], {}),

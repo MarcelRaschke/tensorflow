@@ -28,7 +28,11 @@ namespace functor {
 
 typedef Eigen::GpuDevice GPUDevice;
 
+#if defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
+CAST_FUNCTORS_SUBSET(GPUDevice);
+#else
 CAST_FUNCTORS(GPUDevice);
+#endif
 
 #define DEFINE(O, I) template struct CastFunctor<GPUDevice, O, I>
 
@@ -48,6 +52,15 @@ CAST_FUNCTORS(GPUDevice);
   DEFINE(in_type, std::complex<float>); \
   DEFINE(in_type, std::complex<double>)
 
+DEFINE(float, bfloat16);
+
+#if defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
+
+// The cast from float to double is still needed for resize_bilinear_op.cc
+DEFINE(double, float);
+
+#else
+
 DEFINE_ALL_FROM(bool);
 DEFINE_ALL_FROM(uint8);
 DEFINE_ALL_FROM(uint16);
@@ -59,7 +72,7 @@ DEFINE_ALL_FROM(int32);
 DEFINE_ALL_FROM(int64);
 DEFINE_ALL_FROM(double);
 DEFINE_ALL_FROM(std::complex<double>);
-DEFINE(float, bfloat16);
+#endif
 
 #define DEFINE_ALL_TO_FLOAT(out_type) \
   DEFINE(out_type, bool);             \
@@ -87,10 +100,22 @@ DEFINE(float, bfloat16);
   DEFINE(out_type, int64);           \
   DEFINE(out_type, Eigen::half)
 
-DEFINE_ALL_TO_HALF(Eigen::half);
 DEFINE_ALL_TO_HALF(bfloat16);
+
+#if defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
+// The cast from Eigen::half is still needed for depthwise_conv_grad_op.cc.
+DEFINE(float, Eigen::half);
+// The cast from float to float is still needed for resize_bilinear_op.cc.
+DEFINE(float, float);
+// The casts from complex to the complex element type is still needed for
+// self_adjoint_eig_v2_op_gpu.cc
+DEFINE(std::complex<float>, float);
+DEFINE(std::complex<double>, double);
+#else
+DEFINE_ALL_TO_HALF(Eigen::half);
 DEFINE_ALL_TO_FLOAT(float);
 DEFINE_ALL_TO_FLOAT(std::complex<float>);
+#endif
 
 #undef DEFINE_ALL_TO_FLOAT
 #undef DEFINE_ALL_TO_HALF

@@ -15,7 +15,7 @@ limitations under the License.
 
 #ifdef GOOGLE_CUDA
 #include "third_party/gpus/cuda/include/cuda.h"
-#include "tensorflow/stream_executor/cuda/cuda_activation.h"
+#include "tensorflow/compiler/xla/stream_executor/cuda/cuda_activation.h"
 #endif  // GOOGLE_CUDA
 
 #include "tensorflow/core/common_runtime/device/device_id_utils.h"
@@ -26,15 +26,12 @@ limitations under the License.
 
 namespace tensorflow {
 
-GPUcudaMallocAllocator::GPUcudaMallocAllocator(Allocator* allocator,
-                                               PlatformGpuId platform_gpu_id)
-    : base_allocator_(allocator) {
+GPUcudaMallocAllocator::GPUcudaMallocAllocator(
+    PlatformDeviceId platform_device_id) {
   stream_exec_ = DeviceIdUtil::ExecutorForPlatformDeviceId(GPUMachineManager(),
-                                                           platform_gpu_id)
-                     .ValueOrDie();
+                                                           platform_device_id)
+                     .value();
 }
-
-GPUcudaMallocAllocator::~GPUcudaMallocAllocator() { delete base_allocator_; }
 
 void* GPUcudaMallocAllocator::AllocateRaw(size_t alignment, size_t num_bytes) {
 #ifdef GOOGLE_CUDA
@@ -52,6 +49,8 @@ void* GPUcudaMallocAllocator::AllocateRaw(size_t alignment, size_t num_bytes) {
                << "\n Error string: " << error_string;
     return nullptr;
   }
+  VLOG(10) << "AllocateRaw " << Name() << "  " << num_bytes << " "
+           << reinterpret_cast<void*>(rv);
   return reinterpret_cast<void*>(rv);
 #else
   return nullptr;
@@ -77,11 +76,8 @@ void GPUcudaMallocAllocator::DeallocateRaw(void* ptr) {
                << "\n Error name: " << error_name
                << "\n Error string: " << error_string;
   }
+  VLOG(10) << Name() << " Freed ptr: " << ptr;
 #endif  // GOOGLE_CUDA
-}
-
-absl::optional<AllocatorStats> GPUcudaMallocAllocator::GetStats() {
-  return base_allocator_->GetStats();
 }
 
 bool GPUcudaMallocAllocator::TracksAllocationSizes() const { return false; }

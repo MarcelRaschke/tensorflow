@@ -24,6 +24,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/statusor.h"
+#include "tensorflow/compiler/xla/stream_executor/stream_executor.h"
+#include "tensorflow/compiler/xla/stream_executor/stream_executor_internal.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/compiler/xrt/xrt.pb.h"
 #include "tensorflow/compiler/xrt/xrt_memory_manager.h"
@@ -45,8 +47,6 @@ limitations under the License.
 #include "tensorflow/core/tpu/tpu_configuration.h"
 #include "tensorflow/core/tpu/tpu_defs.h"
 #include "tensorflow/core/tpu/tpu_execute.h"
-#include "tensorflow/stream_executor/stream_executor.h"
-#include "tensorflow/stream_executor/stream_executor_internal.h"
 
 namespace tensorflow {
 namespace {
@@ -59,7 +59,7 @@ using GetBufferFunction =
 
 // Looks up the input `key` in the compilation cache.
 Status GetComputationCacheEntry(
-    ResourceMgr* rm, int64 key, int core_index_in_replica,
+    ResourceMgr* rm, int64_t key, int core_index_in_replica,
     std::unique_ptr<CompilationCacheEntryRef>* entry) {
   profiler::TraceMe trace_me("XRTExecuteOp::LookupProto", /*level=*/2);
   TpuCompilationCacheLookup* proto_lookup;
@@ -68,14 +68,14 @@ Status GetComputationCacheEntry(
                                 &proto_lookup));
   core::ScopedUnref lookup_unref(proto_lookup);
   TF_RETURN_IF_ERROR(proto_lookup->Lookup(key, core_index_in_replica, entry));
-  return Status::OK();
+  return OkStatus();
 }
 
 std::vector<bool> GetDynamicInputInfo(
     const TPUExecutableInfoProto& executable_proto) {
   std::vector<bool> input_is_dynamic;
   input_is_dynamic.reserve(executable_proto.input_shapes().size());
-  for (int64 i = 0; i < executable_proto.input_shapes().size(); ++i) {
+  for (int64_t i = 0; i < executable_proto.input_shapes().size(); ++i) {
     input_is_dynamic.push_back(
         !xla::Shape(executable_proto.input_shapes(i)).is_static());
   }
@@ -154,7 +154,8 @@ xla::StatusOr<RefPtr<XRTTupleAllocation>> AllocateOutputTuple(
 
   TF_RETURN_IF_ERROR(XRTTupleAllocation::CreateFromBuffer(
       output_shaped_buffer, output_host_shape, output_device_shape,
-      node_context->backend(), device_ordinal, &output_tuple));
+      node_context->backend(), device_ordinal, &output_tuple,
+      node_context->backend()->memory_allocator()));
   RefPtr<XRTTupleAllocation> output_tuple_ptr(output_tuple);
 
   // If the input tuples had to release some buffers in order to provide the
@@ -241,7 +242,8 @@ xla::StatusOr<xla::ExecutionOutput> ExecuteTPUProgram(
                          device_ordinal, rendezvous_key_base);
   };
   return memory_manager->Run<xla::ExecutionOutput>(
-      runfn, backend, device_ordinal, /*requested_free_size=*/0);
+      runfn, backend, device_ordinal, /*requested_free_size=*/0,
+      backend->memory_allocator());
 }
 
 // XRTExecuteOp
@@ -292,7 +294,7 @@ Status XRTExecuteOp::DoWork(OpKernelContext* context) {
 
   const Tensor& execution_input = context->input(0);
   TF_RET_CHECK(TensorShapeUtils::IsScalar(execution_input.shape()));
-  int64 compilation_handle = execution_input.scalar<int64>()();
+  int64_t compilation_handle = execution_input.scalar<int64_t>()();
 
   const Tensor& execution_config = context->input(1);
   TF_RET_CHECK(TensorShapeUtils::IsScalar(execution_config.shape()));
@@ -343,8 +345,8 @@ Status XRTExecuteOp::DoWork(OpKernelContext* context) {
       std::vector<RefPtr<XRTTupleAllocation>> input_tuples,
       GetInputTupleAllocations(
           input_coords, &working_set, backend, executable.input_shapes_size(),
-          [&](int64 i) { return xla::Shape(executable.input_shapes(i)); },
-          release_inputs));
+          [&](int64_t i) { return xla::Shape(executable.input_shapes(i)); },
+          release_inputs, backend->memory_allocator()));
   auto get_buffers_fn = [&]() {
     return GetArgumentsBuffers(input_output_alias, input_tuples,
                                input_is_dynamic, release_inputs);
@@ -365,7 +367,7 @@ Status XRTExecuteOp::DoWork(OpKernelContext* context) {
       context, memory_manager.get(), node_context.get(), stream, config_proto,
       executable, input_tuples, input_output_alias, output.ConsumeResult(),
       device_ordinal));
-  return Status::OK();
+  return OkStatus();
 }
 
 class XRTExecuteChainedOp : public AsyncOpKernel {
@@ -465,7 +467,7 @@ Status XRTExecuteChainedOp::DoWork(OpKernelContext* context) {
   };
 
   return ExecuteChained(context, memory_manager, backend, device_ordinal, plan,
-                        config, execute_op);
+                        config, execute_op, backend->memory_allocator());
 }
 
 }  // namespace

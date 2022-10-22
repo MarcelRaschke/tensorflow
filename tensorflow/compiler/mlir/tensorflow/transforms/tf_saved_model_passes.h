@@ -18,6 +18,8 @@ limitations under the License.
 
 #include <memory>
 
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
+#include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/Pass/Pass.h"  // from @llvm-project
 #include "tensorflow/core/public/session.h"
 
@@ -33,7 +35,7 @@ std::unique_ptr<OperationPass<ModuleOp>> CreateFreezeGlobalTensorsPass(
 
 // Creates a pass that freezes tf_saved_model.asset ops.
 std::unique_ptr<OperationPass<ModuleOp>> CreateFreezeAssetsPass(
-    std::string saved_model_dir);
+    std::string saved_model_dir = "");
 
 // Creates as pass that removes variables in the session initializer.
 // This job is required with lifting variable passes. Originally, the session
@@ -45,14 +47,18 @@ std::unique_ptr<OperationPass<ModuleOp>> CreateFreezeAssetsPass(
 std::unique_ptr<OperationPass<ModuleOp>>
 CreateRemoveVariablesInSessionInitializerPass();
 
-// Creates as pass that creates GlobalTensorOp for each variable from function
-// arguments and converts the function arguments to the corresponding saved
-// model arguments.
-std::unique_ptr<OperationPass<ModuleOp>> CreateLiftVariablesPass(
-    ::tensorflow::Session* session);
-
 // Creates a pass that removes duplicate 'tf_saved_model.bound_input' bindings.
-std::unique_ptr<OperationPass<FuncOp>> CreateDedupBoundInputBindingPass();
+std::unique_ptr<OperationPass<func::FuncOp>> CreateDedupBoundInputBindingPass();
+
+// Create a pass that removes function arguments that map to global tensors.
+std::unique_ptr<Pass> CreateLowerGlobalsToMlProgramPass();
+
+// Create a pass that lowers variable read/write ops to ml_program ops.
+std::unique_ptr<OperationPass<ModuleOp>>
+CreateLowerVariableOpsToMlProgramPass();
+
+#define GEN_PASS_REGISTRATION
+#include "tensorflow/compiler/mlir/tensorflow/transforms/tf_savedmodel_passes.h.inc"
 
 }  // namespace tf_saved_model
 

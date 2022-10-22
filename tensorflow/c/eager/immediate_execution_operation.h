@@ -22,6 +22,7 @@ limitations under the License.
 #include "tensorflow/c/eager/abstract_operation.h"
 #include "tensorflow/c/eager/immediate_execution_tensor_handle.h"
 #include "tensorflow/c/tensor_interface.h"
+#include "tensorflow/core/framework/cancellation.h"
 #include "tensorflow/core/framework/device_attributes.pb.h"
 #include "tensorflow/core/framework/op_def.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -65,8 +66,13 @@ class ImmediateExecutionOperation : public AbstractOperation {
   virtual const tensorflow::AbstractOpAttrs* GetOpAttrs() const = 0;
   virtual void AddAttrs(const AbstractOpAttrs* op_attrs) = 0;
 
+  virtual void SetCancellationManager(
+      CancellationManager* cancellation_manager) = 0;
+
   // Returns the stack trace set by `SetStackTrace` if exists.
   virtual absl::optional<ManagedStackTrace> GetStackTrace() = 0;
+
+  virtual void SetStepId(int64_t step_id) = 0;
 
   // For LLVM style RTTI.
   static bool classof(const AbstractOperation* ptr) {

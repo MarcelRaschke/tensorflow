@@ -39,6 +39,14 @@ constexpr char kDefaultDenylist[] = R"pb(
     algos { id: 7 tensor_ops: true }
     blas_version: "10201"
   }
+  entries {
+    hlo: "(f16[3,3,256,256]{2,1,0,3}, u8[0]{0}) custom-call(f16[2048,7,7,256]{3,2,1,0}, f16[2048,7,7,256]{3,2,1,0}), window={size=3x3 pad=1_1x1_1}, dim_labels=b01f_01io->b01f, custom_call_target=\"__cudnn$convBackwardFilter\", backend_config=\"{\\\"algorithm\\\":\\\"0\\\",\\\"tensor_ops_enabled\\\":false,\\\"conv_result_scale\\\":1,\\\"activation_mode\\\":\\\"0\\\",\\\"side_input_scale\\\":0}\""
+    cc { major: 7 }
+    cudnn_version { major: 8 minor: 2 patch: 1 } algos
+    [ { id: 0 tensor_ops: true }
+      , { id: 0 }]
+    blas_version: "11402"
+  }
 )pb";
 
 absl::Span<const stream_executor::dnn::AlgorithmDesc> GetDisabledConvAlgorithms(
@@ -56,10 +64,9 @@ absl::Span<const stream_executor::dnn::AlgorithmDesc> GetDisabledConvAlgorithms(
     std::string file_path =
         GetDebugOptionsFromFlags().xla_gpu_algorithm_denylist_path();
     if (!file_path.empty()) {
-      TF_CHECK_OK(tensorflow::ReadTextProto(tensorflow::Env::Default(),
-                                            file_path, &proto));
+      TF_CHECK_OK(tsl::ReadTextProto(tsl::Env::Default(), file_path, &proto));
     } else {
-      CHECK(tensorflow::protobuf::TextFormat::ParseFromString(
+      CHECK(tsl::protobuf::TextFormat::ParseFromString(
           std::string(kDefaultDenylist), &proto));
     }
     for (const auto& entry : proto.entries()) {
@@ -69,7 +76,7 @@ absl::Span<const stream_executor::dnn::AlgorithmDesc> GetDisabledConvAlgorithms(
                     entry.cc().minor(), entry.cudnn_version().major(),
                     entry.cudnn_version().minor(),
                     entry.cudnn_version().patch(), entry.blas_version())]
-            .push_back({algo.id(), algo.tensor_ops()});
+            .push_back({algo.id(), algo.tensor_ops(), std::nullopt});
       }
     }
     return list;

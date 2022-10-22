@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/xnnpack/softmax_tester.h"
 
+#include <algorithm>
 #include <array>
 #include <cstdint>
 #include <functional>
@@ -72,23 +73,22 @@ void SoftmaxTester::Test(TfLiteDelegate* delegate) const {
 
   ASSERT_EQ(delegate_interpreter->ModifyGraphWithDelegate(delegate), kTfLiteOk);
 
-  float* default_input_data = default_interpreter->typed_tensor<float>(
-      default_interpreter->inputs()[0]);
+  float* default_input_data = default_interpreter->typed_input_tensor<float>(0);
   std::generate(default_input_data, default_input_data + Size(),
                 std::ref(input_rng));
 
-  float* delegate_input_data = delegate_interpreter->typed_tensor<float>(
-      delegate_interpreter->inputs()[0]);
+  float* delegate_input_data =
+      delegate_interpreter->typed_input_tensor<float>(0);
   std::copy(default_input_data, default_input_data + Size(),
             delegate_input_data);
 
   ASSERT_EQ(default_interpreter->Invoke(), kTfLiteOk);
   ASSERT_EQ(delegate_interpreter->Invoke(), kTfLiteOk);
 
-  float* default_output_data = default_interpreter->typed_tensor<float>(
-      default_interpreter->outputs()[0]);
-  float* delegate_output_data = delegate_interpreter->typed_tensor<float>(
-      delegate_interpreter->outputs()[0]);
+  float* default_output_data =
+      default_interpreter->typed_output_tensor<float>(0);
+  float* delegate_output_data =
+      delegate_interpreter->typed_output_tensor<float>(0);
 
   for (size_t i = 0; i < Size(); i++) {
     ASSERT_NEAR(default_output_data[i], delegate_output_data[i],

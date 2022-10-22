@@ -17,6 +17,7 @@ limitations under the License.
 
 #include <stddef.h>
 
+#include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
@@ -62,16 +63,18 @@ class SimpleTestGraph : public GraphInfo {
   }
   size_t num_tensors() const override { return tensors_.size(); }
   TfLiteTensor* tensor(size_t index) override { return &tensors_[index]; }
+  TfLiteTensor* tensors() override { return tensors_.data(); }
   const std::vector<int>& inputs() const override { return inputs_; }
   const std::vector<int>& outputs() const override { return outputs_; }
   const std::vector<int>& variables() const override { return variables_; }
 
-  void AddNode(const std::vector<int>& inputs,
-               const std::vector<int>& outputs) {
+  void AddNode(const std::vector<int>& inputs, const std::vector<int>& outputs,
+               bool might_have_side_effect = false) {
     nodes_.push_back(TfLiteNode());
     TfLiteNode& node = nodes_.back();
     node.inputs = ConvertVector(inputs);
     node.outputs = ConvertVector(outputs);
+    node.might_have_side_effect = might_have_side_effect;
   }
 
   void AddTensors(int count) { tensors_.resize(count + tensors_.size()); }
@@ -99,8 +102,22 @@ void PartitionGraph(const SimpleTestGraph& graph,
                     std::vector<NodeSubset>* subgraphs) {
   TfLiteIntArray* nodes_to_partition_int_array =
       ConvertVector(nodes_to_partition);
-  PartitionGraphIntoIndependentNodeSubsets(&graph, nodes_to_partition_int_array,
-                                           subgraphs);
+  ASSERT_EQ(PartitionGraphIntoIndependentNodeSubsets(
+                &graph, nodes_to_partition_int_array, subgraphs),
+            kTfLiteOk);
+  TfLiteIntArrayFree(nodes_to_partition_int_array);
+}
+
+// Same as above, but with explicitly specified control dependencies.
+void PartitionGraph(const SimpleTestGraph& graph,
+                    const std::vector<int>& nodes_to_partition,
+                    std::vector<NodeSubset>* subgraphs,
+                    const std::vector<std::pair<int, int>>& control_deps) {
+  TfLiteIntArray* nodes_to_partition_int_array =
+      ConvertVector(nodes_to_partition);
+  ASSERT_EQ(PartitionGraphIntoIndependentNodeSubsets(
+                &graph, nodes_to_partition_int_array, control_deps, subgraphs),
+            kTfLiteOk);
   TfLiteIntArrayFree(nodes_to_partition_int_array);
 }
 
@@ -342,11 +359,89 @@ TEST(PartitionTest, Nodes3PartitionNodes2) {
       {expected_subgraph0, expected_subgraph1, expected_subgraph2});
 }
 
+// Test correct partition for graph with control dependency.
+// Graph for test is like
+// varhandleOp -> ReadVariableOp -> Add -> AssignVariableOp
+//             |_________________________^    ^^
+//             |------------------------->ReadVariableOp -> (Output)
+// ^^ is control dependency, in this case we don't want to invoke the
+// last ReadVariableOp before AssignVariableOp finishes executing.
+// '>' and '^' represents data dependency.
+TEST(PartitionTest, Nodes4PartitionNodes3_WithControlDependency) {
+  SimpleTestGraph graph;
+  // Construct graph.
+  {
+    graph.AddTensors(5);
+    graph.AddNode({0}, {1}, true);
+    graph.AddNode({1}, {2}, true);
+    graph.AddNode({2}, {3}, false);
+    graph.AddNode({1, 3}, {}, true);
+    graph.AddNode({1}, {4}, true);
+  }
+  graph.SetInputsAndOutputs({0}, {4});
+  std::vector<int> nodes_to_partition = {0, 1, 3, 4};
+  std::vector<NodeSubset> generated_subgraphs;
+  PartitionGraph(graph, nodes_to_partition, &generated_subgraphs);
+
+  NodeSubset expected_subgraph0;
+  expected_subgraph0.type = NodeSubset::kTfPartition;
+  expected_subgraph0.nodes = {0, 1};
+  expected_subgraph0.input_tensors = {0};
+  expected_subgraph0.output_tensors = {1, 2};
+  NodeSubset expected_subgraph1;
+  expected_subgraph1.type = NodeSubset::kTfNonPartition;
+  expected_subgraph1.nodes = {2};
+  expected_subgraph1.input_tensors = {2};
+  expected_subgraph1.output_tensors = {3};
+  NodeSubset expected_subgraph2;
+  expected_subgraph2.type = NodeSubset::kTfPartition;
+  expected_subgraph2.nodes = {3, 4};
+  expected_subgraph2.input_tensors = {1, 3};
+  expected_subgraph2.output_tensors = {4};
+  CheckPartitionSubgraphs(
+      generated_subgraphs,
+      {expected_subgraph0, expected_subgraph1, expected_subgraph2});
+}
+
+// This is the same as Nodes4PartitionNodes3_WithControlDependency,
+// but the control dependency is given by an external edge set.
+TEST(PartitionTest, Nodes4PartitionNodes3_WithExternalControlDependency) {
+  SimpleTestGraph graph;
+  // Construct graph.
+  {
+    graph.AddTensors(5);
+    graph.AddNode({0}, {1});
+    graph.AddNode({1}, {2});
+    graph.AddNode({2}, {3});
+    graph.AddNode({1, 3}, {});
+    graph.AddNode({1}, {4});
+  }
+  graph.SetInputsAndOutputs({0}, {4});
+  std::vector<int> nodes_to_partition = {0, 1, 3, 4};
+  std::vector<NodeSubset> generated_subgraphs;
+
+  // Nodes {0,1,3,4} are stateful.
+  PartitionGraph(graph, nodes_to_partition, &generated_subgraphs,
+                 {{0, 1}, {1, 3}, {3, 4}});
+  NodeSubset expected_subgraph0;
+  expected_subgraph0.type = NodeSubset::kTfPartition;
+  expected_subgraph0.nodes = {0, 1};
+  expected_subgraph0.input_tensors = {0};
+  expected_subgraph0.output_tensors = {1, 2};
+  NodeSubset expected_subgraph1;
+  expected_subgraph1.type = NodeSubset::kTfNonPartition;
+  expected_subgraph1.nodes = {2};
+  expected_subgraph1.input_tensors = {2};
+  expected_subgraph1.output_tensors = {3};
+  NodeSubset expected_subgraph2;
+  expected_subgraph2.type = NodeSubset::kTfPartition;
+  expected_subgraph2.nodes = {3, 4};
+  expected_subgraph2.input_tensors = {1, 3};
+  expected_subgraph2.output_tensors = {4};
+  CheckPartitionSubgraphs(
+      generated_subgraphs,
+      {expected_subgraph0, expected_subgraph1, expected_subgraph2});
+}
+
 }  // namespace
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

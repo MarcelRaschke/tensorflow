@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/lite/delegates/gpu/common/tasks/convolution_transposed.h"
 
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -22,30 +23,34 @@ limitations under the License.
 #include "absl/strings/substitute.h"
 #include "tensorflow/lite/delegates/gpu/common/shape.h"
 #include "tensorflow/lite/delegates/gpu/common/status.h"
-#include "tensorflow/lite/delegates/gpu/common/task/storage_type_util.h"
 #include "tensorflow/lite/delegates/gpu/common/task/weights_layout.h"
 #include "tensorflow/lite/delegates/gpu/common/task/work_group_picking.h"
 
 namespace tflite {
 namespace gpu {
+namespace {
+bool UseBufferForWeights(const GpuInfo& gpu_info) {
+  return gpu_info.IsMali() || gpu_info.IsApple() || gpu_info.IsAMD();
+}
+}  // namespace
 
 ConvolutionTransposed::ConvolutionTransposed(
     const OperationDef& definition, const ConvolutionTransposedAttributes& attr,
-    const GpuInfo& gpu_info, bool weights_are_buffer)
+    const GpuInfo& gpu_info)
     : GPUOperation(definition),
       stride_(attr.stride.w, attr.stride.h, 1, 1),
       block_size_(2, 2, 1, 2) {
-  if (weights_are_buffer) {
+  if (UseBufferForWeights(gpu_info)) {
     if (gpu_info.IsApple()) {
-      weights_layout_ = WeightsLayout::kOHWIOGroupO4I4;
+      weights_layout_ = WeightsLayout::kOSpatialIOGroupO4I4;
     } else {
-      weights_layout_ = WeightsLayout::kOHWIOGroupI4O4;
+      weights_layout_ = WeightsLayout::kOSpatialIOGroupI4O4;
     }
   } else {
     if (gpu_info.IsApple()) {
-      weights_layout_ = WeightsLayout::k2DX4O4YIsHWIAndXIsOOGroupI4;
+      weights_layout_ = WeightsLayout::k2DX4O4YIsSpatialIAndXIsOOGroupI4;
     } else {
-      weights_layout_ = WeightsLayout::k2DX4I4YIsHWIAndXIsOOGroupO4;
+      weights_layout_ = WeightsLayout::k2DX4I4YIsSpatialIAndXIsOOGroupO4;
     }
   }
   const bool is_f16 = definition.precision == CalculationsPrecision::F16;
@@ -55,6 +60,7 @@ ConvolutionTransposed::ConvolutionTransposed(
     } else {
       block_size_ = is_f16 ? int4(2, 2, 1, 2) : int4(2, 2, 1, 1);
     }
+    compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
   }
   const int dst_depth = DivideRoundUp(attr.weights.shape.o, 4);
   if (dst_depth == 1 || dst_depth == 3) {
@@ -70,28 +76,26 @@ ConvolutionTransposed::ConvolutionTransposed(
   args_.AddInt("padding_y", attr.padding.prepended.h);
   args_.AddInt("kernel_size_x", attr.weights.shape.w);
   args_.AddInt("kernel_size_y", attr.weights.shape.h);
-  code_ = GenerateConvolutionTransposedCode(definition_, gpu_info,
-                                            weights_are_buffer, block_size_);
+  code_ = GenerateConvolutionTransposedCode(definition_, gpu_info, block_size_);
 }
 
 ConvolutionTransposed::ConvolutionTransposed(
     const OperationDef& definition,
-    const ConvolutionTransposed3DAttributes& attr, const GpuInfo& gpu_info,
-    bool weights_are_buffer)
+    const ConvolutionTransposed3DAttributes& attr, const GpuInfo& gpu_info)
     : GPUOperation(definition),
       stride_(attr.stride.w, attr.stride.h, attr.stride.d, 1),
       block_size_(2, 2, 1, 2) {
-  if (weights_are_buffer) {
+  if (UseBufferForWeights(gpu_info)) {
     if (gpu_info.IsApple()) {
-      weights_layout_ = WeightsLayout::kOHWIOGroupO4I4;
+      weights_layout_ = WeightsLayout::kOSpatialIOGroupO4I4;
     } else {
-      weights_layout_ = WeightsLayout::kOHWIOGroupI4O4;
+      weights_layout_ = WeightsLayout::kOSpatialIOGroupI4O4;
     }
   } else {
     if (gpu_info.IsApple()) {
-      weights_layout_ = WeightsLayout::k2DX4O4YIsHWIAndXIsOOGroupI4;
+      weights_layout_ = WeightsLayout::k2DX4O4YIsSpatialIAndXIsOOGroupI4;
     } else {
-      weights_layout_ = WeightsLayout::k2DX4I4YIsHWIAndXIsOOGroupO4;
+      weights_layout_ = WeightsLayout::k2DX4I4YIsSpatialIAndXIsOOGroupO4;
     }
   }
   const bool is_f16 = definition.precision == CalculationsPrecision::F16;
@@ -101,6 +105,7 @@ ConvolutionTransposed::ConvolutionTransposed(
     } else {
       block_size_ = is_f16 ? int4(2, 2, 1, 2) : int4(2, 2, 1, 1);
     }
+    compiler_options_.push_back(CompilerOptions::kClFastRelaxedMath);
   }
   const int dst_depth = DivideRoundUp(attr.weights.shape.o, 4);
   if (dst_depth == 1 || dst_depth == 3) {
@@ -120,33 +125,28 @@ ConvolutionTransposed::ConvolutionTransposed(
   args_.AddInt("kernel_size_y", attr.weights.shape.h);
   args_.AddInt("kernel_size_z", attr.weights.shape.d);
   args_.AddInt("grid_size_y");
-  code_ = GenerateConvolutionTransposedCode(definition_, gpu_info,
-                                            weights_are_buffer, block_size_);
+  code_ = GenerateConvolutionTransposedCode(definition_, gpu_info, block_size_);
 }
 
 std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
     const OperationDef& op_def, const GpuInfo& gpu_info,
-    bool weights_are_buffer, const int4& block_size) {
-  auto src_desc = op_def.src_tensors[0];
-  src_desc.SetAddressMode(AddressMode::kZero);
-  AddSrcTensor("src_tensor", src_desc);
+    const int4& block_size) {
+  AddSrcTensor("src_tensor", op_def.src_tensors[0]);
   AddDstTensor("dst_tensor", op_def.dst_tensors[0]);
 
   if (op_def.src_tensors.size() != 1) {
     // dynamic weights
-    if (weights_layout_ == WeightsLayout::kOHWIOGroupI4O4 ||
-        weights_layout_ == WeightsLayout::kOHWIOGroupO4I4) {
+    if (weights_layout_ == WeightsLayout::kOSpatialIOGroupI4O4 ||
+        weights_layout_ == WeightsLayout::kOSpatialIOGroupO4I4) {
       BufferDescriptor desc;
-      desc.element_type = op_def.src_tensors[1].data_type;
+      desc.element_type = op_def.src_tensors[1].GetDataType();
       desc.element_size = 16;
       desc.memory_type = MemoryType::GLOBAL;
       AddSrcBuffer("weights", desc);
     } else {
       for (int i = 0; i < 4; ++i) {
-        Texture2DDescriptor desc;
-        desc.element_type = op_def.src_tensors[1 + i].data_type;
         const std::string name = "weights" + std::to_string(i);
-        AddSrcTexture2D("weights" + std::to_string(i), desc);
+        AddSrcTensor(name, definition_.src_tensors[1 + i]);
       }
     }
   }
@@ -155,28 +155,45 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
 
   std::string c;
 
+  const bool weights_are_buffer = UseBufferForWeights(gpu_info);
   for (int s = 0; s < block_size.w; ++s) {
-    const std::string f0 = weights_are_buffer ? "FLT16_0123(weights_cache[" +
-                                                    std::to_string(s) + "])"
-                                              : "f" + std::to_string(s * 4 + 0);
-    const std::string f1 = weights_are_buffer ? "FLT16_4567(weights_cache[" +
-                                                    std::to_string(s) + "])"
-                                              : "f" + std::to_string(s * 4 + 1);
-    const std::string f2 = weights_are_buffer ? "FLT16_89ab(weights_cache[" +
-                                                    std::to_string(s) + "])"
-                                              : "f" + std::to_string(s * 4 + 2);
-    const std::string f3 = weights_are_buffer ? "FLT16_cdef(weights_cache[" +
-                                                    std::to_string(s) + "])"
-                                              : "f" + std::to_string(s * 4 + 3);
+    std::string f0, f1, f2, f3;
+    if (weights_are_buffer) {
+      if (gpu_info.SupportsPointersInKernels()) {
+        f0 = "FLT16_0123(weights_cache[" + std::to_string(s) + "])";
+        f1 = "FLT16_4567(weights_cache[" + std::to_string(s) + "])";
+        f2 = "FLT16_89ab(weights_cache[" + std::to_string(s) + "])";
+        f3 = "FLT16_cdef(weights_cache[" + std::to_string(s) + "])";
+      } else {
+        f0 = "FLT16_0123(flt16val)";
+        f1 = "FLT16_4567(flt16val)";
+        f2 = "FLT16_89ab(flt16val)";
+        f3 = "FLT16_cdef(flt16val)";
+      }
+    } else {
+      f0 = "f" + std::to_string(s * 4 + 0);
+      f1 = "f" + std::to_string(s * 4 + 1);
+      f2 = "f" + std::to_string(s * 4 + 2);
+      f3 = "f" + std::to_string(s * 4 + 3);
+    }
+    bool use_fma = gpu_info.IsAMD() && gpu_info.IsApiOpenCl();
     if (GetWeightsDescription().IsI4O4()) {
       switch (op_def.precision) {
         case CalculationsPrecision::F32:
         case CalculationsPrecision::F16:
-          c += "#define CONV" + std::to_string(s) + "(R, S)    \\\n";
-          c += "R += S.x * " + f0 + "; \\\n";
-          c += "R += S.y * " + f1 + "; \\\n";
-          c += "R += S.z * " + f2 + "; \\\n";
-          c += "R += S.w * " + f3 + ";   \n";
+          if (use_fma) {
+            c += "#define CONV" + std::to_string(s) + "(R, S)    \\\n";
+            c += "R = fma(" + f0 + ", S.x, R); \\\n";
+            c += "R = fma(" + f1 + ", S.y, R); \\\n";
+            c += "R = fma(" + f2 + ", S.z, R); \\\n";
+            c += "R = fma(" + f3 + ", S.w, R);   \n";
+          } else {
+            c += "#define CONV" + std::to_string(s) + "(R, S)    \\\n";
+            c += "R += S.x * " + f0 + "; \\\n";
+            c += "R += S.y * " + f1 + "; \\\n";
+            c += "R += S.z * " + f2 + "; \\\n";
+            c += "R += S.w * " + f3 + ";   \n";
+          }
           break;
         case CalculationsPrecision::F32_F16:
           c += "#define CONV" + std::to_string(s) + "(R, S) \\\n";
@@ -222,7 +239,7 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
     const std::vector<std::string> coords{x, y, z};
     for (int i = 0; i < axes.size(); ++i) {
       const auto& axis = axes[i];
-      if (src_def.HasAxis(axis) && !src_def.SupportsZeroClamp(axis) &&
+      if (src_def.HasAxis(axis) && !src_def.SupportsZeroClamp(axis, gpu_info) &&
           block_size[i] != 1) {
         if (!check.empty()) {
           check += " && ";
@@ -327,7 +344,7 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
     for (int z = 0; z < block_size.z; ++z) {
       const std::string zindex = std::to_string(z);
       c += "    int sz" + zindex + " = src_z + " + zindex + ";\n";
-      if (!src_def.SupportsZeroClamp(Axis::DEPTH)) {
+      if (!src_def.SupportsZeroClamp(Axis::DEPTH, gpu_info)) {
         c += "    bool in_z" + zindex + " = sz" + zindex + " >= 0 && sz" +
              zindex + " < args.src_tensor.Depth();\n";
         if (!src_def.CanReadOutOfBorder(Axis::DEPTH)) {
@@ -336,7 +353,8 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
         }
       }
     }
-    if (block_size.z == 1 && !src_def.SupportsZeroClamp(Axis::DEPTH)) {
+    if (block_size.z == 1 &&
+        !src_def.SupportsZeroClamp(Axis::DEPTH, gpu_info)) {
       c += "    if (!in_z0) continue;\n";
     }
     c += "    int kernel_z = kernel_first_dst_z - src_as_dst_z;\n";
@@ -354,7 +372,7 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
     const std::string src_y =
         src_def.HasAxis(Axis::DEPTH) ? "src_y_copy" : "src_y";
     c += "    int sy" + yindex + " = " + src_y + " + " + yindex + ";\n";
-    if (!src_def.SupportsZeroClamp(Axis::HEIGHT)) {
+    if (!src_def.SupportsZeroClamp(Axis::HEIGHT, gpu_info)) {
       c += "    bool in_y" + yindex + " = sy" + yindex + " >= 0 && sy" +
            yindex + " < args.src_tensor.Height();\n";
       if (!src_def.CanReadOutOfBorder(Axis::HEIGHT)) {
@@ -363,7 +381,7 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
       }
     }
   }
-  if (block_size.y == 1 && !src_def.SupportsZeroClamp(Axis::HEIGHT)) {
+  if (block_size.y == 1 && !src_def.SupportsZeroClamp(Axis::HEIGHT, gpu_info)) {
     c += "      if (!in_y0) continue;\n";
   }
   c += "    int kernel_y = kernel_first_dst_y - src_as_dst_y;\n";
@@ -375,7 +393,7 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
   for (int x = 0; x < block_size.x; ++x) {
     const std::string xindex = std::to_string(x);
     c += "      int sx" + xindex + " = src_x_copy + " + xindex + ";\n";
-    if (!src_def.SupportsZeroClamp(Axis::WIDTH)) {
+    if (!src_def.SupportsZeroClamp(Axis::WIDTH, gpu_info)) {
       c += "      bool in_x" + xindex + " = sx" + xindex + " >= 0 && sx" +
            xindex + " < args.src_tensor.Width();\n";
       if (!src_def.CanReadOutOfBorder(Axis::WIDTH)) {
@@ -384,7 +402,7 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
       }
     }
   }
-  if (block_size.x == 1 && !src_def.SupportsZeroClamp(Axis::WIDTH)) {
+  if (block_size.x == 1 && !src_def.SupportsZeroClamp(Axis::WIDTH, gpu_info)) {
     c += "      if (!in_x0) continue;\n";
   }
   for (int z = 0; z < block_size.z; ++z) {
@@ -400,20 +418,20 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
           coords += ", sz" + zind;
         }
         if (src_def.IsLinear()) {
-          c += "      args.src_tensor.GetAddress(addr" + id + ", " + coords +
-               ", 0);\n";
-        }
-        if (src_def.ReturnsZeroForNegOneRead()) {
-          c += "      addr" + id + " = select(-1, addr" + id + ", (" + check +
-               "));\n";
-          c += "      int ds" + id +
-               " = select(0, args.src_tensor.SliceStride(), (" + check +
-               "));\n";
+          c += "      int addr" + id + " = args.src_tensor.GetAddress(" +
+               coords + ", 0);\n";
+          if (src_def.ReturnsZeroForNegOneRead(gpu_info)) {
+            c += "      addr" + id + " = select(-1, addr" + id + ", (" + check +
+                 "));\n";
+            c += "      int ds" + id +
+                 " = select(0, args.src_tensor.SliceStride(), (" + check +
+                 "));\n";
+          }
         }
       }
     }
   }
-  if (src_def.storage_type == TensorStorageType::BUFFER) {
+  if (src_def.IsLinear() && !src_def.ReturnsZeroForNegOneRead(gpu_info)) {
     c += "      int ds = args.src_tensor.SliceStride();\n";
   }
   c += "      int kernel_x = kernel_first_dst_x - src_as_dst_x;\n";
@@ -449,7 +467,7 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
           }
           address += ", s";
         }
-        if (src_def.ReturnsZeroForNegOneRead()) {
+        if (src_def.ReturnsZeroForNegOneRead(gpu_info)) {
           c += "        FLT4 src" + id + " = args.src_tensor.Read(" + address +
                "); " + address + " += ds" + id + ";\n";
         } else {
@@ -457,7 +475,8 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
           if (!check.empty()) {
             if (conditional_read) {
               c += "        FLT4 src" + id + " = " + check +
-                   " ? args.src_tensor.Read(" + address + ") : (FLT4)(0.0f);\n";
+                   " ? args.src_tensor.Read(" + address +
+                   ") : INIT_FLT4(0.0f);\n";
             } else {
               c += "        FLT4 src" + id + " = args.src_tensor.Read(" +
                    address + ") * INIT_FLT(" + check + ");\n";
@@ -474,9 +493,10 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
     }
   }
   if (weights_are_buffer) {
-    c += "        __global FLT16* weights_cache = "
-         "args.weights.GetPtr(f_offset);\n";
-    c += "        f_offset += " + std::to_string(block_size.w) + ";\n";
+    if (gpu_info.SupportsPointersInKernels()) {
+      c += "        __global FLT16* weights_cache = "
+           "args.weights.GetPtr(f_offset);\n";
+    }
   } else {
     for (int s = 0; s < block_size.w; ++s) {
       c += absl::Substitute(
@@ -489,7 +509,14 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
     }
     c += "        x_c++;\n";
   }
+  if (weights_are_buffer && !gpu_info.SupportsPointersInKernels()) {
+    c += "      FLT16 flt16val;\n";
+  }
   for (int s = 0; s < block_size.w; ++s) {
+    if (weights_are_buffer && !gpu_info.SupportsPointersInKernels()) {
+      c += "        flt16val = args.weights.Read(f_offset + " +
+           std::to_string(s) + ");\n";
+    }
     const std::string sind = std::to_string(s);
     for (int z = 0; z < block_size.z; ++z) {
       const std::string zind = std::to_string(z);
@@ -503,6 +530,9 @@ std::string ConvolutionTransposed::GenerateConvolutionTransposedCode(
         }
       }
     }
+  }
+  if (weights_are_buffer) {
+    c += "        f_offset += " + std::to_string(block_size.w) + ";\n";
   }
   c += "      }\n";
   c += "    }\n";
@@ -578,69 +608,58 @@ void ConvolutionTransposed::GetPossibleKernelWorkGroups(
 ConvolutionTransposed CreateConvolutionTransposed(
     const GpuInfo& gpu_info, const OperationDef& definition,
     const ConvolutionTransposedAttributes& attr) {
-  const bool weights_are_buffer = gpu_info.IsMali() || gpu_info.IsApple();
-  ConvolutionTransposed result(definition, attr, gpu_info, weights_are_buffer);
-  result.UploadWeights(attr.weights, weights_are_buffer);
+  ConvolutionTransposed result(definition, attr, gpu_info);
+  result.UploadWeights(attr.weights, UseBufferForWeights(gpu_info));
 
-  TensorLinearDescriptor desc;
-  desc.storage_type =
-      DeduceLinearStorageType(definition.GetPrimaryStorageType());
-  desc.element_type = definition.GetDataType();
-  desc.UploadLinearData(attr.bias);
-  result.args_.AddObject(
-      "biases", absl::make_unique<TensorLinearDescriptor>(std::move(desc)));
+  TensorDescriptor bias_tensor_desc = CreateConstantLinearTensorDescriptor(
+      gpu_info, definition.src_tensors[0].GetDataType(), attr.bias);
+  result.args_.AddObject("biases", std::make_unique<TensorDescriptor>(
+                                       std::move(bias_tensor_desc)));
   return result;
 }
 
 ConvolutionTransposed CreateConvolutionTransposed3D(
     const GpuInfo& gpu_info, const OperationDef& definition,
     const ConvolutionTransposed3DAttributes& attr) {
-  const bool weights_are_buffer = gpu_info.IsMali() || gpu_info.IsApple();
-  ConvolutionTransposed result(definition, attr, gpu_info, weights_are_buffer);
-  result.UploadWeights(attr.weights, weights_are_buffer);
+  ConvolutionTransposed result(definition, attr, gpu_info);
+  result.UploadWeights(attr.weights, UseBufferForWeights(gpu_info));
 
-  TensorLinearDescriptor desc;
-  desc.storage_type =
-      DeduceLinearStorageType(definition.GetPrimaryStorageType());
-  desc.element_type = definition.GetDataType();
-  desc.UploadLinearData(attr.bias);
-  result.args_.AddObject(
-      "biases", absl::make_unique<TensorLinearDescriptor>(std::move(desc)));
+  TensorDescriptor bias_tensor_desc = CreateConstantLinearTensorDescriptor(
+      gpu_info, definition.src_tensors[0].GetDataType(), attr.bias);
+  result.args_.AddObject("biases", std::make_unique<TensorDescriptor>(
+                                       std::move(bias_tensor_desc)));
   return result;
 }
 
 ConvolutionTransposed CreateConvolutionTransposedDynamicWeights(
     const GpuInfo& gpu_info, const OperationDef& definition,
     const ConvolutionTransposedAttributes& attr) {
-  const bool weights_are_buffer = gpu_info.IsMali();
   OperationDef new_def = definition;
   new_def.src_tensors = {
       definition.src_tensors[0]};  // leaving only src_tensor def, weights defs
                                    // will be added later
   const DataType weights_type = definition.GetDataType();
-  if (weights_are_buffer) {
+  if (UseBufferForWeights(gpu_info)) {
     // add 1 src_tensor(buffer) for weights
     new_def.src_tensors.push_back(
         {weights_type, TensorStorageType::BUFFER, Layout::HWC});
   } else {
     // add 4 src_tensors(4X textures 2d) for weights
     new_def.src_tensors.push_back(
-        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HWC});
+        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HW});
     new_def.src_tensors.push_back(
-        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HWC});
+        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HW});
     new_def.src_tensors.push_back(
-        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HWC});
+        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HW});
     new_def.src_tensors.push_back(
-        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HWC});
+        {weights_type, TensorStorageType::TEXTURE_2D, Layout::HW});
   }
-  ConvolutionTransposed result(new_def, attr, gpu_info, weights_are_buffer);
+  ConvolutionTransposed result(new_def, attr, gpu_info);
 
-  TensorLinearDescriptor desc;
-  desc.storage_type = DeduceLinearStorageType(new_def.GetPrimaryStorageType());
-  desc.element_type = new_def.GetDataType();
-  desc.UploadLinearData(attr.bias);
-  result.args_.AddObject(
-      "biases", absl::make_unique<TensorLinearDescriptor>(std::move(desc)));
+  TensorDescriptor bias_tensor_desc = CreateConstantLinearTensorDescriptor(
+      gpu_info, definition.src_tensors[0].GetDataType(), attr.bias);
+  result.args_.AddObject("biases", std::make_unique<TensorDescriptor>(
+                                       std::move(bias_tensor_desc)));
   return result;
 }
 

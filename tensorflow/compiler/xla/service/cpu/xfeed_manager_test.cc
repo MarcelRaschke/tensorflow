@@ -19,11 +19,11 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/cpu/cpu_runtime.h"
 #include "tensorflow/compiler/xla/shape_util.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/lib/core/threadpool.h"
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/test.h"
+#include "tensorflow/tsl/lib/core/status_test_util.h"
+#include "tensorflow/tsl/platform/env.h"
+#include "tensorflow/tsl/platform/logging.h"
+#include "tensorflow/tsl/platform/test.h"
+#include "tensorflow/tsl/platform/threadpool.h"
 
 namespace xla {
 namespace {
@@ -32,23 +32,23 @@ class InfeedManagerTest : public ::testing::Test {};
 
 class TestInfeedBuffer : public cpu::runtime::XfeedBuffer {
  public:
-  explicit TestInfeedBuffer(int32 length, bool expect_shape_match = true)
+  explicit TestInfeedBuffer(int32_t length, bool expect_shape_match = true)
       : shape_(ShapeUtil::MakeShape(U8, {length})),
         done_called_(false),
         length_(length),
         expect_shape_match_(expect_shape_match) {}
   ~TestInfeedBuffer() override { EXPECT_TRUE(done_called_); }
 
-  int32 length() override { return length_; }
+  int32_t length() override { return length_; }
   void* data() override { return nullptr; }
   void Done(StatusOr<Shape> shape) override {
     CHECK(!done_called_);
     done_called_ = true;
     TF_ASSERT_OK(shape.status());
-    EXPECT_EQ(expect_shape_match_, ShapeUtil::Equal(shape_, shape.ValueOrDie()))
+    EXPECT_EQ(expect_shape_match_, ShapeUtil::Equal(shape_, shape.value()))
         << "want " << ShapeUtil::HumanString(shape_) << " "
         << (expect_shape_match_ ? "==" : "!=") << " "
-        << ShapeUtil::HumanString(shape.ValueOrDie());
+        << ShapeUtil::HumanString(shape.value());
   }
 
   const Shape& shape() const { return shape_; }
@@ -56,15 +56,15 @@ class TestInfeedBuffer : public cpu::runtime::XfeedBuffer {
  private:
   Shape shape_;
   bool done_called_;
-  int32 length_;
+  int32_t length_;
   bool expect_shape_match_;
 };
 
 // Performs the acquire/release sequence on the infeed, as the generated CPU
 // code would in the process of executing the infeed operation.
-void ProcessNextBuffer(int32 length) {
+void ProcessNextBuffer(int32_t length) {
   auto shape = ShapeUtil::MakeShape(U8, {length});
-  string bytes = shape.SerializeAsString();
+  std::string bytes = shape.SerializeAsString();
   void* buffer = __xla_cpu_runtime_AcquireInfeedBufferForDequeue(
       /*run_options=*/nullptr, length, bytes.data(), bytes.size());
   __xla_cpu_runtime_ReleaseInfeedBufferAfterDequeue(
@@ -73,8 +73,8 @@ void ProcessNextBuffer(int32 length) {
 
 // Performs the acquire/release sequence on the outfeed, as the generated CPU
 // code would in the process of executing the outfeed operation.
-void ProcessNextOutfeedBuffer(int32 length, const Shape& shape) {
-  string bytes = shape.SerializeAsString();
+void ProcessNextOutfeedBuffer(int32_t length, const Shape& shape) {
+  std::string bytes = shape.SerializeAsString();
   void* buffer = __xla_cpu_runtime_AcquireOutfeedBufferForPopulation(
       /*run_options=*/nullptr, length, bytes.data(), bytes.size());
   __xla_cpu_runtime_ReleaseOutfeedBufferAfterPopulation(
@@ -106,17 +106,17 @@ TEST_F(InfeedManagerTest, SingleThreadedInterleaved) {
 }
 
 TEST_F(InfeedManagerTest, MultiThreaded) {
-  tensorflow::thread::ThreadPool pool(tensorflow::Env::Default(), "test", 2);
+  tsl::thread::ThreadPool pool(tsl::Env::Default(), "test", 2);
 
   cpu::runtime::XfeedManager* xfeed = cpu::runtime::GetXfeedManager(0);
 
-  const int32 length = 64;
+  const int32_t length = 64;
 
   pool.Schedule([length, &xfeed]() {
     // Spin for 100 milliseconds
-    int64 start_micros = tensorflow::Env::Default()->NowMicros();
+    int64_t start_micros = tsl::Env::Default()->NowMicros();
     while (true) {
-      int64 end_micros = tensorflow::Env::Default()->NowMicros();
+      int64_t end_micros = tsl::Env::Default()->NowMicros();
       if ((end_micros - start_micros) >= 100000) {  // 100 ms
         break;
       }

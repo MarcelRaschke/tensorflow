@@ -13,9 +13,10 @@ See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
 
+#include <memory>
+#include <utility>
 #include <vector>
 
-#include "absl/memory/memory.h"
 #include "tensorflow/compiler/xla/client/client_library.h"
 #include "tensorflow/compiler/xla/client/local_client.h"
 #include "tensorflow/compiler/xla/literal.h"
@@ -28,7 +29,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
 #include "tensorflow/compiler/xla/tests/literal_test_util.h"
 #include "tensorflow/compiler/xla/tests/verified_hlo_module.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/tsl/lib/core/status_test_util.h"
 
 namespace xla {
 namespace {
@@ -43,7 +44,7 @@ class BufferDonationTest : public HloTestBase {
  public:
   BufferDonationTest() {
     client_ = ClientLibrary::LocalClientOrDie();
-    backend_ = &client_->backend();
+    backend_ = client_->mutable_backend();
     platform_ = backend_->platform();
     executor_ = backend_->default_stream_executor();
     TF_CHECK_OK(executor_->Init());
@@ -52,7 +53,7 @@ class BufferDonationTest : public HloTestBase {
  protected:
   LocalClient* client_;
   se::Platform* platform_;
-  const Backend* backend_;
+  Backend* backend_;
   se::StreamExecutor* executor_;
 
   // If `donate_arguments` is `true` gives up ownership of the buffers used for
@@ -62,6 +63,7 @@ class BufferDonationTest : public HloTestBase {
                    absl::Span<bool const> donate_arguments,
                    absl::Span<bool const> expected_runtime_aliasing,
                    const Literal& expected, std::string expected_failure = "") {
+    UpdateEntryComputationLayout(hlo_module.get());
     // Create a copy of the output shape because the HLO module is std::moved
     // into the compiler and may be deallocated.
     const Shape output_shape = hlo_module->result_shape();
@@ -84,7 +86,8 @@ class BufferDonationTest : public HloTestBase {
     ExecutableRunOptions run_options;
     run_options.set_stream(&stream);
     run_options.set_allocator(&memory_allocator);
-    ServiceExecutableRunOptions service_run_options(run_options);
+    ServiceExecutableRunOptions service_run_options(run_options,
+                                                    backend_->StreamBorrower());
 
     std::vector<ExecutionInput> args;
     std::vector<ShapeTree<se::DeviceMemoryBase>> inputs_buffers;
@@ -134,7 +137,7 @@ class BufferDonationTest : public HloTestBase {
           << expected_failure;
       return;
     }
-    ExecutionOutput output = output_status.ConsumeValueOrDie();
+    ExecutionOutput output = std::move(output_status).value();
 
     se::DeviceMemoryBase result_root_buffer = output.Result().root_buffer();
     LOG(INFO) << "result allocation = " << result_root_buffer.opaque()
@@ -173,7 +176,7 @@ class BufferDonationTest : public HloTestBase {
   //   param[(s32,f32[4])] --- get-tuple-element[0] --- less-than
   //
   std::unique_ptr<HloComputation> BuildWhileConditionComputation(
-      const string& name) {
+      const std::string& name) {
     auto builder = HloComputation::Builder(name);
     auto const4 = builder.AddInstruction(
         HloInstruction::CreateConstant(LiteralUtil::CreateR0<int>(4)));
@@ -199,7 +202,7 @@ class BufferDonationTest : public HloTestBase {
   //   const1[s32] -----------------------------------------/
   //
   std::unique_ptr<HloComputation> BuildWhileBodyComputation(
-      const string& name) {
+      const std::string& name) {
     auto builder = HloComputation::Builder(name);
     auto const1 = builder.AddInstruction(
         HloInstruction::CreateConstant(LiteralUtil::CreateR0<int>(1)));

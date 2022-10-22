@@ -15,6 +15,11 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/shape.h"
 
+#include <algorithm>
+#include <ostream>
+#include <string>
+#include <vector>
+
 #include "absl/strings/str_cat.h"
 #include "absl/strings/str_join.h"
 #include "tensorflow/compiler/xla/shape_util.h"
@@ -24,7 +29,7 @@ namespace xla {
 Shape::Shape(const ShapeProto& shape_proto) {
   set_element_type(shape_proto.element_type());
   dimensions_.reserve(shape_proto.dimensions_size());
-  for (const int64 dimension : shape_proto.dimensions()) {
+  for (const int64_t dimension : shape_proto.dimensions()) {
     add_dimensions(dimension);
   }
   // A malformed proto may have different is_dynamic_dimension_size and
@@ -41,7 +46,7 @@ Shape::Shape(const ShapeProto& shape_proto) {
       LOG(WARNING) << "Malformed shape proto: is_dynamic_dimension is empty";
     }
   }
-  int64 num_dynamic_dimension_fields = std::min(
+  int64_t num_dynamic_dimension_fields = std::min(
       shape_proto.dimensions_size(), shape_proto.is_dynamic_dimension_size());
   for (int i = 0; i < num_dynamic_dimension_fields; i++) {
     dynamic_dimensions_[i] = shape_proto.is_dynamic_dimension(i);
@@ -51,7 +56,13 @@ Shape::Shape(const ShapeProto& shape_proto) {
     tuple_shapes_.emplace_back(element_shape);
   }
   if (shape_proto.has_layout()) {
-    *mutable_layout() = Layout::CreateFromProto(shape_proto.layout());
+    if (!IsArray()) {
+      LOG(ERROR) << "Malformed shape proto: element_type "
+                 << PrimitiveType_Name(element_type())
+                 << " should not have a layout.";
+    } else {
+      *mutable_layout() = Layout::CreateFromProto(shape_proto.layout());
+    }
   }
 }
 
@@ -59,7 +70,7 @@ ShapeProto Shape::ToProto() const {
   ShapeProto proto;
   proto.set_element_type(element_type_);
   proto.mutable_dimensions()->Reserve(dimensions_size());
-  for (const int64 dimension : dimensions()) {
+  for (const int64_t dimension : dimensions()) {
     proto.add_dimensions(dimension);
   }
   for (const bool dynamic : dynamic_dimensions_) {
@@ -75,11 +86,30 @@ ShapeProto Shape::ToProto() const {
   return proto;
 }
 
-string Shape::ToString(bool print_layout) const {
+std::string Shape::ToString(bool print_layout) const {
   if (print_layout) {
     return ShapeUtil::HumanStringWithLayout(*this);
   } else {
     return ShapeUtil::HumanString(*this);
+  }
+}
+
+bool Shape::IsInteger() const {
+  switch (element_type()) {
+    case PrimitiveType::S8:
+    case PrimitiveType::S16:
+    case PrimitiveType::S32:
+    case PrimitiveType::S64:
+    case PrimitiveType::U8:
+    case PrimitiveType::U16:
+    case PrimitiveType::U32:
+    case PrimitiveType::U64:
+      return true;
+    case PrimitiveType::TUPLE:
+      return absl::c_any_of(tuple_shapes_,
+                            [](const Shape& s) { return s.IsInteger(); });
+    default:
+      return false;
   }
 }
 
@@ -94,22 +124,21 @@ bool Shape::is_static() const {
   return !absl::c_any_of(dynamic_dimensions_, [](bool b) { return b; });
 }
 
-void Shape::DeleteDimension(int64 dim_to_delete) {
+void Shape::DeleteDimension(int64_t dim_to_delete) {
   CHECK(IsArray());
   CHECK_GE(dim_to_delete, 0);
   CHECK_LT(dim_to_delete, dimensions_.size());
   dimensions_.erase(dimensions_.begin() + dim_to_delete);
   dynamic_dimensions_.erase(dynamic_dimensions_.begin() + dim_to_delete);
   if (LayoutUtil::HasLayout(*this)) {
-    layout_.set_format(DENSE);
-    for (int64 i = 0; i < layout_.minor_to_major().size();) {
-      if (layout_.minor_to_major(i) == dim_to_delete) {
-        layout_.mutable_minor_to_major()->erase(
-            layout_.mutable_minor_to_major()->begin() + i);
+    for (int64_t i = 0; i < layout_->minor_to_major().size();) {
+      if (layout_->minor_to_major(i) == dim_to_delete) {
+        layout_->mutable_minor_to_major()->erase(
+            layout_->mutable_minor_to_major()->begin() + i);
         continue;
       }
-      if (layout_.minor_to_major(i) > dim_to_delete) {
-        (*layout_.mutable_minor_to_major())[i] -= 1;
+      if (layout_->minor_to_major(i) > dim_to_delete) {
+        (*layout_->mutable_minor_to_major())[i] -= 1;
       }
       ++i;
     }
@@ -154,24 +183,26 @@ bool Shape::Equal::operator()(const Shape& lhs, const Shape& rhs) {
   }
 
   if (!ignore_layout_) {
-    if (lhs.layout().format() != rhs.layout().format()) {
-      VLOG(3) << "CompareShapes: lhs layout format != rhs layout format";
-      return false;
-    }
-    if (LayoutUtil::IsDenseArray(lhs)) {
+    if (lhs.IsArray()) {
       Layout::Equal equal;
-      if (ignore_tiles_in_layout_) {
-        equal.IgnoreTiles();
-      }
-      if (ignore_element_size_in_layout_) {
-        equal.IgnoreElementSize();
-      }
-      if (ignore_memory_space_in_layout_) {
-        equal.IgnoreMemorySpace();
-      }
-      if (!equal(lhs.layout(), rhs.layout())) {
-        VLOG(3) << "CompareShapes: lhs layout != rhs layout";
-        return false;
+      if (lhs.has_layout() || rhs.has_layout()) {
+        if (!lhs.has_layout() || !rhs.has_layout()) {
+          VLOG(3) << "CompareShapes: both shapes do not have layouts";
+          return false;
+        }
+        if (ignore_tiles_in_layout_) {
+          equal.IgnoreTiles();
+        }
+        if (ignore_element_size_in_layout_) {
+          equal.IgnoreElementSize();
+        }
+        if (ignore_memory_space_in_layout_) {
+          equal.IgnoreMemorySpace();
+        }
+        if (!equal(lhs.layout(), rhs.layout())) {
+          VLOG(3) << "CompareShapes: lhs layout != rhs layout";
+          return false;
+        }
       }
     }
   }
@@ -198,7 +229,7 @@ ProgramShape::ProgramShape(const ProgramShapeProto& program_shape_proto) {
     *add_parameters() = Shape(shape_proto);
   }
   *mutable_result() = Shape(program_shape_proto.result());
-  for (const string& name : program_shape_proto.parameter_names()) {
+  for (const std::string& name : program_shape_proto.parameter_names()) {
     add_parameter_names(name);
   }
 }
@@ -209,14 +240,14 @@ ProgramShapeProto ProgramShape::ToProto() const {
     *proto.add_parameters() = shape.ToProto();
   }
   *proto.mutable_result() = result().ToProto();
-  for (const string& name : parameter_names()) {
+  for (const std::string& name : parameter_names()) {
     proto.add_parameter_names(name);
   }
   return proto;
 }
 
-string ProgramShape::ToString() const {
-  std::vector<string> parameter_strings(parameters_size());
+std::string ProgramShape::ToString() const {
+  std::vector<std::string> parameter_strings(parameters_size());
   for (int i = 0; i < parameters_size(); ++i) {
     parameter_strings[i] = absl::StrCat(
         i < parameter_names_size() ? parameter_names(i) : "(unknown)", ": ",

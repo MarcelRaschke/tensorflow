@@ -121,7 +121,7 @@ def _at_least_version(actual_version, required_version):
 def _get_header_version(path, name):
   """Returns preprocessor defines in C header file."""
   for line in io.open(path, "r", encoding="utf-8").readlines():
-    match = re.match("#define %s +(\d+)" % name, line)
+    match = re.match("\s*#\s*define %s\s+(\d+)" % name, line)
     if match:
       return match.group(1)
   return ""
@@ -520,15 +520,9 @@ def _find_tensorrt_config(base_paths, required_version):
       return None  # Versions not found, make _matches_version returns False.
     return ".".join(version)
 
-  try:
-    header_path, header_version = _find_header(base_paths, "NvInfer.h",
-                                               required_version,
-                                               get_header_version)
-  except ConfigError:
-    # TensorRT 6 moved the version information to NvInferVersion.h.
-    header_path, header_version = _find_header(base_paths, "NvInferVersion.h",
-                                               required_version,
-                                               get_header_version)
+  header_path, header_version = _find_header(base_paths, "NvInferVersion.h",
+                                             required_version,
+                                             get_header_version)
 
   tensorrt_version = header_version.split(".")[0]
   library_path = _find_library(base_paths, "nvinfer", tensorrt_version)

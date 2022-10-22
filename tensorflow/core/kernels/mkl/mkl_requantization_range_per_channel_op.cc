@@ -57,6 +57,20 @@ class MklRequantizationRangePerChannelOp : public OpKernel {
         ctx, input_max.dim_size(0) == depth,
         errors::InvalidArgument("input_max has incorrect size, expected ",
                                 depth, " was ", input_max.dim_size(0)));
+    OP_REQUIRES(
+        ctx, input_min.NumElements() == depth,
+        errors::InvalidArgument("input_min must have the same number of "
+                                "elements as input_max, got ",
+                                input_min.NumElements(), " and ", depth));
+    OP_REQUIRES(ctx, input.NumElements() > 0,
+                errors::InvalidArgument("input must not be empty"));
+    OP_REQUIRES(ctx, input.dims() == 4,
+                errors::InvalidArgument("input must be in NHWC format"));
+    OP_REQUIRES(
+        ctx, input.dim_size(3) == depth,
+        errors::InvalidArgument(
+            "input must have same number of channels as length of input_min: ",
+            input.dim_size(3), " vs ", depth));
 
     const float* input_min_data = input_min.flat<float>().data();
     const float* input_max_data = input_max.flat<float>().data();
@@ -65,7 +79,7 @@ class MklRequantizationRangePerChannelOp : public OpKernel {
     Eigen::array<int, 2> shuffling({1, 0});
     auto input_matrix = input.flat_inner_dims<qint32>();
 
-    // TODO: verify performance of not transposing and finding the min max
+    // TODO(intel-tf): Verify performance of not transposing and finding min max
     // directly from input_matrix vs the one presented below of transposing and
     // using the transposed matrix as the transposing operation in itself might
     // be more costly.
@@ -76,14 +90,14 @@ class MklRequantizationRangePerChannelOp : public OpKernel {
     // Find the ranges of each channel in parallel.
     float out_min_max = std::numeric_limits<float>::min();
 
-#ifndef ENABLE_MKLDNN_THREADPOOL
+#ifdef ENABLE_ONEDNN_OPENMP
 #ifdef _MSC_VER
 #pragma omp parallel for
 #else
 #pragma omp parallel for reduction(max : out_min_max)
 #endif
-#endif  // !ENABLE_MKLDNN_THREADPOOL
-    // TODO: Add eigen parallel_for
+#endif  // ENABLE_ONEDNN_OPENMP
+    // TODO(intel-tf): Add eigen parallel_for
     for (int64_t i = 0; i < depth; ++i) {
       Eigen::Tensor<qint32, 0, Eigen::RowMajor> min =
           transposed_input.chip<0>(i).minimum();

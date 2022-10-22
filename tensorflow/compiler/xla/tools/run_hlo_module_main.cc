@@ -23,12 +23,14 @@ limitations under the License.
 
 #include "absl/strings/str_cat.h"
 #include "tensorflow/compiler/xla/debug_options_flags.h"
+#include "tensorflow/compiler/xla/service/hlo_runner.h"
+#include "tensorflow/compiler/xla/service/platform_util.h"
 #include "tensorflow/compiler/xla/tools/run_hlo_module.h"
-#include "tensorflow/core/platform/init_main.h"
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/status.h"
-#include "tensorflow/core/platform/test.h"
 #include "tensorflow/core/util/command_line_flags.h"
+#include "tensorflow/tsl/platform/init_main.h"
+#include "tensorflow/tsl/platform/logging.h"
+#include "tensorflow/tsl/platform/status.h"
+#include "tensorflow/tsl/platform/test.h"
 
 namespace {
 const char* const kUsage = R"(
@@ -132,7 +134,7 @@ int main(int argc, char** argv) {
   const std::string kUsageString = absl::StrCat(
       kUsage, "\n\n", tensorflow::Flags::Usage(argv[0], flag_list));
   bool parse_ok = tensorflow::Flags::Parse(&argc, argv, flag_list);
-  tensorflow::port::InitMain(kUsageString.c_str(), &argc, &argv);
+  tsl::port::InitMain(kUsageString.c_str(), &argc, &argv);
   if (!parse_ok) {
     LOG(QFATAL) << kUsageString;
   }
@@ -140,6 +142,16 @@ int main(int argc, char** argv) {
   const std::string test_platform_name = GetTestPlatformName(opts.platform);
   const std::string reference_platform_name =
       GetReferencePlatformName(opts.reference_platform);
+  auto* test_platform =
+      xla::PlatformUtil::GetPlatform(test_platform_name).value();
+  auto* reference_platform =
+      reference_platform_name.empty()
+          ? nullptr
+          : xla::PlatformUtil::GetPlatform(reference_platform_name).value();
+  xla::HloRunner test_runner(test_platform);
+  auto reference_runner =
+      reference_platform ? std::make_unique<xla::HloRunner>(reference_platform)
+                         : nullptr;
 
   std::string hlo_filename;
   if (!opts.input_module.empty()) {
@@ -156,9 +168,8 @@ int main(int argc, char** argv) {
     if (iteration_count != 1) {
       std::cerr << "\n=== Iteration " << i << "\n";
     }
-    xla::Status matched =
-        xla::RunAndCompare(hlo_filename, test_platform_name,
-                           reference_platform_name, &engine, opts);
+    xla::Status matched = xla::RunAndCompare(
+        hlo_filename, &test_runner, reference_runner.get(), &engine, opts);
 
     // The AssertionResult is only meaningful when the reference is
     // used. Without a reference, the test just verifies that nothing blew up

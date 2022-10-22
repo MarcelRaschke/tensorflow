@@ -14,6 +14,8 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/python/profiler/internal/python_hooks.h"
 
+#include <atomic>
+
 #include "absl/strings/string_view.h"
 #include "absl/strings/strip.h"
 #include "tensorflow/core/platform/env.h"
@@ -40,21 +42,23 @@ void ThreadingSetProfile(const py::object& callback) {
   setprofile(callback);
 }
 
-std::string GetEventName(PyCodeObject* py_code) {
-  string filename(py::reinterpret_borrow<py::str>(py_code->co_filename));
+std::string GetEventName(PyObject* co_filename, PyObject* co_name,
+                         int co_firstlineno) {
+  string filename(py::reinterpret_borrow<py::str>(co_filename));
   string function;
-  if (py_code->co_name == nullptr) {
+  if (co_name == nullptr) {
     function = "<unknown>";
   } else {
-    function = py::reinterpret_borrow<py::str>(py_code->co_name);
+    function = py::reinterpret_borrow<py::str>(co_name);
   }
 
-  return absl::StrCat("$", io::Basename(filename), ":", py_code->co_firstlineno,
-                      " ", function);
+  return absl::StrCat("$", io::Basename(filename), ":", co_firstlineno, " ",
+                      function);
 }
 
-string GetEventName(PyCFunctionObject* py_cfunc) {
-  PyObject* module = py_cfunc->m_module;
+string GetEventName(PyMethodDef* method, PyObject* module) {
+  // Python stack does not have a filename/line_no for native calls.
+  // Use module name and function/method name instead.
   string filename;
   bool filename_ok;
 #if PY_MAJOR_VERSION < 3
@@ -68,7 +72,7 @@ string GetEventName(PyCFunctionObject* py_cfunc) {
     filename = "<unknown>";
   }
 
-  return absl::StrCat("$", filename, " ", py_cfunc->m_ml->ml_name);
+  return absl::StrCat("$", filename, " ", method->ml_name);
 }
 
 void AddEventToXLine(const PythonTraceEntry& event, XLineBuilder* line,
@@ -79,16 +83,43 @@ void AddEventToXLine(const PythonTraceEntry& event, XLineBuilder* line,
   xevent.SetEndTimestampNs(event.end_time_ns);
 }
 
+template <typename ForEachThreadFunc>
+void ForEachThread(PyThreadState* curr_thread, ForEachThreadFunc&& callback) {
+  // Note: PyThreadState's interp is not accessible in open source due to
+  // Py_LIMITED_API definition nuances. We can not iterate all threads through
+  // that PyInterpreterState.
+#ifndef NDEBUG
+  // If debug version of python runtime is used, (e.g. monolithic binaries in
+  // g3). PyGILState_Check will fail because current thread's PyThreadState
+  // is not the one that holding GIL (after PyThreadState_Swap). This extra
+  // check in PyEval_SetProfile is not useful, but will sporadic crash if user
+  // use debug version of python runtime. In this case, we fallback to only
+  // set up profile hooks in current threads.
+  // In OSS, the python runtime and tensorflow profiler are built separately.
+  // So this workaround doesn't apply.
+  callback(curr_thread);
+#else
+  for (PyThreadState* p = curr_thread; p != nullptr; p = p->next) {
+    PyThreadState_Swap(p);
+    callback(p);
+  }
+  for (PyThreadState* p = curr_thread->prev; p != nullptr; p = p->prev) {
+    PyThreadState_Swap(p);
+    callback(p);
+  }
+#endif
+}
+
 }  // namespace
 
 /*static*/ PythonHookContext* PythonHooks::e2e_context_ = nullptr;
 
 std::string PythonTraceEntry::Name() const {
   std::string event_name;
-  if (code_object) {
-    return GetEventName(code_object);
-  } else if (function_object) {
-    return GetEventName(function_object);
+  if (co_filename) {
+    return GetEventName(co_filename, co_name, co_firstlineno);
+  } else {
+    return GetEventName(method_def, m_module);
   }
   return "<unknown>";
 }
@@ -116,11 +147,11 @@ void PythonHookContext::Start(const PythonHooksOptions& options) {
   start_timestamp_ns_ = GetCurrentTimeNanos();
   if (options_.enable_python_traceme || options_.enable_trace_python_function) {
     PyGILState_STATE gil_state = PyGILState_Ensure();
-    if (options_.enable_trace_python_function) {
-      SetProfilerInAllThreads();
-    }
     if (options_.enable_python_traceme) {
       EnableTraceMe(true);
+    }
+    if (options_.enable_trace_python_function) {
+      SetProfilerInAllThreads();
     }
     if (options_.end_to_end_mode) {
       // When end to end mode is used, Stop() and Finalize() i.e. symbolization
@@ -186,7 +217,9 @@ void PythonHookContext::CollectData(XPlane* raw_plane) {
       }
     }
   }
+  PyGILState_STATE gil_state = PyGILState_Ensure();
   entries_.clear();
+  PyGILState_Release(gil_state);
 }
 
 void PythonHookContext::Finalize(XSpace* space) {
@@ -245,14 +278,20 @@ void PythonHooks::ProfileSlow(const py::object& frame, const string& event,
 
 void PythonHookContext::ProfileFast(PyFrameObject* frame, int what,
                                     PyObject* arg) {
-  const int64 thread_id = Env::Default()->GetCurrentThreadId();
+  const int64_t thread_id = Env::Default()->GetCurrentThreadId();
   uint64 now = GetCurrentTimeNanos();
   auto& thread_traces = entries_[thread_id];
 
   switch (what) {
     case PyTrace_CALL: {
+#if PY_VERSION_HEX < 0x030b0000
       PyCodeObject* f_code = frame->f_code;
-      thread_traces.active.emplace(now, 0, f_code, nullptr);
+      thread_traces.active.emplace(now, 0, f_code);
+#else   // PY_VERSION_HEX < 0x030b0000
+      PyCodeObject* f_code = PyFrame_GetCode(frame);
+      thread_traces.active.emplace(now, 0, f_code);
+      Py_XDECREF(f_code);
+#endif  // PY_VERSION_HEX < 0x030b0000
       break;
     }
     case PyTrace_RETURN:
@@ -263,9 +302,14 @@ void PythonHookContext::ProfileFast(PyFrameObject* frame, int what,
         thread_traces.completed.emplace_back(std::move(entry));
         thread_traces.active.pop();
       } else if (options_.include_incomplete_events) {
+#if PY_VERSION_HEX < 0x030b0000
         PyCodeObject* f_code = frame->f_code;
-        thread_traces.completed.emplace_back(start_timestamp_ns_, now, f_code,
-                                             nullptr);
+        thread_traces.completed.emplace_back(start_timestamp_ns_, now, f_code);
+#else   // PY_VERSION_HEX < 0x030b0000
+        PyCodeObject* f_code = PyFrame_GetCode(frame);
+        thread_traces.completed.emplace_back(start_timestamp_ns_, now, f_code);
+        Py_XDECREF(f_code);
+#endif  // PY_VERSION_HEX < 0x030b0000
       }
       break;
     }
@@ -273,24 +317,24 @@ void PythonHookContext::ProfileFast(PyFrameObject* frame, int what,
       if (PyCFunction_Check(arg)) {
         // Python stack does not have a filename/line_no for native calls.
         auto* func = reinterpret_cast<PyCFunctionObject*>(arg);
-        entries_[thread_id].active.emplace(now, 0, nullptr, func);
+        entries_[thread_id].active.emplace(now, 0, func);
       }
       break;
     }
     case PyTrace_C_RETURN:
     case PyTrace_C_EXCEPTION: {
-      if (!thread_traces.active.empty()) {
-        auto& entry = thread_traces.active.top();
-        entry.end_time_ns = now;
-        thread_traces.completed.emplace_back(std::move(entry));
-        thread_traces.active.pop();
-      } else if (options_.include_incomplete_events) {
-        // Only the end of the events is recorded, use profiler start as start.
-        if (PyCFunction_Check(arg)) {
-          // Python stack does not have a filename/line_no for native calls.
+      if (PyCFunction_Check(arg)) {
+        if (!thread_traces.active.empty()) {
+          auto& entry = thread_traces.active.top();
+          entry.end_time_ns = now;
+          thread_traces.completed.emplace_back(std::move(entry));
+          thread_traces.active.pop();
+        } else if (options_.include_incomplete_events) {
+          // Only the end of the events is recorded, use profiler start as
+          // start timestamp of the new event.
           auto* func = reinterpret_cast<PyCFunctionObject*>(arg);
           entries_[thread_id].completed.emplace_back(start_timestamp_ns_, now,
-                                                     nullptr, func);
+                                                     func);
         }
       }
       break;
@@ -322,25 +366,19 @@ void PythonHookContext::ProfileFast(PyFrameObject* frame, int what,
   // NOTE: This must be after `threading.setprofile` otherwise we
   // end up recording that in our trace.
   PyThreadState* curr_thread = PyThreadState_Get();
-  PyThreadState* next_thread = curr_thread;
-  while (next_thread != nullptr) {
-    VLOG(1) << "Setting profiler in " << next_thread->thread_id;
-    PyThreadState_Swap(next_thread);
+  ForEachThread(curr_thread, [](PyThreadState* thread) {
+    VLOG(1) << "Setting profiler in " << thread->thread_id;
     PyEval_SetProfile(&PythonHooks::ProfileFunction, nullptr);
-    next_thread = next_thread->next;
-  }
+  });
   PyThreadState_Swap(curr_thread);
 }
 
 /*static*/ void PythonHookContext::ClearProfilerInAllThreads() {
   PyThreadState* curr_thread = PyThreadState_Get();
-  PyThreadState* next_thread = curr_thread;
-  while (next_thread != nullptr) {
-    VLOG(1) << "Clearing profiler in " << next_thread->thread_id;
-    PyThreadState_Swap(next_thread);
+  ForEachThread(curr_thread, [](PyThreadState* thread) {
+    VLOG(1) << "Clearing profiler in " << thread->thread_id;
     PyEval_SetProfile(nullptr, nullptr);
-    next_thread = next_thread->next;
-  }
+  });
   PyThreadState_Swap(curr_thread);
 
   // And notify the threading library that we're done.

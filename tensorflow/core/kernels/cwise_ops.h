@@ -32,7 +32,6 @@ namespace internal {
 #if GOOGLE_CUDA
 template <>
 struct scalar_arg_op<std::complex<float>> {
-  EIGEN_EMPTY_STRUCT_CTOR(scalar_arg_op)
   typedef typename Eigen::NumTraits<std::complex<float>>::Real result_type;
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE float operator()(
       const std::complex<float>& a) const {
@@ -42,7 +41,6 @@ struct scalar_arg_op<std::complex<float>> {
 
 template <>
 struct scalar_arg_op<std::complex<double>> {
-  EIGEN_EMPTY_STRUCT_CTOR(scalar_arg_op)
   typedef typename Eigen::NumTraits<std::complex<double>>::Real result_type;
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE double operator()(
       const std::complex<double>& a) const {
@@ -54,9 +52,8 @@ struct scalar_arg_op<std::complex<double>> {
 #if EIGEN_HAS_CXX11_MATH == 0
 template <typename T>
 struct scalar_asinh_op {
-  EIGEN_EMPTY_STRUCT_CTOR(scalar_asinh_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& a) const {
-    return std::asinh(a);
+    return static_cast<T>(std::asinh(a));
   }
 };
 template <typename T>
@@ -66,9 +63,8 @@ struct functor_traits<scalar_asinh_op<T>> {
 
 template <typename T>
 struct scalar_acosh_op {
-  EIGEN_EMPTY_STRUCT_CTOR(scalar_acosh_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& a) const {
-    return std::acosh(a);
+    return static_cast<T>(std::acosh(a));
   }
 };
 template <typename T>
@@ -78,9 +74,8 @@ struct functor_traits<scalar_acosh_op<T>> {
 
 template <typename T>
 struct scalar_atanh_op {
-  EIGEN_EMPTY_STRUCT_CTOR(scalar_atanh_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& a) const {
-    return std::atanh(a);
+    return static_cast<T>(std::atanh(a));
   }
 };
 template <typename T>
@@ -131,7 +126,15 @@ struct safe_div_or_mod_op {
                                                      const T& b) const {
     const T safe_b = tensorflow::internal::SubtleMustCopy(b);
     if (TF_PREDICT_TRUE(safe_b != 0)) {
-      return DivOrMod()(a, safe_b);
+      // Avoid FPE for INT_MIN/-1.
+      const T safe_a = tensorflow::internal::SubtleMustCopy(a);
+      if (TF_PREDICT_FALSE(std::is_signed<T>::value &&
+                           safe_a == std::numeric_limits<T>::min() &&
+                           safe_b == T(-1))) {
+        // Prefer to overflow 'a' instead of crashing.
+        return DivOrMod()(-safe_a, 1);
+      }
+      return DivOrMod()(safe_a, safe_b);
     } else {
       *error = true;
       return 0;
@@ -149,7 +152,6 @@ struct functor_traits<safe_div_or_mod_op<T, DivOrMod>> {
 
 template <typename T, typename Binary>
 struct no_nan_op {
-  EIGEN_EMPTY_STRUCT_CTOR(no_nan_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& a,
                                                      const T& b) const {
     if (b != T(0)) {
@@ -167,22 +169,63 @@ struct no_nan_op {
   }
 };
 
+template <typename T, bool IsComplex = Eigen::NumTraits<T>::IsComplex>
+struct div_no_nan_op;
+
 template <typename T>
-struct div_no_nan_op : public no_nan_op<T, scalar_quotient_op<T>> {
-  EIGEN_EMPTY_STRUCT_CTOR(div_no_nan_op)
+struct div_no_nan_op<T, /*IsComplex=*/false>
+    : public no_nan_op<T, scalar_quotient_op<T>> {
 };
 
 template <typename T>
-struct functor_traits<div_no_nan_op<T>> {
+struct functor_traits<div_no_nan_op<T, /*IsComplex=*/false>> {
   enum {
     Cost = functor_traits<scalar_quotient_op<T>>::Cost + NumTraits<T>::AddCost,
     PacketAccess = true,
   };
 };
 
+// Whether or not complex division produces a NaN depends on the underlying
+// implementation. Some compilers (e.g. gcc) use a simple method that divides
+// by |b|^2, which may underflow to 0 for b != 0.
+template <typename T>
+struct div_no_nan_op<T, /*IsComplex=*/true> {
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& a,
+                                                     const T& b) const {
+    if (b == T(0)) {
+      return T(0);
+    } else {
+      // If the numerator is zero, then the result must be zero even if |b|^2
+      // underflows to zero.
+      const T numerator =
+          scalar_product_op<T>()(a, scalar_conjugate_op<T>()(b));
+      if (numerator == T(0)) {
+        return T(0);
+      }
+    }
+    return scalar_quotient_op<T>()(a, b);
+  }
+  template <typename Packet>
+  EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE Packet packetOp(const Packet& a,
+                                                        const Packet& b) const {
+    const Packet numerator = pmul(a, pconj(b));
+    const Packet mask = por(pcmp_eq(b, pzero(a)), pcmp_eq(numerator, pzero(a)));
+    const Packet quotient = pdiv(a, b);
+    return pandnot(quotient, mask);
+  }
+};
+
+template <typename T>
+struct functor_traits<div_no_nan_op<T, /*IsComplex=*/true>> {
+  enum {
+    Cost = functor_traits<scalar_quotient_op<T>>::Cost + NumTraits<T>::MulCost,
+    PacketAccess = packet_traits<T>::HasMul && packet_traits<T>::HasDiv &&
+                   packet_traits<T>::HasConj,
+  };
+};
+
 template <typename T>
 struct mul_no_nan_op : public no_nan_op<T, scalar_product_op<T>> {
-  EIGEN_EMPTY_STRUCT_CTOR(mul_no_nan_op)
 };
 
 template <typename T>
@@ -210,7 +253,7 @@ struct scalar_left : private Binary {
   const Tin* left;
   TinPacket left_packet;  // initialized iff is_scalar_in_host_memory == true
 
-  EIGEN_DEVICE_FUNC inline scalar_left(const scalar_left& other) = default;
+  inline scalar_left(const scalar_left& other) = default;
 
   template <typename... Args>
   EIGEN_DEVICE_FUNC inline explicit scalar_left(const Tin* c, Args... args)
@@ -261,7 +304,7 @@ struct scalar_right : private Binary {
   const Tin* right;
   TinPacket right_packet;  // initialized iff is_scalar_in_host_memory == true
 
-  EIGEN_DEVICE_FUNC inline scalar_right(const scalar_right& other) = default;
+  inline scalar_right(const scalar_right& other) = default;
 
   template <typename... Args>
   EIGEN_DEVICE_FUNC inline explicit scalar_right(const Tin* c, Args... args)
@@ -305,7 +348,7 @@ struct functor_traits<
 
 // similar to std::equal_to, but with the DEVICE_FUNC qualifier
 template <class T>
-struct equal_to : std::binary_function<T, T, bool> {
+struct equal_to : std::function<bool(T, T)> {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE bool operator()(const T& x,
                                                         const T& y) const {
     return x == y;
@@ -314,7 +357,7 @@ struct equal_to : std::binary_function<T, T, bool> {
 
 // similar to std::not_equal_to, but with the DEVICE_FUNC qualifier
 template <class T>
-struct not_equal_to : std::binary_function<T, T, bool> {
+struct not_equal_to : std::function<bool(T, T)> {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE bool operator()(const T& x,
                                                         const T& y) const {
     return x != y;
@@ -323,7 +366,7 @@ struct not_equal_to : std::binary_function<T, T, bool> {
 
 // similar to std::greater, but with the DEVICE_FUNC qualifier
 template <class T>
-struct greater : std::binary_function<T, T, bool> {
+struct greater : std::function<bool(T, T)> {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE bool operator()(const T& x,
                                                         const T& y) const {
     return x > y;
@@ -332,7 +375,7 @@ struct greater : std::binary_function<T, T, bool> {
 
 // similar to std::less, but with the DEVICE_FUNC qualifier
 template <class T>
-struct less : std::binary_function<T, T, bool> {
+struct less : std::function<bool(T, T)> {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE bool operator()(const T& x,
                                                         const T& y) const {
     return x < y;
@@ -341,7 +384,7 @@ struct less : std::binary_function<T, T, bool> {
 
 // similar to std::greater_equal, but with the DEVICE_FUNC qualifier
 template <class T>
-struct greater_equal : std::binary_function<T, T, bool> {
+struct greater_equal : std::function<bool(T, T)> {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE bool operator()(const T& x,
                                                         const T& y) const {
     return x >= y;
@@ -350,7 +393,7 @@ struct greater_equal : std::binary_function<T, T, bool> {
 
 // similar to std::less_equal, but with the DEVICE_FUNC qualifier
 template <class T>
-struct less_equal : std::binary_function<T, T, bool> {
+struct less_equal : std::function<bool(T, T)> {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE bool operator()(const T& x,
                                                         const T& y) const {
     return x <= y;
@@ -391,20 +434,10 @@ template <typename T, typename Enable = void>
 struct google_floor_div {
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& x,
                                                      const T& y) const {
-    if ((x < T(0)) != (y < T(0))) {
-// HIP does not have the device version of the abs routine defined
-// for all datatypes that T can resolve to
-#if defined(__HIP_DEVICE_COMPILE__)
-      T abs_x = (x < T(0)) ? -x : x;
-      T abs_y = (y < T(0)) ? -y : y;
-#else
-      T abs_x = std::abs(x);
-      T abs_y = std::abs(y);
-#endif
-      return -(abs_x + abs_y - 1) / abs_y;
-    } else {
-      return x / y;
-    }
+    const T z = x / y;
+    // Subtract one if there is a remainder and if the inputs have opposite
+    // signs. This approach avoids unnecessary overflows.
+    return z * y != x && (x < T(0) != y < T(0)) ? z - T(1) : z;
   }
   template <typename Packet>
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE Packet packetOp(const Packet& x,
@@ -413,11 +446,9 @@ struct google_floor_div {
     Packet x_mask = pcmp_lt(x, zeros);
     Packet y_mask = pcmp_lt(y, zeros);
     Packet x_div_y = pdiv(x, y);
-    Packet abs_x = pabs(x);
-    Packet abs_y = pabs(y);
-    Packet ones = pones(x);
-    Packet ratio_rounded = pdiv(pnegate(psub(padd(abs_x, abs_y), ones)), abs_y);
-    return pselect(pxor(x_mask, y_mask), ratio_rounded, x_div_y);
+    Packet x_div_y_times_y = pmul(x_div_y, y);
+    return pselect(por(peq(x_div_y_times_y, x), peq(x_mask, y_mask)), x_div_y,
+                   psub(x_div_y, pones(x)));
   }
 };
 
@@ -631,7 +662,6 @@ struct functor_traits<scalar_round_up_op<Scalar, IsInteger>> {
 
 template <typename Scalar>
 struct bitwise_xor_op {
-  EIGEN_EMPTY_STRUCT_CTOR(bitwise_xor_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE Scalar
   operator()(const Scalar& x, const Scalar& y) const {
     return x ^ y;
@@ -650,7 +680,6 @@ struct functor_traits<bitwise_xor_op<Scalar>> {
 
 template <typename Scalar>
 struct xlogy_op {
-  EIGEN_EMPTY_STRUCT_CTOR(xlogy_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE Scalar
   operator()(const Scalar& x, const Scalar& y) const {
     if (x == Scalar(0.)) {
@@ -681,7 +710,6 @@ struct functor_traits<xlogy_op<Scalar>> {
 
 template <typename Scalar>
 struct xlog1py_op {
-  EIGEN_EMPTY_STRUCT_CTOR(xlog1py_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE Scalar
   operator()(const Scalar& x, const Scalar& y) const {
     if (x == Scalar(0.)) {
@@ -716,7 +744,6 @@ struct functor_traits<xlog1py_op<Scalar>> {
 
 template <typename Scalar>
 struct xdivy_op {
-  EIGEN_EMPTY_STRUCT_CTOR(xdivy_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE Scalar
   operator()(const Scalar& x, const Scalar& y) const {
     if (x == Scalar(0.)) {
@@ -747,7 +774,6 @@ struct functor_traits<xdivy_op<Scalar>> {
 
 template <typename T>
 struct scalar_erfinv_op {
-  EIGEN_EMPTY_STRUCT_CTOR(scalar_erfinv_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& x) const {
     constexpr T half = T(0.5);
     T y = numext::ndtri(half * x + half);
@@ -949,7 +975,6 @@ struct logical_not : base<bool, Eigen::internal::scalar_boolean_not_op<bool>> {
 // Flip all bits. Named invert to be consistent with numpy.
 template <typename T>
 struct invert_op {
-  EIGEN_EMPTY_STRUCT_CTOR(invert_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& a) const {
     return ~a;
   }
@@ -1076,7 +1101,6 @@ struct safe_pow : base<T, Eigen::internal::safe_scalar_binary_pow_op<T, T>> {
 template <typename T>
 struct safe_pow_ignore_error_op {
   static_assert(std::is_integral<T>::value, "Integer type expected");
-  EIGEN_EMPTY_STRUCT_CTOR(safe_pow_ignore_error_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& x,
                                                      const T& y) const {
     if (TF_PREDICT_FALSE(y < 0)) {
@@ -1119,13 +1143,12 @@ struct polygamma : base<T, Eigen::internal::scalar_polygamma_op<T>> {};
 
 template <typename Scalar>
 struct scalar_atan2_op {
-  EIGEN_EMPTY_STRUCT_CTOR(scalar_atan2_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE Scalar
   operator()(const Scalar& y, const Scalar& x) const {
 #if TENSORFLOW_USE_ROCM
-    return ::atan2(y, x);
+    return static_cast<Scalar>(::atan2(y, x));
 #else
-    return std::atan2(y, x);
+    return static_cast<Scalar>(std::atan2(y, x));
 #endif
   }
 };
@@ -1170,7 +1193,6 @@ struct logical_or : base<bool, Eigen::internal::scalar_boolean_or_op> {};
 
 template <typename T>
 struct bitwise_and_op {
-  EIGEN_EMPTY_STRUCT_CTOR(bitwise_and_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& x,
                                                      const T& y) const {
     return x & y;
@@ -1179,7 +1201,6 @@ struct bitwise_and_op {
 
 template <typename T>
 struct bitwise_or_op {
-  EIGEN_EMPTY_STRUCT_CTOR(bitwise_or_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& x,
                                                      const T& y) const {
     return x | y;
@@ -1197,7 +1218,6 @@ struct bitwise_xor : base<T, Eigen::internal::bitwise_xor_op<T>> {};
 
 template <typename T>
 struct left_shift_op {
-  EIGEN_EMPTY_STRUCT_CTOR(left_shift_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& x,
                                                      const T& y) const {
     // Avoids UB: don't shift by larger than the bitwidth of T, and
@@ -1215,7 +1235,6 @@ struct left_shift_op {
 
 template <typename T>
 struct right_shift_op {
-  EIGEN_EMPTY_STRUCT_CTOR(right_shift_op)
   EIGEN_DEVICE_FUNC EIGEN_STRONG_INLINE T operator()(const T& x,
                                                      const T& y) const {
     // Avoids UB: don't shift by larger than the bitwidth of T.
@@ -1276,6 +1295,13 @@ struct UnaryFunctor {
   // Computes on device "d": out[i] = Functor(in[i])
   void operator()(const Device& d, typename Functor::tout_type out,
                   typename Functor::tin_type in);
+};
+
+template <typename Device, typename Functor, typename Targ>
+struct UnaryFunctorWithArg {
+  // Computes on device "d": out[i] = Functor(in[i])
+  void operator()(const Device& d, typename Functor::tout_type out,
+                  typename Functor::tin_type in, Targ val);
 };
 
 template <typename Device, typename Functor, int NDIMS,

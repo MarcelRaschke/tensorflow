@@ -15,16 +15,16 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/client/lib/tridiagonal.h"
 
-#include "tensorflow/compiler/xla/array2d.h"
-#include "tensorflow/compiler/xla/client/lib/constants.h"
+#include <cstdint>
+#include <tuple>
+#include <vector>
+
 #include "tensorflow/compiler/xla/client/lib/slicing.h"
 #include "tensorflow/compiler/xla/client/xla_builder.h"
-#include "tensorflow/compiler/xla/error_spec.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/shape_util.h"
-#include "tensorflow/compiler/xla/test.h"
+#include "tensorflow/compiler/xla/status.h"
 #include "tensorflow/compiler/xla/tests/client_library_test_base.h"
-#include "tensorflow/compiler/xla/tests/literal_test_util.h"
 #include "tensorflow/compiler/xla/tests/test_macros.h"
 
 namespace xla {
@@ -35,14 +35,84 @@ class TridiagonalTest
     : public ClientLibraryTestBase,
       public ::testing::WithParamInterface<std::tuple<int, int, int>> {};
 
+XLA_TEST_P(TridiagonalTest, SimpleTridiagonalMatMulOk) {
+  xla::XlaBuilder builder(TestName());
+
+  // Since the last element ignored, it will be {{{34, 35, 0}}}
+  Array3D<float> upper_diagonal{{{34, 35, 999}}};
+  Array3D<float> main_diagonal{{{21, 22, 23}}};
+  // Since the first element ignored, it will be {{{0, 10, 100}}}
+  Array3D<float> lower_diagonal{{{999, 10, 100}}};
+  Array3D<float> rhs{{{1, 2, 3, 4}, {5, 6, 7, 8}, {9, 10, 11, 12}}};
+
+  XlaOp upper_diagonal_xla;
+  XlaOp main_diagonal_xla;
+  XlaOp lower_diagonal_xla;
+  XlaOp rhs_xla;
+
+  auto upper_diagonal_data = CreateR3Parameter<float>(
+      upper_diagonal, 0, "upper_diagonal", &builder, &upper_diagonal_xla);
+  auto main_diagonal_data = CreateR3Parameter<float>(
+      main_diagonal, 1, "main_diagonal", &builder, &main_diagonal_xla);
+  auto lower_diagonal_data = CreateR3Parameter<float>(
+      lower_diagonal, 2, "lower_diagonal", &builder, &lower_diagonal_xla);
+  auto rhs_data = CreateR3Parameter<float>(rhs, 3, "rhs", &builder, &rhs_xla);
+
+  TF_ASSERT_OK_AND_ASSIGN(
+      XlaOp x, TridiagonalMatMul(upper_diagonal_xla, main_diagonal_xla,
+                                 lower_diagonal_xla, rhs_xla));
+
+  ASSERT_EQ(x.builder()->first_error(), OkStatus());
+  ASSERT_TRUE(x.valid());
+
+  std::vector<int64_t> expected_shape{1, 3, 4};
+  std::vector<float> expected_values{191, 246, 301, 356, 435, 502,
+                                     569, 636, 707, 830, 953, 1076};
+  TF_ASSERT_OK_AND_ASSIGN(
+      auto result,
+      ComputeAndTransfer(x.builder(),
+                         {upper_diagonal_data.get(), main_diagonal_data.get(),
+                          lower_diagonal_data.get(), rhs_data.get()}));
+  EXPECT_EQ(result.shape().dimensions(), expected_shape);
+  EXPECT_EQ(result.data<float>({}), expected_values);
+}
+
+XLA_TEST_P(TridiagonalTest, TridiagonalMatMulWrongShape) {
+  xla::XlaBuilder builder(TestName());
+
+  Array<float> upper_diagonal = Array<float>({5, 3, 7}, 1);
+  Array<float> main_diagonal = Array<float>({5, 3, 7}, 1);
+  Array<float> lower_diagonal = Array<float>({5, 3, 7}, 1);
+  Array<float> rhs = Array<float>({5, 3, 7, 6}, 1);
+
+  XlaOp upper_diagonal_xla;
+  XlaOp main_diagonal_xla;
+  XlaOp lower_diagonal_xla;
+  XlaOp rhs_xla;
+
+  auto upper_diagonal_data = CreateParameter<float>(
+      upper_diagonal, 0, "upper_diagonal", &builder, &upper_diagonal_xla);
+  auto main_diagonal_data = CreateParameter<float>(
+      main_diagonal, 1, "main_diagonal", &builder, &main_diagonal_xla);
+  auto lower_diagonal_data = CreateParameter<float>(
+      lower_diagonal, 2, "lower_diagonal", &builder, &lower_diagonal_xla);
+  auto rhs_data = CreateParameter<float>(rhs, 3, "rhs", &builder, &rhs_xla);
+
+  auto result = TridiagonalMatMul(upper_diagonal_xla, main_diagonal_xla,
+                                  lower_diagonal_xla, rhs_xla);
+  ASSERT_EQ(result.status(),
+            InvalidArgument(
+                "superdiag must have same rank as rhs, but got 3 and 4."));
+}
+
 XLA_TEST_P(TridiagonalTest, Solves) {
   const auto& spec = GetParam();
   xla::XlaBuilder builder(TestName());
 
   // TODO(belletti): parametrize num_rhs.
-  const int64 batch_size = std::get<0>(spec);
-  const int64 num_eqs = std::get<1>(spec);
-  const int64 num_rhs = std::get<2>(spec);
+  const int64_t batch_size = std::get<0>(spec);
+  const int64_t num_eqs = std::get<1>(spec);
+  const int64_t num_rhs = std::get<2>(spec);
 
   Array3D<float> lower_diagonal(batch_size, 1, num_eqs);
   Array3D<float> main_diagonal(batch_size, 1, num_eqs);
@@ -69,9 +139,9 @@ XLA_TEST_P(TridiagonalTest, Solves) {
       upper_diagonal, 2, "upper_diagonal", &builder, &upper_diagonal_xla);
   auto rhs_data = CreateR3Parameter<float>(rhs, 3, "rhs", &builder, &rhs_xla);
 
-  TF_ASSERT_OK_AND_ASSIGN(XlaOp x,
-                          ThomasSolver(lower_diagonal_xla, main_diagonal_xla,
-                                       upper_diagonal_xla, rhs_xla));
+  TF_ASSERT_OK_AND_ASSIGN(
+      XlaOp x, TridiagonalSolver(kThomas, lower_diagonal_xla, main_diagonal_xla,
+                                 upper_diagonal_xla, rhs_xla));
 
   auto Coefficient = [](auto operand, auto i) {
     return SliceInMinorDims(operand, /*start=*/{i}, /*end=*/{i + 1});
@@ -79,7 +149,7 @@ XLA_TEST_P(TridiagonalTest, Solves) {
 
   std::vector<XlaOp> relative_errors(num_eqs);
 
-  for (int64 i = 0; i < num_eqs; i++) {
+  for (int64_t i = 0; i < num_eqs; i++) {
     auto a_i = Coefficient(lower_diagonal_xla, i);
     auto b_i = Coefficient(main_diagonal_xla, i);
     auto c_i = Coefficient(upper_diagonal_xla, i);

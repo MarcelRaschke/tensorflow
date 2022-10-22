@@ -8,7 +8,7 @@ package(
     default_visibility = [
         "//visibility:public",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -48,6 +48,7 @@ cc_test(
     deps = [
         ":perception_ops",
         "//tensorflow/lite:framework",
+        "//tensorflow/lite/core:headers",
         "//tensorflow/lite/kernels:test_main",
         "//tensorflow/lite/kernels:test_util",
         "//tensorflow/lite/testing:util",
@@ -63,7 +64,6 @@ pybind_extension(
     hdrs = ["perception_ops.h"],
     additional_exported_symbols = ["PerceptionOpsRegisterer"],
     link_in_framework = True,
-    module_name = "pywrap_perception_ops",
     deps = [
         ":perception_ops",
         "//tensorflow/lite:mutable_op_resolver",

@@ -105,7 +105,7 @@ class GraphPropertiesTest : public ::testing::Test {
       strings::StrAppend(&s, "[");
       for (int i = 0; i < p.shape().dim_size(); ++i) {
         strings::StrAppend(&s, i == 0 ? "" : ",",
-                           std::max<int64>(p.shape().dim(i).size(), -1));
+                           std::max<int64_t>(p.shape().dim(i).size(), -1));
       }
       strings::StrAppend(&s, "]");
     }
@@ -114,7 +114,7 @@ class GraphPropertiesTest : public ::testing::Test {
 
   // Compare values of integer (DT_INT32 or DT_INT64) tensor against expected
   // ones.
-  void ExpectTensorValues(const std::vector<int64>& expected,
+  void ExpectTensorValues(const std::vector<int64_t>& expected,
                           const TensorProto& tensor_proto_to_compare) {
     Tensor tensor;
     ASSERT_TRUE(tensor.FromProto(tensor_proto_to_compare));
@@ -128,7 +128,7 @@ class GraphPropertiesTest : public ::testing::Test {
       }
     } else {
       for (int i = 0; i < tensor.NumElements(); i++) {
-        EXPECT_EQ(expected[i], tensor.flat<int64>()(i));
+        EXPECT_EQ(expected[i], tensor.flat<int64_t>()(i));
       }
     }
   }
@@ -218,6 +218,21 @@ TEST_F(GraphPropertiesTest, ClearProperties) {
   }
 }
 
+TEST_F(GraphPropertiesTest, Clear) {
+  TrivialTestGraphInputYielder fake_input(4, 1, 10, false,
+                                          cluster_->GetDeviceNames());
+  GrapplerItem item;
+  CHECK(fake_input.NextItem(&item));
+
+  GraphProperties properties(item);
+  Status s = properties.InferStatically(true);
+  TF_ASSERT_OK(s);
+
+  EXPECT_TRUE(properties.has_properties());
+  properties.Clear();
+  EXPECT_FALSE(properties.has_properties());
+}
+
 TEST_F(GraphPropertiesTest, DynamicProperties) {
   TrivialTestGraphInputYielder fake_input(4, 1, 10, false,
                                           cluster_->GetDeviceNames());
@@ -272,6 +287,159 @@ TEST_F(GraphPropertiesTest, DynamicProperties) {
         EXPECT_EQ(prop_str, out_prop_str);
       }
     }
+  }
+}
+
+// A test op that outputs different shape based on input_tensor in the shape
+// inference context.
+REGISTER_OP("DetectInputValueInShapeInferenceOp")
+    .Input("a: T")
+    .Output("o: T")
+    .Attr("T: {numbertype, bool}")
+    .SetShapeFn([](shape_inference::InferenceContext* c) {
+      if (c->input_tensor(0)) {
+        // 10x10 if input_tensor is given to the inference context.
+        c->set_output(0, c->Matrix(10, 10));
+        return OkStatus();
+      }
+      // unknown rank if input_tensor is not provided.
+      return shape_inference::UnknownShape(c);
+    });
+
+// Helper class for testing Const tensor skip.
+class ConstTensorSkipTestCase {
+ public:
+  ConstTensorSkipTestCase(const DataType data_type,
+                          const std::vector<int64_t> shape, const double value,
+                          const bool expected)
+      : data_type_(data_type),
+        shape_(shape),
+        value_(value),
+        expected_(expected) {}
+
+  void RunTestAndValidate() const {
+    LOG(INFO) << "Run Const tensor skip test: "
+              << "data_type: " << data_type_ << ", shape: {"
+              << absl::StrJoin(shape_, ",") << "}, value: " << value_
+              << ", expected: " << expected_;
+    // Build a graph with Const --> Identity --> Detect.
+    GrapplerItem item;
+    const gtl::ArraySlice<int64_t> shape_array_slice(shape_);
+    Tensor const_tensor_value(data_type_, TensorShape(shape_array_slice));
+    // Fill the const tensor value based on data type.
+    switch (data_type_) {
+      case DT_INT32:
+        test::FillIota<int32>(&const_tensor_value, static_cast<int32>(value_));
+        break;
+      case DT_INT64:
+        test::FillIota<int64_t>(&const_tensor_value,
+                                static_cast<int64_t>(value_));
+        break;
+      case DT_FLOAT:
+        test::FillIota<float>(&const_tensor_value, static_cast<float>(value_));
+        break;
+      case DT_DOUBLE:
+        test::FillIota<double>(&const_tensor_value,
+                               static_cast<double>(value_));
+        break;
+      case DT_BFLOAT16:
+        test::FillIota<Eigen::bfloat16>(&const_tensor_value,
+                                        static_cast<Eigen::bfloat16>(value_));
+        break;
+      default:
+        CHECK(false) << "Unsupported data type (" << data_type_
+                     << ") in this test.";
+        break;
+    }
+    TF_ASSERT_OK(NodeDefBuilder("const", "Const")
+                     .Attr("dtype", data_type_)
+                     .Attr("value", const_tensor_value)
+                     .Finalize(item.graph.add_node()));
+    TF_ASSERT_OK(NodeDefBuilder("const_identity", "Identity")
+                     .Attr("dtype", data_type_)
+                     .Input("const", 0, data_type_)
+                     .Finalize(item.graph.add_node()));
+    TF_ASSERT_OK(NodeDefBuilder("detect", "DetectInputValueInShapeInferenceOp")
+                     .Attr("T", data_type_)
+                     .Input("const_identity", 0, data_type_)
+                     .Finalize(item.graph.add_node()));
+    item.fetch.push_back("const");
+    item.fetch.push_back("const_identity");
+    item.fetch.push_back("detect");
+
+    // Run static shape inference.
+    GraphProperties graph_properties(item);
+    TF_ASSERT_OK(graph_properties.InferStatically(false));
+
+    // Extract input / output properties of interest.
+    const auto& const_output = graph_properties.GetOutputProperties("const");
+    EXPECT_EQ(1, const_output.size());
+    const OpInfo::TensorProperties& const_output0 = const_output[0];
+    const auto& const_identity_input =
+        graph_properties.GetInputProperties("const_identity");
+    EXPECT_EQ(1, const_identity_input.size());
+    const OpInfo::TensorProperties& const_identity_input0 =
+        const_identity_input[0];
+    const auto& const_identity_output =
+        graph_properties.GetOutputProperties("const_identity");
+    EXPECT_EQ(1, const_identity_output.size());
+    const OpInfo::TensorProperties& const_identity_output0 =
+        const_identity_output[0];
+    EXPECT_TRUE(const_output0.has_value());
+    EXPECT_TRUE(const_identity_input0.has_value());
+    EXPECT_TRUE(const_identity_output0.has_value());
+    const auto& detect_input = graph_properties.GetInputProperties("detect");
+    EXPECT_EQ(1, detect_input.size());
+    const OpInfo::TensorProperties& detect_input0 = detect_input[0];
+    const auto& detect_output = graph_properties.GetOutputProperties("detect");
+    EXPECT_EQ(1, detect_output.size());
+    const OpInfo::TensorProperties& detect_output0 = detect_output[0];
+
+    // Tensor protos are propagated, regardless of types and sizes.
+    EXPECT_TRUE(const_output0.has_value());
+    EXPECT_TRUE(const_identity_input0.has_value());
+    EXPECT_TRUE(const_identity_output0.has_value());
+    EXPECT_TRUE(detect_input0.has_value());
+
+    // Detect op outputs 10x10 matrix if it has input_tensor in the shape
+    // inference context. Otherwise, unknown rank.
+    if (expected_) {
+      EXPECT_EQ(detect_output0.shape().dim_size(), 2);
+      EXPECT_EQ(detect_output0.shape().dim(0).size(), 10);
+      EXPECT_EQ(detect_output0.shape().dim(1).size(), 10);
+    } else {
+      EXPECT_TRUE(detect_output0.shape().unknown_rank());
+    }
+  }
+
+ private:
+  DataType data_type_;
+  std::vector<int64_t> shape_;
+  double value_;
+  bool expected_;
+};
+
+TEST_F(GraphPropertiesTest, SkipInstantiatingConstTensor) {
+  // We skip const tensor value propagation in shape inference, if a const
+  // tensor is too large.
+  std::vector<ConstTensorSkipTestCase> test_cases = {
+      // data_type, shape, value, bool: propagate const?
+      {DT_INT32, {16, 8}, 1, true},      // 128 elements; smaller than threshold
+      {DT_INT32, {1, 129}, 2, false},    // 129 elements; larger than threshold
+      {DT_INT64, {8, 8}, 3, true},       // 64 elements; smaller than threshold
+      {DT_INT64, {128, 2}, 0, false},    // 256 elements; larger than threshold
+      {DT_FLOAT, {16, 8}, 1.0, true},    // integer value for float tensor
+      {DT_FLOAT, {16, 8}, 1.3, true},    // fractional value (1.3)
+      {DT_FLOAT, {1, 129}, 0.7, false},  // fractional value (0.7)
+      {DT_DOUBLE, {16, 8}, 1.0, true},   // integer value for float tensor
+      {DT_DOUBLE, {16, 8}, 1.3, true},   // fractional value (1.3)
+      {DT_DOUBLE, {1, 129}, 0.7, false},    // fractional value (0.7)
+      {DT_BFLOAT16, {16, 8}, 1.0, true},    // integer value for float tensor
+      {DT_BFLOAT16, {16, 8}, 1.3, true},    // fractional value (1.3)
+      {DT_BFLOAT16, {1, 129}, 0.7, false},  // fractional value (0.7)
+  };
+  for (const auto& test_case : test_cases) {
+    test_case.RunTestAndValidate();
   }
 }
 
@@ -982,7 +1150,7 @@ TEST_F(GraphPropertiesTest, TensorAsShapesPropagation) {
   ExpectTensorValues({99}, properties.GetOutputProperties("b")[0].value());
   ExpectTensorValues({99}, properties.GetInputProperties("b1")[0].value());
   ExpectTensorValues({99}, properties.GetOutputProperties("b1")[0].value());
-  std::vector<int64> c_values;
+  std::vector<int64_t> c_values;
   for (int i = 0; i < 4 * 4 * 4; i++) {
     c_values.push_back(1);
   }
@@ -1020,10 +1188,12 @@ TEST_F(GraphPropertiesTest, SkippingValueInferenceForLargeTensors) {
   // (currently, fewer than 17 elements); otherwise we don't run EvaluateNode().
   // This is to avoid wasting time and memory for producing huge tensors (e.g.,
   // initializing a large table using Fill.
+  // Note that we do not propagate float const tensors with fractional values
+  // (even if they're small); so this test should use integer values.
   {
     tensorflow::Scope s = tensorflow::Scope::NewRootScope();
     Output a = ops::Const(s.WithOpName("a"), 4, {2});  // 4x4
-    Output b = ops::Const(s.WithOpName("const"), 0.1f, {});
+    Output b = ops::Const(s.WithOpName("const"), 7, {});
     // Shape described by a is small; expect output values of Fill op.
     Output c = ops::Fill(s.WithOpName("fill"), a, b);
 
@@ -1036,13 +1206,13 @@ TEST_F(GraphPropertiesTest, SkippingValueInferenceForLargeTensors) {
         /*include_tensor_values=*/true));
     const auto out_props = properties.GetOutputProperties("fill");
     const OpInfo::TensorProperties out_prop0 = out_props[0];
-    EXPECT_EQ("float: [4,4]", PropToString(out_prop0));
+    EXPECT_EQ("int32: [4,4]", PropToString(out_prop0));
     EXPECT_TRUE(out_prop0.has_value());
   }
   {
     tensorflow::Scope s = tensorflow::Scope::NewRootScope();
     Output a = ops::Const(s.WithOpName("a"), 1000, {4});  // 1000x1000x1000x1000
-    Output b = ops::Const(s.WithOpName("const"), 0.1f, {});
+    Output b = ops::Const(s.WithOpName("const"), 7, {});
     // Shape described by a is huge; in that case we skip value inference.
     // Otherwise, it'd be too much overhead.
     Output c = ops::Fill(s.WithOpName("fill"), a, b);
@@ -1056,7 +1226,7 @@ TEST_F(GraphPropertiesTest, SkippingValueInferenceForLargeTensors) {
         /*include_tensor_values=*/true));
     const auto out_props = properties.GetOutputProperties("fill");
     const OpInfo::TensorProperties out_prop0 = out_props[0];
-    EXPECT_EQ("float: [1000,1000,1000,1000]", PropToString(out_prop0));
+    EXPECT_EQ("int32: [1000,1000,1000,1000]", PropToString(out_prop0));
     EXPECT_FALSE(out_prop0.has_value());
   }
 }
@@ -1201,7 +1371,7 @@ TEST_F(GraphPropertiesTest, PackWithConstMinus1AndReshapes) {
   }
   // if input of Select can be either vector or the same shape to the
   // input/output; in this case, even if we know input and output are
-  // [4, ?], we can't say it's [4, ?] or a vector; hence, it shoudl be
+  // [4, ?], we can't say it's [4, ?] or a vector; hence, it should be
   // unknown.
   {
     const auto out_props = properties.GetOutputProperties("s1");

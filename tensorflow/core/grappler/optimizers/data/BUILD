@@ -4,11 +4,13 @@ load("//tensorflow/core/platform:build_config.bzl", "tf_protos_all")
 
 package(
     default_visibility = [
+        "//tensorflow/core/data:__pkg__",
+        "//tensorflow/core/data/service:__pkg__",
         "//tensorflow/core/grappler/optimizers/data:__subpackages__",
         "//tensorflow/core/kernels/data:__pkg__",
         "//tensorflow/core/kernels/data/experimental:__pkg__",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -21,19 +23,18 @@ cc_library(
         ":disable_prefetch_legacy_autotune",
         ":enable_gradient_descent",
         ":filter_fusion",
-        ":filter_with_random_uniform_fusion",
-        ":hoist_random_uniform",
-        ":latency_all_edges",
+        ":filter_parallelization",
+        ":inject_prefetch",
+        ":make_deterministic",
         ":make_sloppy",
         ":map_and_batch_fusion",
         ":map_and_filter_fusion",
         ":map_fusion",
         ":map_parallelization",
-        ":map_vectorization",
         ":meta_optimizer",
         ":noop_elimination",
         ":parallel_batch",
-        ":reorder_data_discarding_ops",
+        ":replicate_on_split",
         ":shuffle_and_repeat_fusion",
         ":slack",
         ":use_private_thread_pool",
@@ -50,17 +51,37 @@ cc_library(
         "@com_google_absl//absl/container:flat_hash_map",
         "@com_google_absl//absl/container:flat_hash_set",
         "@com_google_absl//absl/strings",
+        "//tensorflow/core/kernels/data:shard_dataset_op",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:lib",
+        "//tensorflow/core/data:dataset_utils",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:mutable_graph_view",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler/clusters:cluster",
         "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:lib",
         "//tensorflow/core/grappler/utils:functions",
-        "//tensorflow/core/kernels/data:dataset_utils",
     ] + tf_protos_all(),
     alwayslink = 1,
+)
+
+tf_cc_test(
+    name = "auto_shard_test",
+    srcs = ["auto_shard_test.cc"],
+    deps = [
+        ":auto_shard",
+        ":graph_test_utils",
+        ":graph_utils",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core/framework:function_testlib",
+        "//tensorflow/core/framework:node_def_proto_cc",
+        "//tensorflow/core/framework:types_proto_cc",
+        "//tensorflow/core/grappler:grappler_item",
+        "//tensorflow/core/grappler:mutable_graph_view",
+        "@com_google_absl//absl/strings",
+    ],
 )
 
 cc_library(
@@ -86,6 +107,7 @@ cc_library(
 
 tf_cc_test(
     name = "autotune_buffer_sizes_test",
+    size = "small",
     srcs = ["autotune_buffer_sizes_test.cc"],
     deps = [
         ":autotune_buffer_sizes",
@@ -124,6 +146,7 @@ cc_library(
 
 tf_cc_test(
     name = "batch_parallelization_test",
+    size = "small",
     srcs = ["batch_parallelization_test.cc"],
     deps = [
         ":batch_parallelization",
@@ -159,6 +182,7 @@ cc_library(
 
 tf_cc_test(
     name = "disable_intra_op_parallelism_test",
+    size = "small",
     srcs = ["disable_intra_op_parallelism_test.cc"],
     deps = [
         ":disable_intra_op_parallelism",
@@ -194,6 +218,7 @@ cc_library(
 
 tf_cc_test(
     name = "disable_prefetch_legacy_autotune_test",
+    size = "small",
     srcs = ["disable_prefetch_legacy_autotune_test.cc"],
     deps = [
         ":disable_prefetch_legacy_autotune",
@@ -229,6 +254,7 @@ cc_library(
 
 tf_cc_test(
     name = "enable_gradient_descent_test",
+    size = "small",
     srcs = ["enable_gradient_descent_test.cc"],
     deps = [
         ":enable_gradient_descent",
@@ -268,6 +294,7 @@ cc_library(
 
 tf_cc_test(
     name = "filter_fusion_test",
+    size = "small",
     srcs = ["filter_fusion_test.cc"],
     deps = [
         ":filter_fusion",
@@ -282,17 +309,19 @@ tf_cc_test(
 )
 
 cc_library(
-    name = "filter_with_random_uniform_fusion",
-    srcs = ["filter_with_random_uniform_fusion.cc"],
+    name = "filter_parallelization",
+    srcs = ["filter_parallelization.cc"],
     hdrs = [
-        "filter_with_random_uniform_fusion.h",
+        "filter_parallelization.h",
     ],
-    visibility = ["//visibility:public"],
     deps = [
+        ":function_utils",
         ":graph_utils",
         ":optimizer_base",
-        "//tensorflow/core:lib",
-        "//tensorflow/core/grappler:graph_view",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core/grappler:mutable_graph_view",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
@@ -303,11 +332,11 @@ cc_library(
 )
 
 tf_cc_test(
-    name = "filter_with_random_uniform_fusion_test",
-    srcs = ["filter_with_random_uniform_fusion_test.cc"],
-    visibility = ["//visibility:public"],
+    name = "filter_parallelization_test",
+    size = "small",
+    srcs = ["filter_parallelization_test.cc"],
     deps = [
-        ":filter_with_random_uniform_fusion",
+        ":filter_parallelization",
         ":graph_test_utils",
         ":graph_utils",
         "//tensorflow/core:framework",
@@ -343,6 +372,7 @@ cc_library(
 
 tf_cc_test(
     name = "fusion_utils_test",
+    size = "small",
     srcs = ["fusion_utils_test.cc"],
     deps = [
         ":function_utils",
@@ -374,6 +404,7 @@ cc_library(
 
 tf_cc_test(
     name = "function_utils_test",
+    size = "small",
     srcs = ["function_utils_test.cc"],
     deps = [
         ":function_utils",
@@ -409,6 +440,7 @@ cc_library(
 
 tf_cc_test(
     name = "graph_utils_test",
+    size = "small",
     srcs = ["graph_utils_test.cc"],
     deps = [
         ":graph_utils",
@@ -419,7 +451,7 @@ tf_cc_test(
         "//tensorflow/core:testlib",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
-    ],
+    ] + tf_protos_all(),
 )
 
 cc_library(
@@ -440,75 +472,83 @@ cc_library(
 )
 
 cc_library(
-    name = "hoist_random_uniform",
-    srcs = ["hoist_random_uniform.cc"],
+    name = "make_deterministic",
+    srcs = ["make_deterministic.cc"],
     hdrs = [
-        "hoist_random_uniform.h",
+        "make_deterministic.h",
     ],
     deps = [
+        ":split_utils",
         ":function_utils",
         ":graph_utils",
         ":optimizer_base",
         "@com_google_absl//absl/container:flat_hash_set",
-        "//tensorflow/core:lib",
+        "//tensorflow/core/data:dataset_utils",
+        "//tensorflow/core:framework",
         "//tensorflow/core/grappler:mutable_graph_view",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
         "//tensorflow/core/grappler/clusters:cluster",
         "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
-        "//tensorflow/core:lib_internal",
     ] + tf_protos_all(),
     alwayslink = 1,
 )
 
 tf_cc_test(
-    name = "hoist_random_uniform_test",
-    srcs = ["hoist_random_uniform_test.cc"],
+    name = "make_deterministic_test",
+    size = "small",
+    srcs = ["make_deterministic_test.cc"],
     deps = [
+        ":function_utils",
         ":graph_test_utils",
         ":graph_utils",
-        ":hoist_random_uniform",
+        ":make_deterministic",
         "//tensorflow/core:framework",
+        "//tensorflow/core:framework_internal",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
         "//tensorflow/core/grappler:grappler_item",
-    ] + tf_protos_all(),
+    ],
 )
 
 cc_library(
-    name = "latency_all_edges",
-    srcs = ["latency_all_edges.cc"],
+    name = "split_utils",
+    srcs = ["split_utils.cc"],
     hdrs = [
-        "latency_all_edges.h",
+        "split_utils.h",
     ],
     deps = [
+        ":function_utils",
         ":graph_utils",
-        ":optimizer_base",
-        "//tensorflow/core/grappler:mutable_graph_view",
-        "//tensorflow/core/kernels/data:stats_utils",
-        "//tensorflow/core:lib",
-        "//tensorflow/core/grappler:grappler_item",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:flat_hash_set",
+        "@com_google_absl//absl/strings",
+        "//tensorflow/core:framework",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
-        "//tensorflow/core/grappler/clusters:cluster",
-        "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
+        "//tensorflow/core:lib",
+        "//tensorflow/core/platform:statusor",
     ] + tf_protos_all(),
-    alwayslink = 1,
 )
 
 tf_cc_test(
-    name = "latency_all_edges_test",
-    srcs = ["latency_all_edges_test.cc"],
+    name = "split_utils_test",
+    size = "small",
+    srcs = ["split_utils_test.cc"],
     deps = [
-        ":graph_utils",
-        ":latency_all_edges",
+        ":function_utils",
+        ":split_utils",
+        "//tensorflow/core:core_cpu",
+        "//tensorflow/core:direct_session",
         "//tensorflow/core:framework",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
-        "//tensorflow/core/grappler:grappler_item",
+        "//tensorflow/core/kernels:array",
+        "//tensorflow/core/kernels:math",
+        "//tensorflow/core/platform:status_matchers",
     ],
 )
 
@@ -517,10 +557,10 @@ cc_library(
     srcs = ["make_sloppy.cc"],
     hdrs = ["make_sloppy.h"],
     deps = [
+        ":graph_utils",
         ":optimizer_base",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:mutable_graph_view",
-        "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler/clusters:cluster",
         "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
     ] + tf_protos_all(),
@@ -529,6 +569,7 @@ cc_library(
 
 tf_cc_test(
     name = "make_sloppy_test",
+    size = "small",
     srcs = ["make_sloppy_test.cc"],
     deps = [
         ":graph_test_utils",
@@ -565,6 +606,7 @@ cc_library(
 
 tf_cc_test(
     name = "map_and_batch_fusion_test",
+    size = "small",
     srcs = ["map_and_batch_fusion_test.cc"],
     deps = [
         ":graph_utils",
@@ -605,6 +647,7 @@ cc_library(
 
 tf_cc_test(
     name = "map_and_filter_fusion_test",
+    size = "small",
     srcs = ["map_and_filter_fusion_test.cc"],
     deps = [
         ":graph_test_utils",
@@ -644,6 +687,7 @@ cc_library(
 
 tf_cc_test(
     name = "map_fusion_test",
+    size = "small",
     srcs = ["map_fusion_test.cc"],
     deps = [
         ":graph_test_utils",
@@ -684,6 +728,7 @@ cc_library(
 
 tf_cc_test(
     name = "map_parallelization_test",
+    size = "small",
     srcs = ["map_parallelization_test.cc"],
     deps = [
         ":graph_test_utils",
@@ -694,56 +739,6 @@ tf_cc_test(
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
         "//tensorflow/core/grappler:grappler_item",
-    ],
-)
-
-cc_library(
-    name = "map_vectorization",
-    srcs = ["map_vectorization.cc"],
-    hdrs = [
-        "map_vectorization.h",
-    ],
-    deps = [
-        ":function_utils",
-        ":graph_utils",
-        ":optimizer_base",
-        ":vectorization_utils",
-        "@com_google_absl//absl/container:flat_hash_set",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
-        "//tensorflow/core/grappler:mutable_graph_view",
-        "//tensorflow/core/grappler:grappler_item",
-        "//tensorflow/core/grappler:op_types",
-        "//tensorflow/core/grappler:utils",
-        "//tensorflow/core/grappler/clusters:cluster",
-        "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
-        "//tensorflow/core:lib_internal",
-    ] + tf_protos_all(),
-    alwayslink = 1,
-)
-
-tf_cc_test(
-    name = "map_vectorization_test",
-    srcs = ["map_vectorization_test.cc"],
-    deps = [
-        ":function_utils",
-        ":graph_utils",
-        ":map_vectorization",
-        "//tensorflow/core:array_ops_op_lib",
-        "//tensorflow/core:bitwise_ops_op_lib",
-        "//tensorflow/core:core_cpu",
-        "//tensorflow/core:direct_session",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:spectral_ops_op_lib",
-        "//tensorflow/core:test",
-        "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-        "//tensorflow/core/grappler:grappler_item",
-        "//tensorflow/core/grappler/utils:topological_sort",
-        "//tensorflow/core/kernels:math",
-        "//tensorflow/core/kernels/data",
     ],
 )
 
@@ -790,6 +785,7 @@ cc_library(
 
 tf_cc_test(
     name = "noop_elimination_test",
+    size = "small",
     srcs = ["noop_elimination_test.cc"],
     deps = [
         ":graph_utils",
@@ -809,6 +805,7 @@ cc_library(
     ],
     deps = [
         "//tensorflow/core:core_cpu_internal",
+        "//tensorflow/core:framework",
         "//tensorflow/core/grappler/optimizers:custom_graph_optimizer",
     ],
 )
@@ -830,6 +827,7 @@ cc_library(
 
 tf_cc_test(
     name = "parallel_batch_test",
+    size = "small",
     srcs = ["parallel_batch_test.cc"],
     deps = [
         ":graph_test_utils",
@@ -844,18 +842,48 @@ tf_cc_test(
 )
 
 cc_library(
-    name = "reorder_data_discarding_ops",
-    srcs = ["reorder_data_discarding_ops.cc"],
-    hdrs = [
-        "reorder_data_discarding_ops.h",
-    ],
+    name = "replicate_on_split",
+    srcs = ["replicate_on_split.cc"],
+    hdrs = ["replicate_on_split.h"],
     deps = [
-        ":function_utils",
         ":graph_utils",
         ":optimizer_base",
-        "@com_google_absl//absl/container:flat_hash_set",
-        "//tensorflow/core:lib",
+        "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:mutable_graph_view",
+        "//tensorflow/core/grappler/clusters:cluster",
+        "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
+    ] + tf_protos_all(),
+    alwayslink = 1,
+)
+
+tf_cc_test(
+    name = "replicate_on_split_test",
+    size = "small",
+    srcs = ["replicate_on_split_test.cc"],
+    deps = [
+        ":graph_test_utils",
+        ":graph_utils",
+        ":replicate_on_split",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:test",
+        "//tensorflow/core:test_main",
+        "//tensorflow/core:testlib",
+        "//tensorflow/core/grappler:grappler_item",
+    ],
+)
+
+cc_library(
+    name = "inject_prefetch",
+    srcs = ["inject_prefetch.cc"],
+    hdrs = ["inject_prefetch.h"],
+    deps = [
+        ":graph_utils",
+        ":optimizer_base",
+        "//tensorflow/core/data:dataset_utils",
+        "//tensorflow/core/grappler:mutable_graph_view",
+        "//tensorflow/core:framework",
+        "//tensorflow/core:framework_internal",
+        "//tensorflow/core:lib",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler:op_types",
         "//tensorflow/core/grappler:utils",
@@ -867,18 +895,19 @@ cc_library(
 )
 
 tf_cc_test(
-    name = "reorder_data_discarding_ops_test",
-    srcs = ["reorder_data_discarding_ops_test.cc"],
+    name = "inject_prefetch_test",
+    size = "small",
+    srcs = ["inject_prefetch_test.cc"],
     deps = [
         ":graph_test_utils",
         ":graph_utils",
-        ":reorder_data_discarding_ops",
+        ":inject_prefetch",
         "//tensorflow/core:framework",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
         "//tensorflow/core:testlib",
         "//tensorflow/core/grappler:grappler_item",
-    ] + tf_protos_all(),
+    ],
 )
 
 cc_library(
@@ -905,6 +934,7 @@ cc_library(
 
 tf_cc_test(
     name = "shuffle_and_repeat_fusion_test",
+    size = "small",
     srcs = ["shuffle_and_repeat_fusion_test.cc"],
     deps = [
         ":graph_utils",
@@ -940,6 +970,7 @@ cc_library(
 
 tf_cc_test(
     name = "slack_test",
+    size = "small",
     srcs = ["slack_test.cc"],
     deps = [
         ":function_utils",
@@ -949,6 +980,7 @@ tf_cc_test(
         "//tensorflow/core:lib",
         "//tensorflow/core:test",
         "//tensorflow/core:test_main",
+        "//tensorflow/core:testlib",
         "//tensorflow/core/grappler:grappler_item",
         "//tensorflow/core/grappler/utils:functions",
         "//tensorflow/core/kernels/data",
@@ -977,6 +1009,7 @@ cc_library(
 
 tf_cc_test(
     name = "use_private_thread_pool_test",
+    size = "small",
     srcs = ["use_private_thread_pool_test.cc"],
     deps = [
         ":graph_test_utils",
@@ -988,66 +1021,4 @@ tf_cc_test(
         "//tensorflow/core:testlib",
         "//tensorflow/core/grappler:grappler_item",
     ],
-)
-
-cc_library(
-    name = "vectorization_utils",
-    srcs = ["vectorization_utils.cc"],
-    hdrs = [
-        "vectorization_utils.h",
-    ],
-    deps = [
-        ":function_utils",
-        ":graph_utils",
-        "@com_google_absl//absl/container:flat_hash_set",
-        "//tensorflow/cc:ops",
-        "@com_google_absl//absl/strings",
-        "//tensorflow/core:core_cpu",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:lib_internal",
-        "//tensorflow/core/grappler:mutable_graph_view",
-        "//tensorflow/core/grappler:utils",
-        "//tensorflow/core/grappler/optimizers/data/vectorization",
-        "//tensorflow/core/grappler/utils:functions",
-    ] + tf_protos_all(),
-)
-
-tf_cc_test(
-    name = "vectorization_utils_test",
-    srcs = ["vectorization_utils_test.cc"],
-    deps = [
-        ":graph_utils",
-        ":function_utils",
-        ":vectorization_utils",
-        "//tensorflow/core:core_cpu",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:test",
-        "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-        "//tensorflow/core/grappler:grappler_item",
-        "//tensorflow/core/grappler/optimizers:custom_graph_optimizer_registry",
-        # For ops we need registered
-        "//tensorflow/core/kernels/data:dataset_ops",
-        "//tensorflow/core:dataset_ops_op_lib",
-        "//tensorflow/core/kernels:cast_op",
-        "//tensorflow/core/kernels:cwise_op",
-        "//tensorflow/core/kernels:logging_ops",
-        "//tensorflow/core:logging_ops_op_lib",
-        "//tensorflow/core/kernels:math",
-        "//tensorflow/core:spectral_ops_op_lib",
-        "//tensorflow/core:bitwise_ops_op_lib",
-        "//tensorflow/core:array_ops_op_lib",
-        "//tensorflow/core/kernels:nn",
-        "//tensorflow/core:sendrecv_ops_op_lib",
-        "//tensorflow/core:no_op_op_lib",
-        "//tensorflow/core:nn_ops_op_lib",
-        "//tensorflow/core:mkl_nn_ops_op_lib",
-        "//tensorflow/core:math_ops_op_lib",
-        "//tensorflow/core:functional_ops_op_lib",
-        "//tensorflow/core/kernels:parsing",
-        "//tensorflow/core:parsing_ops_op_lib",
-        "//tensorflow/tools/graph_transforms:transform_utils",
-    ] + tf_protos_all(),
 )

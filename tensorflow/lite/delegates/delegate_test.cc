@@ -17,12 +17,15 @@ limitations under the License.
 #include <stdlib.h>
 #include <string.h>
 
+#include <algorithm>
 #include <memory>
 #include <utility>
 #include <vector>
 
 #include <gtest/gtest.h>
 #include "flatbuffers/flatbuffers.h"  // from @flatbuffers
+#include "tensorflow/lite/c/c_api_opaque.h"
+#include "tensorflow/lite/c/c_api_types.h"
 #include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/delegates/delegate_test_util.h"
 #include "tensorflow/lite/interpreter.h"
@@ -38,8 +41,10 @@ limitations under the License.
 namespace tflite {
 namespace delegates {
 
+using test_utils::SimpleDelegate;
 using test_utils::TestDelegate;
 using test_utils::TestFP16Delegation;
+using test_utils::TestTwoDelegates;
 
 namespace {
 
@@ -128,108 +133,6 @@ TEST_F(TestDelegate, DelegateNodeInvokeFailure) {
   for (int i = 0; i < 3; ++i) {
     EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
   }
-}
-
-TEST_F(TestDelegate, SecondDelegationPrepareFailure) {
-  // First delegate only supports nodes 1, 2. Gets applied successfully.
-  // This delegate should support dynamic tensors, otherwise the second won't be
-  // applied.
-  delegate_ = std::unique_ptr<SimpleDelegate>(
-      new SimpleDelegate({1, 2}, kTfLiteDelegateFlagsAllowDynamicTensors));
-  // Second delegate supports node 0, but fails during the delegate-node's
-  // Prepare.
-  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {0}, kTfLiteDelegateFlagsNone, true /**fail_node_prepare**/));
-
-  // Initially, execution plan has 3 nodes.
-  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-  // First delegate should be applied successfully, yielding a plan with 2
-  // nodes.
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-  // Second delegate won't get applied.
-  // As a result, previous delegate should also get undone, restoring the
-  // execution plan to its original state.
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
-      kTfLiteDelegateError);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-
-  std::vector<float> input = {1.0f, 2.0f, 3.0f};
-  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f};
-  constexpr int kOutputTensorIndex = 3;
-  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
-
-  // Verify Invoke() behavior.
-  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 3 * sizeof(float));
-  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 3 * sizeof(float));
-  interpreter_->Invoke();
-  for (int i = 0; i < 3; ++i) {
-    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
-  }
-}
-
-TEST_F(TestDelegate, SecondDelegationInvokeFailure) {
-  delegate_ = std::unique_ptr<SimpleDelegate>(
-      new SimpleDelegate({1, 2}, kTfLiteDelegateFlagsAllowDynamicTensors));
-  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {0}, kTfLiteDelegateFlagsNone, false /**fail_node_prepare**/,
-      0 /**min_ops_per_subset**/, true /**fail_node_invoke**/));
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  std::vector<float> input = {1.0f, 2.0f, 3.0f};
-  // Outputs match the AddOp path, rather than delegate path.
-  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f};
-  constexpr int kOutputTensorIndex = 3;
-
-  // Verify Invoke() behavior to ensure Interpreter isn't broken.
-  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 3 * sizeof(float));
-  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 3 * sizeof(float));
-  EXPECT_EQ(interpreter_->Invoke(), kTfLiteError);
-  EXPECT_EQ(RemoveAllDelegates(), kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-  ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk);
-  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
-  for (int i = 0; i < 3; ++i) {
-    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
-  }
-}
-
-// This test ensures that node indices in multi-delegate application are handled
-// correctly by the TFLite partitioning algorithm.
-TEST_F(TestDelegate, TwoDelegates_ExecutionPlanIndicesDifferent) {
-  // First delegate supports nodes 0, 1.
-  // After this delegation, the execution plan size is 2.
-  delegate_ = std::unique_ptr<SimpleDelegate>(
-      new SimpleDelegate({0, 1}, kTfLiteDelegateFlagsAllowDynamicTensors));
-  // Second delegate supports (original) node index 2.
-  // The execution plan has 2 nodes, so this verifies that the partitioning
-  // algorithm correctly refers to (original) node indices instead of execution
-  // plan indices.
-  delegate2_ = std::unique_ptr<SimpleDelegate>(
-      new SimpleDelegate({2}, kTfLiteDelegateFlagsNone));
-
-  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  // Verify Invoke works.
-  ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk);
 }
 
 TEST_F(TestDelegate, StaticDelegateMakesGraphImmutable) {
@@ -331,39 +234,6 @@ TEST_F(TestDelegate, SetInvalidHandleToTensor) {
   EXPECT_EQ(tensor->buffer_handle, kTfLiteNullBufferHandle);
 }
 
-// We utilize delegation in such a way as to allow node subsets with a minimum
-// number of ops only.
-TEST_F(TestDelegate, TestDelegationWithPartitionPreview) {
-  // We set kTfLiteDelegateFlagsAllowDynamicTensors to ensure the second
-  // delegate can be applied.
-  // Ops 0 and 2 are delegated but end up in the same partition (based on
-  // dependency analysis). However, since min_ops_per_subset = 3, no delegation
-  // takes place.
-  delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {0, 2}, kTfLiteDelegateFlagsAllowDynamicTensors,
-      false /**fail_node_prepare**/, 3 /**min_ops_per_subset**/));
-  interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate());
-
-  // Original execution plan remains.
-  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-  ASSERT_EQ(interpreter_->execution_plan()[0], 0);
-  ASSERT_EQ(interpreter_->execution_plan()[1], 1);
-  ASSERT_EQ(interpreter_->execution_plan()[2], 2);
-
-  // Same ops supported, but min_ops_per_subset = 2.
-  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {0, 2}, kTfLiteDelegateFlagsAllowDynamicTensors,
-      false /**fail_node_prepare**/, 2 /**min_ops_per_subset**/));
-  interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate());
-
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-  ASSERT_EQ(interpreter_->execution_plan()[0], 3);
-  const auto* node_and_reg = interpreter_->node_and_registration(3);
-  ASSERT_EQ(node_and_reg->second.custom_name,
-            delegate2_->FakeFusedRegistration().custom_name);
-  ASSERT_EQ(interpreter_->execution_plan()[1], 1);
-}
-
 TEST_F(TestDelegate, TestResizeInputWithNonDynamicDelegate) {
   delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate({0, 1, 2}));
   ASSERT_EQ(
@@ -377,9 +247,8 @@ TEST_F(TestDelegate, TestResizeInputWithNonDynamicDelegate) {
   ASSERT_EQ(interpreter_->ResizeInputTensor(0, {1, 3}), kTfLiteOk);
   ASSERT_EQ(interpreter_->ResizeInputTensor(1, {1, 3}), kTfLiteOk);
   ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-  // This should fail, since the previous application of the delegate will be
-  // re-done automatically, making the graph immutable again.
-  ASSERT_NE(
+  // ModifyGraphWithDelegate shouldn't fail, but graph won't change.
+  ASSERT_EQ(
       interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
       kTfLiteOk);
   // Ensure graph has been restored to its valid delegated state.
@@ -404,68 +273,6 @@ TEST_F(TestDelegate, TestResizeInputWithNonDynamicDelegate) {
   ASSERT_EQ(interpreter_->execution_plan().size(), 3);
   ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
   ASSERT_EQ(interpreter_->execution_plan().size(), 1);
-
-  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 4 * sizeof(float));
-  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 4 * sizeof(float));
-  interpreter_->Invoke();
-  for (int i = 0; i < 4; ++i) {
-    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
-  }
-}
-
-TEST_F(TestDelegate, TestResizeInputWithMultipleDelegates) {
-  // First delegate only supports node 0.
-  // This delegate should support dynamic tensors, otherwise the second won't be
-  // applied.
-  delegate_ = std::unique_ptr<SimpleDelegate>(
-      new SimpleDelegate({0}, kTfLiteDelegateFlagsAllowDynamicTensors));
-  // Second delegate supports nodes 1 & 2, and makes the graph immutable.
-  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate({1, 2}));
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  // Should be two delegates nodes.
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  // Try resizing input to same shape as before (which should be a No-op).
-  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {3}), kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  // Resizing input tensors should temporarily restore original execution plan
-  // of 3 nodes.
-  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {1, 3}), kTfLiteOk);
-  ASSERT_EQ(interpreter_->ResizeInputTensor(1, {1, 3}), kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-  // This should fail, since the previous application of the delegate will be
-  // re-done automatically, making the graph immutable again.
-  ASSERT_NE(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  // Ensure graph has been restored to its valid delegated state.
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  std::vector<float> input = {1.0f, 2.0f, 3.0f, 4.0f};
-  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f, 8.0f};
-  constexpr int kOutputTensorIndex = 2;
-  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
-
-  // Verify Invoke() behavior.
-  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 3 * sizeof(float));
-  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 3 * sizeof(float));
-  interpreter_->Invoke();
-  for (int i = 0; i < 3; ++i) {
-    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
-  }
-
-  // Resize again, but call AllocateTensors as usual afterwards.
-  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {1, 4}), kTfLiteOk);
-  ASSERT_EQ(interpreter_->ResizeInputTensor(1, {1, 4}), kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
-  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
 
   memcpy(interpreter_->typed_tensor<float>(0), input.data(), 4 * sizeof(float));
   memcpy(interpreter_->typed_tensor<float>(1), input.data(), 4 * sizeof(float));
@@ -509,10 +316,8 @@ TEST_F(TestDelegate, TestRequirePropagatedShapes_DynamicDelegateWithFlag) {
   // propagated by runtime.
   int delegate_flags = kTfLiteDelegateFlagsAllowDynamicTensors |
                        kTfLiteDelegateFlagsRequirePropagatedShapes;
-  delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {0, 1, 2}, delegate_flags, false /**fail_node_prepare**/,
-      3 /**min_ops_per_subset**/, false /**fail_node_invoke**/,
-      true /**automatic_shape_propagation**/));
+  delegate_ = SimpleDelegate::DelegateWithRuntimeShapePropagation(
+      {0, 1, 2}, delegate_flags, 3);
   ASSERT_EQ(
       interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
       kTfLiteOk);
@@ -542,10 +347,8 @@ TEST_F(TestDelegate, TestRequirePropagatedShapes_DynamicDelegateWithoutFlag) {
   // Delegate sets both flags and in its Prepare, ensures that shapes have been
   // propagated by runtime.
   int delegate_flags = kTfLiteDelegateFlagsAllowDynamicTensors;
-  delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {0, 1, 2}, delegate_flags, false /**fail_node_prepare**/,
-      3 /**min_ops_per_subset**/, false /**fail_node_invoke**/,
-      true /**automatic_shape_propagation**/));
+  delegate_ = SimpleDelegate::DelegateWithRuntimeShapePropagation(
+      {0, 1, 2}, delegate_flags, 3);
   ASSERT_EQ(
       interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
       kTfLiteOk);
@@ -554,93 +357,6 @@ TEST_F(TestDelegate, TestRequirePropagatedShapes_DynamicDelegateWithoutFlag) {
   ASSERT_EQ(interpreter_->ResizeInputTensor(1, {1, 4}), kTfLiteOk);
   ASSERT_EQ(interpreter_->execution_plan().size(), 1);
   ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteError);
-}
-
-TEST_F(TestDelegate, TestRequirePropagatedShapes_MultipleDelegates) {
-  // First delegate needs to support dynamic tensors to allow second delegation.
-  // This delegate does not require automatic propagation.
-  delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {0}, kTfLiteDelegateFlagsAllowDynamicTensors,
-      false /**fail_node_prepare**/, 1 /**min_ops_per_subset**/,
-      false /**fail_node_invoke**/, false /**automatic_shape_propagation**/));
-  // Second delegate supports nodes 1 & 2, and requires automatic shape
-  // propagation.
-  int delegate_flags = kTfLiteDelegateFlagsAllowDynamicTensors |
-                       kTfLiteDelegateFlagsRequirePropagatedShapes;
-  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
-      {1, 2}, delegate_flags, false /**fail_node_prepare**/,
-      1 /**min_ops_per_subset**/, false /**fail_node_invoke**/,
-      true /**automatic_shape_propagation**/));
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  // Should be two delegate nodes.
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {1, 4}), kTfLiteOk);
-  ASSERT_EQ(interpreter_->ResizeInputTensor(1, {1, 4}), kTfLiteOk);
-  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  std::vector<float> input = {1.0f, 2.0f, 3.0f, 4.0f};
-  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f, 8.0f};
-  constexpr int kOutputTensorIndex = 2;
-  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
-
-  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 4 * sizeof(float));
-  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 4 * sizeof(float));
-  interpreter_->Invoke();
-  for (int i = 0; i < 4; ++i) {
-    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
-  }
-}
-
-TEST_F(TestDelegate, ReleaseNonPersistentMemoryWithDelegates) {
-  // First delegate only supports node 0.
-  // This delegate should support dynamic tensors, otherwise the second won't be
-  // applied.
-  delegate_ = std::unique_ptr<SimpleDelegate>(
-      new SimpleDelegate({0}, kTfLiteDelegateFlagsAllowDynamicTensors));
-  // Second delegate supports nodes 1 & 2, and makes the graph immutable.
-  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate({1, 2}));
-
-  // No-op.
-  ASSERT_EQ(interpreter_->ReleaseNonPersistentMemory(), kTfLiteOk);
-
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  ASSERT_EQ(
-      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
-      kTfLiteOk);
-  // Should be two delegates nodes.
-  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
-
-  ASSERT_EQ(interpreter_->ReleaseNonPersistentMemory(), kTfLiteOk);
-  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
-
-  // This should fail, since the graph is immutable.
-  ASSERT_NE(
-      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
-      kTfLiteOk);
-
-  std::vector<float> input = {1.0f, 2.0f, 3.0f, 4.0f};
-  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f, 8.0f};
-  constexpr int kOutputTensorIndex = 2;
-  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
-
-  // Verify Invoke() behavior.
-  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 3 * sizeof(float));
-  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 3 * sizeof(float));
-  interpreter_->Invoke();
-  for (int i = 0; i < 3; ++i) {
-    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
-  }
-
-  ASSERT_EQ(interpreter_->ReleaseNonPersistentMemory(), kTfLiteOk);
 }
 
 TEST_F(TestDelegate, TestCopyFromBufferInvoke) {
@@ -701,6 +417,165 @@ TEST_F(TestDelegate, TestCopyFromBuffer) {
   }
 }
 
+// A utility struct, intended to be used to record the interaction between a
+// test delegate and the runtime.
+struct DelegateState {
+  bool delegate_prepared;
+  bool copy_from_buffer_handle_called;
+  bool free_buffer_handle_called;
+  int buffer_handle;
+
+  void Reset() {
+    delegate_prepared = false;
+    copy_from_buffer_handle_called = false;
+    free_buffer_handle_called = false;
+    buffer_handle = -1;
+  }
+};
+
+struct OpaqueTestDelegate {
+  static constexpr int kTestDelegateOutput = 42;
+
+  static inline TfLiteStatus Prepare(
+      TfLiteOpaqueContext* opaque_context,
+      struct TfLiteOpaqueDelegateStruct* opaque_delegate, void* data) {
+    DelegateState* delegate_state = reinterpret_cast<DelegateState*>(data);
+    delegate_state->delegate_prepared = true;
+
+    TfLiteRegistration registration{};
+    registration.prepare = [](TfLiteContext* context,
+                              TfLiteNode* node) -> TfLiteStatus {
+      return kTfLiteOk;
+    };
+    registration.invoke = [](TfLiteContext* context,
+                             TfLiteNode* node) -> TfLiteStatus {
+      return kTfLiteOk;
+    };
+
+    TfLiteContext* context = reinterpret_cast<TfLiteContext*>(opaque_context);
+    TfLiteIntArray* execution_plan;
+    context->GetExecutionPlan(context, &execution_plan);
+    context->ReplaceNodeSubsetsWithDelegateKernels(
+        context, registration, execution_plan,
+        reinterpret_cast<TfLiteDelegate*>(opaque_delegate));
+    return kTfLiteOk;
+  }
+
+  static inline TfLiteStatus CopyFromBufferHandle(
+      TfLiteOpaqueContext* context, struct TfLiteOpaqueDelegateStruct* delegate,
+      void* data, TfLiteBufferHandle buffer_handle,
+      TfLiteOpaqueTensor* opaque_tensor) {
+    DelegateState* delegate_state = reinterpret_cast<DelegateState*>(data);
+    delegate_state->copy_from_buffer_handle_called = true;
+    delegate_state->buffer_handle = buffer_handle;
+
+    auto* output =
+        reinterpret_cast<float*>(TfLiteOpaqueTensorData(opaque_tensor));
+    int total_num_elements = 1;
+    for (int i = 0; i < TfLiteOpaqueTensorNumDims(opaque_tensor); ++i) {
+      total_num_elements *= TfLiteOpaqueTensorDim(opaque_tensor, i);
+    }
+    std::vector<float> meaning_of_life(total_num_elements, kTestDelegateOutput);
+    memcpy(output, meaning_of_life.data(),
+           meaning_of_life.size() * sizeof(float));
+
+    return kTfLiteOk;
+  }
+
+  static inline void FreeBufferHandle(
+      TfLiteOpaqueContext* context, struct TfLiteOpaqueDelegateStruct* delegate,
+      void* data, TfLiteBufferHandle* buffer_handle) {
+    DelegateState* delegate_state = reinterpret_cast<DelegateState*>(data);
+    delegate_state->free_buffer_handle_called = true;
+    delegate_state->buffer_handle = *buffer_handle;
+  }
+};
+
+// Ensure that the runtime correctly interacts with a delegate that uses the
+// 'TfLiteOpaqueDelegateBuilder'.  This test:
+// 1. Defines a delegate that will replace the full graph will a delegate
+//    kernel.
+// 2. Associates the model's output tensor with the delegate and marks the
+//    output tensor's data as stale, to prompt the runtime to use the delegate's
+//    'CopyFromBufferHandle' callback.
+// 3. The test driver will overwrite the output tensor's buffer handle, to
+//    prompt the runtime to use the delegate's 'FreeBufferHandle' callback.
+// 4. Eventually the test driver destroys the interpreter, and checks that
+//    also the second buffer handle gets deallocated via the delegate callback.
+TEST(TestOpaqueDelegate, PrepareCopyFromFree) {
+  DelegateState delegate_state;
+  delegate_state.Reset();
+
+  std::unique_ptr<tflite::FlatBufferModel> model =
+      tflite::FlatBufferModel::BuildFromFile(
+          "third_party/tensorflow/lite/testdata/add.bin");
+  ASSERT_NE(model, nullptr);
+  constexpr int kNumTensorElements = 1 * 8 * 8 * 3;
+
+  TfLiteOpaqueDelegateBuilder opaque_delegate{};
+  opaque_delegate.data = &delegate_state;
+  opaque_delegate.CopyFromBufferHandle =
+      OpaqueTestDelegate::CopyFromBufferHandle;
+  opaque_delegate.FreeBufferHandle = OpaqueTestDelegate::FreeBufferHandle;
+  opaque_delegate.Prepare = OpaqueTestDelegate::Prepare;
+
+  tflite::ops::builtin::BuiltinOpResolver resolver;
+  tflite::InterpreterBuilder builder(*model, resolver);
+  TfLiteDelegate tflite_delegate{};
+  tflite_delegate.opaque_delegate_builder = &opaque_delegate;
+  builder.AddDelegate(&tflite_delegate);
+  std::unique_ptr<tflite::Interpreter> interpreter;
+  builder(&interpreter);
+  ASSERT_NE(interpreter, nullptr);
+
+  // Allocate tensor buffers.
+  ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteOk);
+
+  // Fill input buffers
+  float* input = interpreter->typed_input_tensor<float>(0);
+  std::fill(input, input + kNumTensorElements, 1);
+
+  // We set the buffer handle of the output tensor and mark its data as stale.
+  // This will make the interpreter call 'CopyFromBufferHandle' to refresh the
+  // output tensor's data.
+  EXPECT_FALSE(delegate_state.free_buffer_handle_called);
+  int first_buffer_handle = 1;
+  const int kOutputTensorIndex = 2;
+  interpreter->SetBufferHandle(kOutputTensorIndex, first_buffer_handle,
+                               &tflite_delegate);
+  TfLiteTensor* output_t = interpreter->output_tensor(0);
+  output_t->data_is_stale = true;
+
+  // Run inference
+  ASSERT_EQ(interpreter->Invoke(), kTfLiteOk);
+  EXPECT_TRUE(delegate_state.delegate_prepared);
+  EXPECT_TRUE(delegate_state.copy_from_buffer_handle_called);
+  EXPECT_EQ(delegate_state.buffer_handle, first_buffer_handle);
+  EXPECT_FALSE(delegate_state.free_buffer_handle_called);
+  float* outputs = interpreter->typed_output_tensor<float>(0);
+  for (int i = 0; i < kNumTensorElements; ++i) {
+    EXPECT_EQ(outputs[i], OpaqueTestDelegate::kTestDelegateOutput);
+  }
+
+  delegate_state.Reset();
+  // Setting a buffer handle on a tensor that already has a buffer handle
+  // associated with it will free the previously installed buffer handle.
+  int second_buffer_handle = first_buffer_handle + 1;
+  interpreter->SetBufferHandle(kOutputTensorIndex, second_buffer_handle,
+                               &tflite_delegate);
+  EXPECT_FALSE(delegate_state.copy_from_buffer_handle_called);
+  EXPECT_EQ(delegate_state.buffer_handle, first_buffer_handle);
+  EXPECT_TRUE(delegate_state.free_buffer_handle_called);
+
+  // Destroying the interpreter will release any buffer handles that are
+  // associated with the tensors owner by the interpreter.
+  delegate_state.Reset();
+  interpreter.reset();
+  EXPECT_FALSE(delegate_state.copy_from_buffer_handle_called);
+  EXPECT_EQ(delegate_state.buffer_handle, second_buffer_handle);
+  EXPECT_TRUE(delegate_state.free_buffer_handle_called);
+}
+
 TEST_F(TestDelegate, DelegateCustomOpResolution) {
   // Build a flatbuffer model that contains the "my_add" custom op which gets
   // resolved only after SimpleDelegate is applied.
@@ -751,14 +626,14 @@ TEST_F(TestDelegate, DelegateCustomOpResolution) {
           model, ::tflite::ops::builtin::BuiltinOpResolver())(&interpreter),
       kTfLiteOk);
   // AllocateTensors should fail, since my_add hasn't been resolved.
-  ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteError);
+  ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteUnresolvedOps);
 
   // Applying static delegate won't work, since the interpreter will first try
   // to Prepare all original nodes.
   std::unique_ptr<SimpleDelegate> static_delegate(new SimpleDelegate({0}));
   ASSERT_EQ(interpreter->ModifyGraphWithDelegate(
                 static_delegate->get_tf_lite_delegate()),
-            kTfLiteError);
+            kTfLiteUnresolvedOps);
 
   // Applying delegate that supports dynamic tensors should work.
   std::unique_ptr<SimpleDelegate> dynamic_delegate(
@@ -771,7 +646,7 @@ TEST_F(TestDelegate, DelegateCustomOpResolution) {
 }
 
 TEST_F(TestDelegate, AllSubgraphsAreDelegatedByDefault) {
-  interpreter_->AddSubgraphs(1);
+  AddSubgraphs(1);
   SetUpSubgraph(interpreter_->subgraph(1));
   delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate({0, 1, 2}));
   ASSERT_EQ(
@@ -789,7 +664,7 @@ TEST_F(TestDelegate, AllSubgraphsAreDelegatedByDefault) {
 }
 
 TEST_F(TestDelegate, ValidationSubgraphsAreNotDelegated) {
-  interpreter_->AddSubgraphs(1);
+  AddSubgraphs(1);
   SetUpSubgraph(interpreter_->subgraph(1));
   interpreter_->subgraph(1)->SetName("VALIDATION:foo");
   delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate({0, 1, 2}));
@@ -804,10 +679,343 @@ TEST_F(TestDelegate, ValidationSubgraphsAreNotDelegated) {
             delegate_->FakeFusedRegistration().custom_name);
 }
 
+TEST_P(TestTwoDelegates, SecondDelegationPrepareFailure) {
+  auto delegate_flag_pair = GetParam();
+  // First delegate only supports nodes 1, 2. Gets applied successfully.
+  delegate_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({1, 2}, delegate_flag_pair.first));
+  // Second delegate supports node 0, but fails during the delegate-node's
+  // Prepare.
+  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
+      {0}, delegate_flag_pair.second, true /**fail_node_prepare**/));
+
+  // Initially, execution plan has 3 nodes.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
+  if (delegate_flag_pair.first == kTfLiteDelegateFlagsAllowDynamicTensors &&
+      delegate_flag_pair.second == kTfLiteDelegateFlagsAllowDynamicTensors) {
+    // If both delegates support dynamic tensors, the execution plan isn't
+    // prepared by ModifyGraphWithDelegate unless the graph was previously
+    // invokable. This is mainly because dynamic tensors anyway need
+    // allocations during Invoke.
+    // But for this test, we call AllocateTensors() to trigger allocations.
+    ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  }
+  // First delegate should be applied successfully, yielding a plan with 2
+  // nodes.
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  // Second delegate won't get applied.
+  // As a result, previous delegate should also get undone, restoring the
+  // execution plan to its original state.
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteDelegateError);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
+
+  std::vector<float> input = {1.0f, 2.0f, 3.0f};
+  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f};
+  constexpr int kOutputTensorIndex = 3;
+  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
+
+  // Verify Invoke() behavior.
+  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 3 * sizeof(float));
+  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 3 * sizeof(float));
+  interpreter_->Invoke();
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
+  }
+}
+
+TEST_P(TestTwoDelegates, SecondDelegationInvokeFailure) {
+  auto delegate_flag_pair = GetParam();
+  delegate_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({1, 2}, delegate_flag_pair.first));
+  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
+      {0}, delegate_flag_pair.second, false /**fail_node_prepare**/,
+      0 /**min_ops_per_subset**/, true /**fail_node_invoke**/));
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+  if (delegate_flag_pair.first == kTfLiteDelegateFlagsAllowDynamicTensors &&
+      delegate_flag_pair.second == kTfLiteDelegateFlagsAllowDynamicTensors) {
+    // If both delegates support dynamic tensors, the execution plan isn't
+    // prepared by ModifyGraphWithDelegate unless the graph was previously
+    // invokable. This is mainly because dynamic tensors anyway need
+    // allocations during Invoke.
+    // Call AllocateTensors() to trigger allocations.
+    ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  }
+
+  std::vector<float> input = {1.0f, 2.0f, 3.0f};
+  // Outputs match the AddOp path, rather than delegate path.
+  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f};
+  constexpr int kOutputTensorIndex = 3;
+
+  // Verify Invoke() behavior to ensure Interpreter isn't broken.
+  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 3 * sizeof(float));
+  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 3 * sizeof(float));
+  EXPECT_EQ(interpreter_->Invoke(), kTfLiteError);
+  EXPECT_EQ(RemoveAllDelegates(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
+  ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk);
+  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
+  }
+}
+
+// This test ensures that node indices in multi-delegate application are handled
+// correctly by the TFLite partitioning algorithm.
+TEST_P(TestTwoDelegates, NodeIndicesCorrectlyHandledAfterDelegation) {
+  auto delegate_flag_pair = GetParam();
+  // First delegate supports nodes 0, 1.
+  delegate_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({0, 1}, delegate_flag_pair.first));
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  // Second delegate supports (original) node index 2.
+  // The execution plan has 2 nodes, so this verifies that the partitioning
+  // algorithm correctly refers to (original) node indices instead of execution
+  // plan indices.
+  delegate2_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({2}, delegate_flag_pair.second));
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+}
+
+TEST_P(TestTwoDelegates, TestResizeInputTensors) {
+  auto delegate_flag_pair = GetParam();
+  // First delegate only supports node 0.
+  delegate_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({0}, delegate_flag_pair.first));
+  // Second delegate supports nodes 1 & 2.
+  delegate2_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({1, 2}, delegate_flag_pair.second));
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  // Should be two delegated nodes.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  // Try resizing input to same shape as before (which should be a No-op).
+  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {3}), kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  // Resize inputs to new shape.
+  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {1, 4}), kTfLiteOk);
+  ASSERT_EQ(interpreter_->ResizeInputTensor(1, {1, 4}), kTfLiteOk);
+  if (delegate_flag_pair.first == kTfLiteDelegateFlagsAllowDynamicTensors &&
+      delegate_flag_pair.second == kTfLiteDelegateFlagsAllowDynamicTensors) {
+    // If both delegates support dynamic tensors, execution plan won't be reset.
+    ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+  } else {
+    // In the presence of a static delegate, the runtime will reset execution
+    // plan to its original state until AllocateTensors or
+    // ModifyGraphWithDelegate
+    ASSERT_EQ(interpreter_->execution_plan().size(), 3);
+  }
+
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  // Irrespective of whether one or more delegates support dynamic shapes,
+  // execution plan should have 2 (delegated) nodes now.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  std::vector<float> input = {1.0f, 2.0f, 3.0f, 4.0f};
+  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f, 8.0f};
+  constexpr int kOutputTensorIndex = 2;
+  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
+
+  // Verify Invoke() behavior.
+  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 4 * sizeof(float));
+  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 4 * sizeof(float));
+  interpreter_->Invoke();
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
+  }
+}
+
+// We utilize delegation in such a way as to allow node subsets with a minimum
+// number of ops only.
+TEST_P(TestTwoDelegates, TestDelegationWithPartitionPreview) {
+  auto delegate_flag_pair = GetParam();
+  // Ops 0 and 2 are delegated but end up in the same partition (based on
+  // dependency analysis). However, since min_ops_per_subset = 3, no delegation
+  // takes place.
+  delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
+      {0, 2}, delegate_flag_pair.first, false /**fail_node_prepare**/,
+      3 /**min_ops_per_subset**/));
+  interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate());
+
+  // Original execution plan remains.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
+  ASSERT_EQ(interpreter_->execution_plan()[0], 0);
+  ASSERT_EQ(interpreter_->execution_plan()[1], 1);
+  ASSERT_EQ(interpreter_->execution_plan()[2], 2);
+
+  // Same ops supported, but min_ops_per_subset = 2.
+  delegate2_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate(
+      {0, 2}, delegate_flag_pair.second, false /**fail_node_prepare**/,
+      2 /**min_ops_per_subset**/));
+  interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate());
+
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+  ASSERT_EQ(interpreter_->execution_plan()[0], 3);
+  const auto* node_and_reg = interpreter_->node_and_registration(3);
+  ASSERT_EQ(node_and_reg->second.custom_name,
+            delegate2_->FakeFusedRegistration().custom_name);
+  ASSERT_EQ(interpreter_->execution_plan()[1], 1);
+}
+
+TEST_P(TestTwoDelegates, TestRequirePropagatedShapes) {
+  // We do not use kTfLiteDelegateFlagsNone in this test, since shape
+  // propagation always requires the delegate to support dynamic tensors. This
+  // delegate does not require automatic propagation.
+  delegate_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({0}, kTfLiteDelegateFlagsAllowDynamicTensors));
+  // Second delegate supports nodes 1 & 2, and requires automatic shape
+  // propagation.
+  int delegate_flags = kTfLiteDelegateFlagsAllowDynamicTensors |
+                       kTfLiteDelegateFlagsRequirePropagatedShapes;
+  delegate2_ = SimpleDelegate::DelegateWithRuntimeShapePropagation(
+      {1, 2}, delegate_flags, 1);
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  // Should be two delegate nodes.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {1, 4}), kTfLiteOk);
+  ASSERT_EQ(interpreter_->ResizeInputTensor(1, {1, 4}), kTfLiteOk);
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  std::vector<float> input = {1.0f, 2.0f, 3.0f, 4.0f};
+  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f, 8.0f};
+  constexpr int kOutputTensorIndex = 2;
+  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
+
+  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 4 * sizeof(float));
+  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 4 * sizeof(float));
+  interpreter_->Invoke();
+  for (int i = 0; i < 4; ++i) {
+    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
+  }
+}
+
+TEST_P(TestTwoDelegates, ReleaseNonPersistentMemoryWithDelegates) {
+  auto delegate_flag_pair = GetParam();
+  // First delegate only supports node 0.
+  delegate_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({0}, delegate_flag_pair.first));
+  // Second delegate supports nodes 1 & 2, and makes the graph immutable.
+  delegate2_ = std::unique_ptr<SimpleDelegate>(
+      new SimpleDelegate({1, 2}, delegate_flag_pair.second));
+
+  // No-op.
+  ASSERT_EQ(interpreter_->ReleaseNonPersistentMemory(), kTfLiteOk);
+
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  // Should be two delegates nodes.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 2);
+
+  ASSERT_EQ(interpreter_->ReleaseNonPersistentMemory(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+
+  std::vector<float> input = {1.0f, 2.0f, 3.0f, 4.0f};
+  std::vector<float> expected_output = {2.0f, 4.0f, 6.0f, 8.0f};
+  constexpr int kOutputTensorIndex = 2;
+  TfLiteTensor* tensor = interpreter_->tensor(kOutputTensorIndex);
+
+  // Verify Invoke() behavior.
+  memcpy(interpreter_->typed_tensor<float>(0), input.data(), 3 * sizeof(float));
+  memcpy(interpreter_->typed_tensor<float>(1), input.data(), 3 * sizeof(float));
+  interpreter_->Invoke();
+  for (int i = 0; i < 3; ++i) {
+    EXPECT_EQ(tensor->data.f[i], expected_output[i]) << i;
+  }
+
+  ASSERT_EQ(interpreter_->ReleaseNonPersistentMemory(), kTfLiteOk);
+}
+
+// This test ensures that after a static delegate is applied, a future delegate
+// that accepts previous nodes doesn't make them dynamic.
+TEST_F(TestTwoDelegates, DynamicTensorBeforeStaticDelegate) {
+  // First delegate only supports node {1, 2}.
+  // This makes the graph immutable.
+  delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate({1, 2}));
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  // Second delegate supports node 0, & tries to mark its output as
+  // dynamic. This should result in kTfLiteApplicationError.
+  delegate2_ = SimpleDelegate::DelegateWithDynamicOutput({0});
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteApplicationError);
+  // Execution plan reset to original.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+}
+
+// Same as bove, except a tensor later in the graph is marked static.
+// Even in this case, to be safe, we return an error.
+TEST_F(TestTwoDelegates, DynamicTensorAfterStaticDelegate) {
+  // First delegate only supports node 0.
+  // This makes the graph immutable.
+  delegate_ = std::unique_ptr<SimpleDelegate>(new SimpleDelegate({0}));
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
+      kTfLiteOk);
+  // Second delegate supports node 1, 2 & tries to mark its output as
+  // dynamic. This should result in kTfLiteApplicationError.
+  delegate2_ = SimpleDelegate::DelegateWithDynamicOutput({1, 2});
+  ASSERT_EQ(
+      interpreter_->ModifyGraphWithDelegate(delegate2_->get_tf_lite_delegate()),
+      kTfLiteApplicationError);
+  // Execution plan reset to original.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 3);
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+}
+
+INSTANTIATE_TEST_SUITE_P(
+    TestTwoDelegatesInstance, TestTwoDelegates,
+    ::testing::Values(std::make_pair(kTfLiteDelegateFlagsNone,
+                                     kTfLiteDelegateFlagsNone),
+                      std::make_pair(kTfLiteDelegateFlagsAllowDynamicTensors,
+                                     kTfLiteDelegateFlagsNone),
+                      std::make_pair(kTfLiteDelegateFlagsNone,
+                                     kTfLiteDelegateFlagsAllowDynamicTensors),
+                      std::make_pair(kTfLiteDelegateFlagsAllowDynamicTensors,
+                                     kTfLiteDelegateFlagsAllowDynamicTensors)));
+
 class TestDelegateWithDynamicTensors : public ::testing::Test {
  protected:
   void SetUp() override {
-    interpreter_.reset(new Interpreter);
+    interpreter_ =
+        test_utils::TestDelegation::NewInterpreterWithDefaultDelegates();
 
     interpreter_->AddTensors(3);
     interpreter_->SetInputs({0});
@@ -829,9 +1037,9 @@ class TestDelegateWithDynamicTensors : public ::testing::Test {
       TfLiteIntArray* execution_plan;
       TF_LITE_ENSURE_STATUS(
           context->GetExecutionPlan(context, &execution_plan));
-      context->ReplaceNodeSubsetsWithDelegateKernels(
+      TfLiteStatus status = context->ReplaceNodeSubsetsWithDelegateKernels(
           context, DelegateRegistration(), execution_plan, delegate);
-      return kTfLiteOk;
+      return status;
     };
     delegate_.flags = kTfLiteDelegateFlagsNone;
   }
@@ -888,7 +1096,52 @@ class TestDelegateWithDynamicTensors : public ::testing::Test {
   TfLiteDelegate delegate_;
 };
 
+class TestOpaqueDelegateBuilderWithDynamicTensors
+    : public TestDelegateWithDynamicTensors {
+ public:
+  void SetUp() override {
+    // Re-use the base class setup in terms of nodes, tensors and registrations.
+    TestDelegateWithDynamicTensors::SetUp();
+    // But with the difference that we'll apply a delegate to the graph that
+    // uses its opaque_delegate_builder field.
+    delegate_.Prepare = nullptr;
+    delegate_.opaque_delegate_builder = &delegate_external_;
+    delegate_external_.Prepare =
+        [](TfLiteOpaqueContext* opaque_context,
+           struct TfLiteOpaqueDelegateStruct* opaque_delegate,
+           void* data) -> TfLiteStatus {
+      // Note, ideally this function should not perform any casts on the
+      // provided opaque context or opaque delegate. However, the APIs that
+      // allow a caller to load an execution plan by providing an opaque
+      // context, or replace nodes with a delegate kernel by providing an opaque
+      // delegate, are added in child CLs.
+      TfLiteIntArray* execution_plan;
+      TfLiteContext* context = reinterpret_cast<TfLiteContext*>(opaque_context);
+      TfLiteDelegate* delegate =
+          reinterpret_cast<TfLiteDelegate*>(opaque_delegate);
+      TF_LITE_ENSURE_STATUS(
+          context->GetExecutionPlan(context, &execution_plan));
+      TfLiteStatus status = context->ReplaceNodeSubsetsWithDelegateKernels(
+          context, DelegateRegistration(), execution_plan, delegate);
+      return status;
+    };
+    delegate_external_.flags = kTfLiteDelegateFlagsNone;
+  }
+
+ private:
+  TfLiteOpaqueDelegateBuilder delegate_external_;
+};
+
 TEST_F(TestDelegateWithDynamicTensors, DisallowDynamicTensors) {
+  interpreter_->ModifyGraphWithDelegate(&delegate_);
+
+  ASSERT_EQ(interpreter_->execution_plan().size(), 1);
+  // The interpreter should not call delegate's `Prepare` when dynamic tensors
+  // exist. So the node ID isn't changed.
+  ASSERT_EQ(interpreter_->execution_plan()[0], 0);
+}
+
+TEST_F(TestOpaqueDelegateBuilderWithDynamicTensors, DisallowDynamicTensors) {
   interpreter_->ModifyGraphWithDelegate(&delegate_);
 
   ASSERT_EQ(interpreter_->execution_plan().size(), 1);
@@ -907,11 +1160,36 @@ TEST_F(TestDelegateWithDynamicTensors, AllowDynamicTensors) {
   ASSERT_EQ(interpreter_->execution_plan()[0], 1);
 }
 
+TEST_F(TestOpaqueDelegateBuilderWithDynamicTensors, AllowDynamicTensors) {
+  delegate_.opaque_delegate_builder->flags =
+      kTfLiteDelegateFlagsAllowDynamicTensors;
+  interpreter_->ModifyGraphWithDelegate(&delegate_);
+
+  ASSERT_EQ(interpreter_->execution_plan().size(), 1);
+  // The node should be replaced because dynamic tensors are allowed. Therefore
+  // only node ID in the execution plan is changed from 0 to 1.
+  ASSERT_EQ(interpreter_->execution_plan()[0], 1);
+}
+
 TEST_F(TestDelegateWithDynamicTensors, ModifyGraphAfterAllocate) {
   // Trigger allocation *before* delegate application.
   ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
 
   delegate_.flags = kTfLiteDelegateFlagsAllowDynamicTensors;
+  ASSERT_EQ(interpreter_->ModifyGraphWithDelegate(&delegate_), kTfLiteOk);
+  ASSERT_EQ(interpreter_->execution_plan().size(), 1);
+  ASSERT_EQ(interpreter_->execution_plan()[0], 1);
+
+  // Allocation should still succeed.
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+}
+
+TEST_F(TestOpaqueDelegateBuilderWithDynamicTensors, ModifyGraphAfterAllocate) {
+  // Trigger allocation *before* delegate application.
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+
+  delegate_.opaque_delegate_builder->flags =
+      kTfLiteDelegateFlagsAllowDynamicTensors;
   ASSERT_EQ(interpreter_->ModifyGraphWithDelegate(&delegate_), kTfLiteOk);
   ASSERT_EQ(interpreter_->execution_plan().size(), 1);
   ASSERT_EQ(interpreter_->execution_plan()[0], 1);
@@ -934,6 +1212,22 @@ TEST_F(TestDelegateWithDynamicTensors, ShapePropagation_FlagSet) {
   ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
 }
 
+TEST_F(TestOpaqueDelegateBuilderWithDynamicTensors, ShapePropagation_FlagSet) {
+  // Trigger allocation *before* delegate application.
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+
+  delegate_.opaque_delegate_builder->flags =
+      kTfLiteDelegateFlagsAllowDynamicTensors |
+      kTfLiteDelegateFlagsRequirePropagatedShapes;
+
+  ASSERT_EQ(interpreter_->ModifyGraphWithDelegate(&delegate_), kTfLiteOk);
+
+  // Allocation before & after resizing tensors should work.
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {4}), kTfLiteOk);
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+}
+
 TEST_F(TestDelegateWithDynamicTensors, ShapePropagation_FlagNotSet) {
   // Trigger allocation *before* delegate application.
   ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
@@ -946,6 +1240,118 @@ TEST_F(TestDelegateWithDynamicTensors, ShapePropagation_FlagNotSet) {
   ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
   ASSERT_EQ(interpreter_->ResizeInputTensor(0, {4}), kTfLiteOk);
   ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteError);
+}
+
+TEST_F(TestOpaqueDelegateBuilderWithDynamicTensors,
+       ShapePropagation_FlagNotSet) {
+  // Trigger allocation *before* delegate application.
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+
+  delegate_.opaque_delegate_builder->flags =
+      kTfLiteDelegateFlagsAllowDynamicTensors;
+
+  ASSERT_EQ(interpreter_->ModifyGraphWithDelegate(&delegate_), kTfLiteOk);
+
+  // Allocation after resizing tensors should NOT work, since runtime won't
+  // propagate shape - causing delegate kernel to fail.
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->ResizeInputTensor(0, {4}), kTfLiteOk);
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteError);
+}
+
+class TestReleaseDynamicTensorWithDelegate : public ::testing::Test {
+ protected:
+  void SetUp() override {
+    interpreter_ =
+        test_utils::TestDelegation::NewInterpreterWithDefaultDelegates();
+
+    interpreter_->AddTensors(3);
+    interpreter_->SetInputs({0});
+    interpreter_->SetOutputs({2});
+    TfLiteQuantizationParams quant;
+    interpreter_->SetTensorParametersReadWrite(0, kTfLiteFloat32, "", {3},
+                                               quant);
+    interpreter_->SetTensorParametersReadWrite(1, kTfLiteFloat32, "", {3},
+                                               quant);
+    interpreter_->SetTensorParametersReadWrite(2, kTfLiteFloat32, "", {3},
+                                               quant);
+    TfLiteRegistration reg = DynamicCopyOpRegistration();
+    interpreter_->AddNodeWithParameters({0}, {1}, nullptr, 0, nullptr, &reg);
+    interpreter_->AddNodeWithParameters({1}, {2}, nullptr, 0, nullptr, &reg);
+
+    delegate_.Prepare = [](TfLiteContext* context,
+                           TfLiteDelegate* delegate) -> TfLiteStatus {
+      TfLiteIntArray* execution_plan;
+      TF_LITE_ENSURE_STATUS(
+          context->GetExecutionPlan(context, &execution_plan));
+      // Only replace the second execution node with delegate.
+      TfLiteIntArray* nodes_to_replace = TfLiteIntArrayCreate(1);
+      nodes_to_replace->data[0] = execution_plan->data[1];
+      TfLiteStatus status = context->ReplaceNodeSubsetsWithDelegateKernels(
+          context, DelegateRegistration(), nodes_to_replace, delegate);
+      TfLiteIntArrayFree(nodes_to_replace);
+      return status;
+    };
+    delegate_.flags = kTfLiteDelegateFlagsNone;
+  }
+
+  static TfLiteRegistration DynamicCopyOpRegistration() {
+    TfLiteRegistration reg = {nullptr, nullptr, nullptr, nullptr};
+
+    reg.prepare = [](TfLiteContext* context, TfLiteNode* node) {
+      // Output is dynamic and has the same size as input.
+      TfLiteTensor* output;
+      TF_LITE_ENSURE_OK(context, GetOutputSafe(context, node, 0, &output));
+      SetTensorToDynamic(output);
+      const TfLiteTensor* input;
+      TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, 0, &input));
+      TfLiteTensorRealloc(input->bytes, output);
+      return kTfLiteOk;
+    };
+
+    reg.invoke = [](TfLiteContext* context, TfLiteNode* node) {
+      // Not implemented since this isn't required in testing.
+      return kTfLiteOk;
+    };
+    return reg;
+  }
+
+  static TfLiteRegistration DelegateRegistration() {
+    TfLiteRegistration reg = {nullptr, nullptr, nullptr, nullptr};
+
+    reg.prepare = [](TfLiteContext* context, TfLiteNode* node) {
+      // Check that input is dynamic.
+      const TfLiteTensor* input;
+      TF_LITE_ENSURE_OK(context, GetInputSafe(context, node, 0, &input));
+      TF_LITE_ENSURE(context, IsDynamicTensor(input));
+      return kTfLiteOk;
+    };
+    reg.invoke = [](TfLiteContext* context, TfLiteNode* node) {
+      // Not implemented since this isn't required in testing.
+      return kTfLiteOk;
+    };
+    return reg;
+  }
+
+  std::unique_ptr<Interpreter> interpreter_;
+  TfLiteDelegate delegate_;
+};
+
+TEST_F(TestReleaseDynamicTensorWithDelegate, ShapePropagation_FlagNotSet) {
+  delegate_.flags = kTfLiteDelegateFlagsAllowDynamicTensors;
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->ModifyGraphWithDelegate(&delegate_), kTfLiteOk);
+
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk);
+  ASSERT_NE(interpreter_->tensor(1)->data.raw, nullptr);
+
+  InterpreterOptions options;
+  options.SetEnsureDynamicTensorsAreReleased();
+  interpreter_->ApplyOptions(&options);
+  ASSERT_EQ(interpreter_->AllocateTensors(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->Invoke(), kTfLiteOk);
+  ASSERT_EQ(interpreter_->tensor(1)->data.raw, nullptr);
 }
 
 // Tests for FP16 graphs
@@ -965,20 +1371,19 @@ TEST_F(TestFP16Delegation, NullDelegate) {
 }
 
 TEST_P(TestFP16Delegation, DelegationWorks) {
-  delegate_ = std::unique_ptr<FP16Delegate>(
-      new FP16Delegate(/**num_delegated_subsets**/ GetParam()));
+  delegate_ = std::make_unique<FP16Delegate>(
+      /**num_delegated_subsets**/ GetParam());
   ASSERT_EQ(
       interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
       kTfLiteOk);
-  // Should have 5 nodes: delegate, mul, add2 & 2 dequantize (one for mul &
-  // add2).
-  ASSERT_EQ(interpreter_->execution_plan().size(), 5);
+  // Should have 7 nodes: delegate, mul, add2 & 4 dequantize ops.
+  ASSERT_EQ(interpreter_->execution_plan().size(), 7);
   VerifyInvoke();
 }
 
 TEST_P(TestFP16Delegation, DelegatePrepareFails) {
-  delegate_ = std::unique_ptr<FP16Delegate>(new FP16Delegate(
-      /**num_delegated_subsets**/ GetParam(), /**fail_node_prepare**/ true));
+  delegate_ = std::make_unique<FP16Delegate>(
+      /**num_delegated_subsets**/ GetParam(), /**fail_node_prepare**/ true);
   ASSERT_EQ(
       interpreter_->ModifyGraphWithDelegate(delegate_->get_tf_lite_delegate()),
       kTfLiteDelegateError);
@@ -993,9 +1398,3 @@ INSTANTIATE_TEST_SUITE_P(TestFP16Delegation, TestFP16Delegation,
 }  // anonymous namespace
 }  // namespace delegates
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

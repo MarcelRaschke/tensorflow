@@ -23,9 +23,14 @@ limitations under the License.
 #include <iterator>
 #include <limits>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "tensorflow/lite/c/common.h"
+#include "tensorflow/lite/core/macros.h"
+#ifdef TF_LITE_TENSORFLOW_PROFILER
+#include "tensorflow/lite/tensorflow_profiler_logger.h"
+#endif  // TF_LITE_TENSORFLOW_PROFILER
 
 namespace {
 
@@ -38,6 +43,20 @@ T AlignTo(size_t alignment, T offset) {
 }  // namespace
 
 namespace tflite {
+
+void SimpleMemoryArena::ResolveDeallocations() {
+  if (!allocs_erased_) {
+    return;
+  }
+  ordered_allocs_.erase(
+      std::remove_if(ordered_allocs_.begin(), ordered_allocs_.end(),
+                     [](ArenaAllocWithUsageInterval& alloc) {
+                       return alloc.tensor == -1;
+                     }),
+      ordered_allocs_.end());
+  allocs_erased_ = false;
+}
+
 TfLiteStatus SimpleMemoryArena::Allocate(
     TfLiteContext* context, size_t alignment, size_t size, int32_t tensor,
     int32_t first_node, int32_t last_node,
@@ -74,6 +93,10 @@ TfLiteStatus SimpleMemoryArena::Allocate(
       best_offset_fit = alloc.offset - current_offset;
     }
     current_offset = std::max(current_offset, alloc.offset + alloc.size);
+    // A gap of zero is as good as it gets, no point continuing.
+    if (best_offset_fit == 0) {
+      break;
+    }
   }
   if (best_offset == kOffsetNotAssigned) {
     best_offset = AlignTo(alignment, current_offset);
@@ -83,37 +106,47 @@ TfLiteStatus SimpleMemoryArena::Allocate(
   high_water_mark_ = std::max(high_water_mark_, best_offset + size);
   new_alloc->offset = best_offset;
 
-  auto insertion_it = ordered_allocs_.begin();
-  while (insertion_it != ordered_allocs_.end() && *insertion_it < *new_alloc) {
-    ++insertion_it;
-  }
+  auto insertion_it = std::upper_bound(ordered_allocs_.begin(),
+                                       ordered_allocs_.end(), *new_alloc);
   ordered_allocs_.insert(insertion_it, *new_alloc);
   return kTfLiteOk;
 }
 
-TfLiteStatus SimpleMemoryArena::Deallocate(
-    TfLiteContext* context, const ArenaAllocWithUsageInterval& alloc) {
+void SimpleMemoryArena::DeallocateAfter(int32_t node) {
+  for (int i = 0; i < ordered_allocs_.size(); ++i) {
+    if (ordered_allocs_[i].first_node > node) {
+      ordered_allocs_[i].tensor = -1;
+      allocs_erased_ = true;
+    }
+  }
+  ResolveDeallocations();
+}
+
+TfLiteStatus SimpleMemoryArena::Deallocate(TfLiteContext* context,
+                                           ArenaAllocWithUsageInterval& alloc) {
   if (alloc.size == 0) {
     return kTfLiteOk;
   }
 
-  int erased_allocs_count = 0;
-  auto it = ordered_allocs_.begin();
-  while (it != ordered_allocs_.end()) {
-    if (it->tensor == alloc.tensor) {
-      erased_allocs_count++;
-      it = ordered_allocs_.erase(it);
-    } else {
-      ++it;
+  for (int i = 0; i < ordered_allocs_.size(); ++i) {
+    if (ordered_allocs_[i].tensor == alloc.tensor) {
+      ordered_allocs_[i].tensor = -1;
+      allocs_erased_ = true;
+      break;
     }
   }
-  TF_LITE_ENSURE(context, erased_allocs_count <= 1);
   return kTfLiteOk;
 }
 
-TfLiteStatus SimpleMemoryArena::Commit(TfLiteContext* context) {
+TfLiteStatus SimpleMemoryArena::Commit(TfLiteContext* context,
+                                       bool* arena_reallocated) {
   size_t required_size = RequiredBufferSize();
   if (required_size > underlying_buffer_size_) {
+    *arena_reallocated = true;
+#ifdef TF_LITE_TENSORFLOW_PROFILER
+    OnTfLiteArenaAlloc(subgraph_index_, reinterpret_cast<std::uintptr_t>(this),
+                       required_size);
+#endif
     char* new_alloc = new char[required_size];
     char* new_underlying_buffer_aligned_ptr = reinterpret_cast<char*>(
         AlignTo(arena_alignment_, reinterpret_cast<intptr_t>(new_alloc)));
@@ -130,9 +163,18 @@ TfLiteStatus SimpleMemoryArena::Commit(TfLiteContext* context) {
              copy_amount);
     }
 
+#ifdef TF_LITE_TENSORFLOW_PROFILER
+    if (underlying_buffer_size_ > 0) {
+      OnTfLiteArenaDealloc(subgraph_index_,
+                           reinterpret_cast<std::uintptr_t>(this),
+                           underlying_buffer_size_);
+    }
+#endif
     underlying_buffer_.reset(new_alloc);
     underlying_buffer_size_ = required_size;
     underlying_buffer_aligned_ptr_ = new_underlying_buffer_aligned_ptr;
+  } else {
+    *arena_reallocated = false;
   }
   committed_ = true;
   return underlying_buffer_ != nullptr ? kTfLiteOk : kTfLiteError;
@@ -162,10 +204,26 @@ TfLiteStatus SimpleMemoryArena::ClearPlan() {
 
 TfLiteStatus SimpleMemoryArena::ReleaseBuffer() {
   committed_ = false;
+#ifdef TF_LITE_TENSORFLOW_PROFILER
+  OnTfLiteArenaDealloc(subgraph_index_, reinterpret_cast<std::uintptr_t>(this),
+                       underlying_buffer_size_);
+#endif
   underlying_buffer_size_ = 0;
   underlying_buffer_aligned_ptr_ = nullptr;
   underlying_buffer_.reset();
   return kTfLiteOk;
+}
+
+// Using weak symbols to create a pluggable debugging module.
+TFLITE_ATTRIBUTE_WEAK void DumpArenaInfo(
+    const std::string& name, const std::vector<int>& execution_plan,
+    size_t arena_size, const std::vector<ArenaAllocWithUsageInterval>& allocs) {
+}
+
+void SimpleMemoryArena::DumpDebugInfo(
+    const std::string& name, const std::vector<int>& execution_plan) const {
+  tflite::DumpArenaInfo(name, execution_plan, underlying_buffer_size_,
+                        ordered_allocs_);
 }
 
 }  // namespace tflite

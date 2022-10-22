@@ -24,7 +24,7 @@ limitations under the License.
 #include "tensorflow/core/platform/file_system_helper.h"
 #include "tensorflow/core/util/ptr_util.h"
 
-// TODO(mihaimaruseac): After all filesystems are converted, all calls to
+// TODO(b/139060984): After all filesystems are converted, all calls to
 // methods from `FileSystem` will have to be replaced to calls to private
 // methods here, as part of making this class a singleton and the only way to
 // register/use filesystems.
@@ -226,8 +226,8 @@ Status ModularFileSystem::DeleteFile(const std::string& fname,
 
 Status ModularFileSystem::DeleteRecursively(const std::string& dirname,
                                             TransactionToken* token,
-                                            int64* undeleted_files,
-                                            int64* undeleted_dirs) {
+                                            int64_t* undeleted_files,
+                                            int64_t* undeleted_dirs) {
   if (undeleted_files == nullptr || undeleted_dirs == nullptr)
     return errors::FailedPrecondition(
         "DeleteRecursively must not be called with `undeleted_files` or "
@@ -390,6 +390,100 @@ void ModularFileSystem::FlushCaches(TransactionToken* token) {
   if (ops_->flush_caches != nullptr) ops_->flush_caches(filesystem_.get());
 }
 
+Status ModularFileSystem::SetOption(const std::string& name,
+                                    const std::vector<string>& values) {
+  if (ops_->set_filesystem_configuration == nullptr) {
+    return errors::Unimplemented(
+        "Filesystem does not support SetConfiguration()");
+  }
+  if (values.empty()) {
+    return errors::InvalidArgument(
+        "SetConfiguration() needs number of values > 0");
+  }
+
+  TF_Filesystem_Option option;
+  memset(&option, 0, sizeof(option));
+  option.name = const_cast<char*>(name.c_str());
+  TF_Filesystem_Option_Value option_value;
+  memset(&option_value, 0, sizeof(option_value));
+  option_value.type_tag = TF_Filesystem_Option_Type_Buffer;
+  option_value.num_values = values.size();
+  std::vector<TF_Filesystem_Option_Value_Union> option_values(values.size());
+  for (size_t i = 0; i < values.size(); i++) {
+    memset(&option_values[i], 0, sizeof(option_values[i]));
+    option_values[i].buffer_val.buf = const_cast<char*>(values[i].c_str());
+    option_values[i].buffer_val.buf_length = values[i].size();
+  }
+  option_value.values = &option_values[0];
+  option.value = &option_value;
+  UniquePtrTo_TF_Status plugin_status(TF_NewStatus(), TF_DeleteStatus);
+  ops_->set_filesystem_configuration(filesystem_.get(), &option, 1,
+                                     plugin_status.get());
+  return StatusFromTF_Status(plugin_status.get());
+}
+
+Status ModularFileSystem::SetOption(const std::string& name,
+                                    const std::vector<int64_t>& values) {
+  if (ops_->set_filesystem_configuration == nullptr) {
+    return errors::Unimplemented(
+        "Filesystem does not support SetConfiguration()");
+  }
+  if (values.empty()) {
+    return errors::InvalidArgument(
+        "SetConfiguration() needs number of values > 0");
+  }
+
+  TF_Filesystem_Option option;
+  memset(&option, 0, sizeof(option));
+  option.name = const_cast<char*>(name.c_str());
+  TF_Filesystem_Option_Value option_value;
+  memset(&option_value, 0, sizeof(option_value));
+  option_value.type_tag = TF_Filesystem_Option_Type_Int;
+  option_value.num_values = values.size();
+  std::vector<TF_Filesystem_Option_Value_Union> option_values(values.size());
+  for (size_t i = 0; i < values.size(); i++) {
+    memset(&option_values[i], 0, sizeof(option_values[i]));
+    option_values[i].int_val = values[i];
+  }
+  option_value.values = &option_values[0];
+  option.value = &option_value;
+  UniquePtrTo_TF_Status plugin_status(TF_NewStatus(), TF_DeleteStatus);
+  ops_->set_filesystem_configuration(filesystem_.get(), &option, 1,
+                                     plugin_status.get());
+  return StatusFromTF_Status(plugin_status.get());
+}
+
+Status ModularFileSystem::SetOption(const std::string& name,
+                                    const std::vector<double>& values) {
+  if (ops_->set_filesystem_configuration == nullptr) {
+    return errors::Unimplemented(
+        "Filesystem does not support SetConfiguration()");
+  }
+  if (values.empty()) {
+    return errors::InvalidArgument(
+        "SetConfiguration() needs number of values > 0");
+  }
+
+  TF_Filesystem_Option option;
+  memset(&option, 0, sizeof(option));
+  option.name = const_cast<char*>(name.c_str());
+  TF_Filesystem_Option_Value option_value;
+  memset(&option_value, 0, sizeof(option_value));
+  option_value.type_tag = TF_Filesystem_Option_Type_Real;
+  option_value.num_values = values.size();
+  std::vector<TF_Filesystem_Option_Value_Union> option_values(values.size());
+  for (size_t i = 0; i < values.size(); i++) {
+    memset(&option_values[i], 0, sizeof(option_values[i]));
+    option_values[i].real_val = values[i];
+  }
+  option_value.values = &option_values[0];
+  option.value = &option_value;
+  UniquePtrTo_TF_Status plugin_status(TF_NewStatus(), TF_DeleteStatus);
+  ops_->set_filesystem_configuration(filesystem_.get(), &option, 1,
+                                     plugin_status.get());
+  return StatusFromTF_Status(plugin_status.get());
+}
+
 Status ModularRandomAccessFile::Read(uint64 offset, size_t n,
                                      StringPiece* result, char* scratch) const {
   if (ops_->read == nullptr)
@@ -405,7 +499,7 @@ Status ModularRandomAccessFile::Read(uint64 offset, size_t n,
 
 Status ModularRandomAccessFile::Name(StringPiece* result) const {
   *result = filename_;
-  return Status::OK();
+  return OkStatus();
 }
 
 Status ModularWritableFile::Append(StringPiece data) {
@@ -429,7 +523,7 @@ Status ModularWritableFile::Close() {
 }
 
 Status ModularWritableFile::Flush() {
-  if (ops_->flush == nullptr) return Status::OK();
+  if (ops_->flush == nullptr) return OkStatus();
 
   UniquePtrTo_TF_Status plugin_status(TF_NewStatus(), TF_DeleteStatus);
   ops_->flush(file_.get(), plugin_status.get());
@@ -446,10 +540,10 @@ Status ModularWritableFile::Sync() {
 
 Status ModularWritableFile::Name(StringPiece* result) const {
   *result = filename_;
-  return Status::OK();
+  return OkStatus();
 }
 
-Status ModularWritableFile::Tell(int64* position) {
+Status ModularWritableFile::Tell(int64_t* position) {
   if (ops_->tell == nullptr)
     return errors::Unimplemented(
         tensorflow::strings::StrCat("Tell() not implemented for ", filename_));

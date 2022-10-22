@@ -15,6 +15,8 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOOLS_OPTIMIZE_MODEL_UTILS_H_
 #define TENSORFLOW_LITE_TOOLS_OPTIMIZE_MODEL_UTILS_H_
 
+#include <string>
+
 #include "absl/memory/memory.h"
 #include "tensorflow/lite/kernels/internal/types.h"
 #include "tensorflow/lite/model.h"
@@ -50,8 +52,6 @@ bool QuantizationParametersExist(const TensorT* tensor);
 
 bool HasBuffer(const ModelT* model, const SubGraphT* subgraph,
                int tensor_index);
-
-bool IsQuantized(const SubGraphT* subgraph, int tensor_index);
 
 bool HasMinMax(const TensorT* tensor);
 

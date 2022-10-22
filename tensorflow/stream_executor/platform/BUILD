@@ -1,10 +1,10 @@
 load("//tensorflow/core/platform:rules_cc.bzl", "cc_library")
-load("//tensorflow/core/platform:build_config.bzl", "tf_platform_deps")
+load("//tensorflow/core/platform:build_config.bzl", "tf_stream_executor_deps")
 load("//tensorflow/stream_executor:build_defs.bzl", "stream_executor_friends")
 
 package(
     default_visibility = [":friends"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 package_group(
@@ -21,9 +21,11 @@ cc_library(
         "port.h",
     ],
     deps = [
-        "@com_google_absl//absl/strings",
-        "//tensorflow/core:lib",
-    ] + tf_platform_deps("platform", "//tensorflow/stream_executor/platform/"),
+        "//tensorflow/core/platform:macros",
+        "//tensorflow/core/platform:types",
+        "//tensorflow/core/platform:logging",
+        "//tensorflow/compiler/xla/stream_executor/platform",
+    ] + tf_stream_executor_deps("platform", "//tensorflow/stream_executor/platform/"),
 )
 
 cc_library(
@@ -31,5 +33,6 @@ cc_library(
     hdrs = ["dso_loader.h"],
     deps = [
         ":platform",
-    ] + tf_platform_deps("dso_loader", "//tensorflow/stream_executor/platform/"),
+        "//tensorflow/compiler/xla/stream_executor/platform:dso_loader",
+    ] + tf_stream_executor_deps("dso_loader", "//tensorflow/stream_executor/platform/"),
 )

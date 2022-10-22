@@ -12,8 +12,8 @@ WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
 See the License for the specific language governing permissions and
 limitations under the License.
 ==============================================================================*/
-#ifndef TENSORFLOW_PYTHON_PROFILER_INTERNAL_TRACEME_WRAPPER_
-#define TENSORFLOW_PYTHON_PROFILER_INTERNAL_TRACEME_WRAPPER_
+#ifndef TENSORFLOW_PYTHON_PROFILER_INTERNAL_TRACEME_WRAPPER_H_
+#define TENSORFLOW_PYTHON_PROFILER_INTERNAL_TRACEME_WRAPPER_H_
 
 #include <string>
 #include <utility>
@@ -68,9 +68,16 @@ class TraceMeWrapper {
     name->push_back('#');
     for (const auto& kv : kwargs) {
       absl::StrAppend(name, std::string(pybind11::str(kv.first)), "=",
-                      std::string(pybind11::str(kv.second)), ",");
+                      EncodePyObject(kv.second), ",");
     }
     name->back() = '#';
+  }
+
+  static std::string EncodePyObject(const pybind11::handle& handle) {
+    if (pybind11::isinstance<pybind11::bool_>(handle)) {
+      return handle.cast<bool>() ? "1" : "0";
+    }
+    return std::string(pybind11::str(handle));
   }
 
   tensorflow::profiler::TraceMe traceme_;
@@ -79,4 +86,4 @@ class TraceMeWrapper {
 }  // namespace profiler
 }  // namespace tensorflow
 
-#endif  // TENSORFLOW_PYTHON_PROFILER_INTERNAL_TRACEME_WRAPPER_
+#endif  // TENSORFLOW_PYTHON_PROFILER_INTERNAL_TRACEME_WRAPPER_H_

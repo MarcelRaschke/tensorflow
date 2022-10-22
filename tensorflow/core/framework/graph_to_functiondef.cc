@@ -143,7 +143,7 @@ Status NodeNameMapping::UseOutputName(const string& name) {
         "' appears more than once in 'output_names' array.");
   }
   used_names_.emplace(name, 0);
-  return Status::OK();
+  return OkStatus();
 }
 
 string NodeNameMapping::Lookup(const string& name) const {
@@ -289,7 +289,7 @@ Status FillFunctionBody(
       func_attr_names.insert(func_attr_name);
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status GraphToFunctionDefHelper(
@@ -309,7 +309,7 @@ Status GraphToFunctionDefHelper(
       return errors::InvalidArgument("Multiple '", node->type_string(),
                                      "' nodes found with index ", index);
     }
-    return Status::OK();
+    return OkStatus();
   };
 
   std::vector<const Node*> body_nodes;
@@ -348,7 +348,7 @@ Status GraphToFunctionDefHelper(
                                            "' node at index ", i);
           }
         }
-        return Status::OK();
+        return OkStatus();
       };
 
   TF_RETURN_IF_ERROR(validate_args_retvals(inputs, "_Arg"));
@@ -427,7 +427,7 @@ Status GraphToFunctionDef(const Graph& fn_body, const string& fn_name,
     const string& input_name = node_names.GetInputName(node->name());
     argdef->set_name(input_name);
     FunctionDef::ArgAttrs arg_attrs;
-    int64 resource_arg_unique_id = -1;
+    int64_t resource_arg_unique_id = -1;
     for (const auto& attr : node->attrs()) {
       // Only copy internal attributes. These attributes will be applied to
       // _Arg/Placeholder nodes when this FunctionDef is converted to graph,
@@ -580,7 +580,7 @@ Status GraphToFunctionDef(const Graph& fn_body, const string& fn_name,
     fdef->mutable_signature()->add_control_output(control_output);
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status GraphToFunctionDef(

@@ -49,7 +49,7 @@ class StatsAggregatorImpl : public StatsAggregator {
   StatsAggregatorImpl() {}
 
   void AddToHistogram(const string& name, gtl::ArraySlice<double> values,
-                      const int64 steps) override {
+                      const int64_t steps) override {
     mutex_lock l(mu_);
     histogram::Histogram& histogram = histograms_[name];
     for (double value : values) {
@@ -57,7 +57,8 @@ class StatsAggregatorImpl : public StatsAggregator {
     }
   }
 
-  void AddScalar(const string& name, float value, const int64 steps) override {
+  void AddScalar(const string& name, float value,
+                 const int64_t steps) override {
     mutex_lock l(mu_);
     scalars_[name] = value;
   }
@@ -84,11 +85,11 @@ class StatsAggregatorImpl : public StatsAggregator {
   // in V1.
   Status SetSummaryWriter(
       SummaryWriterInterface* summary_writer_interface) override {
-    return Status::OK();
+    return OkStatus();
   }
 
   void IncrementCounter(const string& name, const string& label,
-                        int64 val) override {
+                        int64_t val) override {
     mutex_lock l(*get_counters_map_lock());
     auto counters_map = get_counters_map();
     if (counters_map->find(name) == counters_map->end()) {
@@ -120,9 +121,8 @@ class StatsAggregatorHandleOp
  private:
   Status CreateResource(StatsAggregatorResource** ret) override
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
-    *ret =
-        new StatsAggregatorResource(absl::make_unique<StatsAggregatorImpl>());
-    return Status::OK();
+    *ret = new StatsAggregatorResource(std::make_unique<StatsAggregatorImpl>());
+    return OkStatus();
   }
 };
 
@@ -137,7 +137,7 @@ class StatsAggregatorImplV2 : public StatsAggregator {
   }
 
   void AddToHistogram(const string& name, gtl::ArraySlice<double> values,
-                      const int64 steps) override {
+                      const int64_t steps) override {
     mutex_lock l(mu_);
     histogram::Histogram& histogram = histograms_[name];
     for (double value : values) {
@@ -146,7 +146,8 @@ class StatsAggregatorImplV2 : public StatsAggregator {
     AddToEvents(name, steps, histogram);
   }
 
-  void AddScalar(const string& name, float value, const int64 steps) override {
+  void AddScalar(const string& name, float value,
+                 const int64_t steps) override {
     mutex_lock l(mu_);
     AddToEvents(name, steps, value);
   }
@@ -156,11 +157,11 @@ class StatsAggregatorImplV2 : public StatsAggregator {
     mutex_lock l(mu_);
     if (summary_writer_interface_)
       TF_RETURN_IF_ERROR(summary_writer_interface_->Flush());
-    return Status::OK();
+    return OkStatus();
   }
 
   void IncrementCounter(const string& name, const string& label,
-                        int64 val) override {
+                        int64_t val) override {
     mutex_lock l(*get_counters_map_lock());
     auto counters_map = get_counters_map();
     if (counters_map->find(name) == counters_map->end()) {
@@ -191,11 +192,11 @@ class StatsAggregatorImplV2 : public StatsAggregator {
     }
     summary_writer_interface_ = summary_writer_interface;
     summary_writer_interface_->Ref();
-    return Status::OK();
+    return OkStatus();
   }
 
  private:
-  void AddToEvents(const string& name, const int64 steps,
+  void AddToEvents(const string& name, const int64_t steps,
                    const float scalar_value) TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     if (summary_writer_interface_ == nullptr) {
       return;
@@ -210,7 +211,7 @@ class StatsAggregatorImplV2 : public StatsAggregator {
     TF_CHECK_OK(summary_writer_interface_->WriteEvent(std::move(e)));
   }
 
-  void AddToEvents(const string& name, const int64 steps,
+  void AddToEvents(const string& name, const int64_t steps,
                    const histogram::Histogram& histogram)
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     if (summary_writer_interface_ == nullptr) {
@@ -245,8 +246,8 @@ class StatsAggregatorHandleOpV2
   Status CreateResource(StatsAggregatorResource** ret) override
       TF_EXCLUSIVE_LOCKS_REQUIRED(mu_) {
     *ret =
-        new StatsAggregatorResource(absl::make_unique<StatsAggregatorImplV2>());
-    return Status::OK();
+        new StatsAggregatorResource(std::make_unique<StatsAggregatorImplV2>());
+    return OkStatus();
   }
 };
 

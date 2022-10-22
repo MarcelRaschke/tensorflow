@@ -14,10 +14,6 @@
 # ==============================================================================
 """Keras layers API."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from tensorflow.python import tf2
 
 # Generic layers.
@@ -28,51 +24,6 @@ from tensorflow.python.keras.engine.input_layer import InputLayer
 from tensorflow.python.keras.engine.input_spec import InputSpec
 from tensorflow.python.keras.engine.base_layer import Layer
 from tensorflow.python.keras.engine.base_preprocessing_layer import PreprocessingLayer
-
-# Image preprocessing layers.
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import CenterCrop
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomCrop
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomFlip
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomContrast
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomHeight
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomRotation
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomTranslation
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomWidth
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import RandomZoom
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import Resizing
-from tensorflow.python.keras.layers.preprocessing.image_preprocessing import Rescaling
-
-# Preprocessing layers.
-if tf2.enabled():
-  from tensorflow.python.keras.layers.preprocessing.integer_lookup import IntegerLookup
-  from tensorflow.python.keras.layers.preprocessing.integer_lookup_v1 import IntegerLookup as IntegerLookupV1
-  IntegerLookupV2 = IntegerLookup
-  from tensorflow.python.keras.layers.preprocessing.normalization import Normalization
-  from tensorflow.python.keras.layers.preprocessing.normalization_v1 import Normalization as NormalizationV1
-  NormalizationV2 = Normalization
-  from tensorflow.python.keras.layers.preprocessing.string_lookup import StringLookup
-  from tensorflow.python.keras.layers.preprocessing.string_lookup_v1 import StringLookup as StringLookupV1
-  StringLookupV2 = StringLookup
-  from tensorflow.python.keras.layers.preprocessing.text_vectorization import TextVectorization
-  from tensorflow.python.keras.layers.preprocessing.text_vectorization_v1 import TextVectorization as TextVectorizationV1
-  TextVectorizationV2 = TextVectorization
-else:
-  from tensorflow.python.keras.layers.preprocessing.integer_lookup_v1 import IntegerLookup
-  from tensorflow.python.keras.layers.preprocessing.integer_lookup import IntegerLookup as IntegerLookupV2
-  IntegerLookupV1 = IntegerLookup
-  from tensorflow.python.keras.layers.preprocessing.normalization_v1 import Normalization
-  from tensorflow.python.keras.layers.preprocessing.normalization import Normalization as NormalizationV2
-  NormalizationV1 = Normalization
-  from tensorflow.python.keras.layers.preprocessing.string_lookup_v1 import StringLookup
-  from tensorflow.python.keras.layers.preprocessing.string_lookup import StringLookup as StringLookupV2
-  StringLookupV1 = StringLookup
-  from tensorflow.python.keras.layers.preprocessing.text_vectorization_v1 import TextVectorization
-  from tensorflow.python.keras.layers.preprocessing.text_vectorization import TextVectorization as TextVectorizationV2
-  TextVectorizationV1 = TextVectorization
-from tensorflow.python.keras.layers.preprocessing.category_crossing import CategoryCrossing
-from tensorflow.python.keras.layers.preprocessing.category_encoding import CategoryEncoding
-from tensorflow.python.keras.layers.preprocessing.discretization import Discretization
-from tensorflow.python.keras.layers.preprocessing.hashing import Hashing
 
 # Advanced activations.
 from tensorflow.python.keras.layers.advanced_activations import LeakyReLU
@@ -135,16 +86,6 @@ from tensorflow.python.keras.layers.dense_attention import Attention
 # Embedding layers.
 from tensorflow.python.keras.layers.embeddings import Embedding
 
-# Einsum-based dense layer/
-from tensorflow.python.keras.layers.einsum_dense import EinsumDense
-
-# Multi-head Attention layer.
-from tensorflow.python.keras.layers.multi_head_attention import MultiHeadAttention
-
-# Locally-connected layers.
-from tensorflow.python.keras.layers.local import LocallyConnected1D
-from tensorflow.python.keras.layers.local import LocallyConnected2D
-
 # Merge layers.
 from tensorflow.python.keras.layers.merge import Add
 from tensorflow.python.keras.layers.merge import Subtract
@@ -162,27 +103,6 @@ from tensorflow.python.keras.layers.merge import maximum
 from tensorflow.python.keras.layers.merge import minimum
 from tensorflow.python.keras.layers.merge import concatenate
 from tensorflow.python.keras.layers.merge import dot
-
-# Noise layers.
-from tensorflow.python.keras.layers.noise import AlphaDropout
-from tensorflow.python.keras.layers.noise import GaussianNoise
-from tensorflow.python.keras.layers.noise import GaussianDropout
-
-# Normalization layers.
-from tensorflow.python.keras.layers.normalization import LayerNormalization
-from tensorflow.python.keras.layers.normalization_v2 import SyncBatchNormalization
-
-if tf2.enabled():
-  from tensorflow.python.keras.layers.normalization_v2 import BatchNormalization
-  from tensorflow.python.keras.layers.normalization import BatchNormalization as BatchNormalizationV1
-  BatchNormalizationV2 = BatchNormalization
-else:
-  from tensorflow.python.keras.layers.normalization import BatchNormalization
-  from tensorflow.python.keras.layers.normalization_v2 import BatchNormalization as BatchNormalizationV2
-  BatchNormalizationV1 = BatchNormalization
-
-# Kernelized layers.
-from tensorflow.python.keras.layers.kernelized import RandomFourierFeatures
 
 # Pooling layers.
 from tensorflow.python.keras.layers.pooling import MaxPooling1D
@@ -254,11 +174,6 @@ from tensorflow.python.keras.layers.convolutional_recurrent import ConvLSTM2D
 from tensorflow.python.keras.layers.cudnn_recurrent import CuDNNLSTM
 from tensorflow.python.keras.layers.cudnn_recurrent import CuDNNGRU
 
-# Wrapper functions
-from tensorflow.python.keras.layers.wrappers import Wrapper
-from tensorflow.python.keras.layers.wrappers import Bidirectional
-from tensorflow.python.keras.layers.wrappers import TimeDistributed
-
 # # RNN Cell wrappers.
 from tensorflow.python.keras.layers.rnn_cell_wrapper_v2 import DeviceWrapper
 from tensorflow.python.keras.layers.rnn_cell_wrapper_v2 import DropoutWrapper
@@ -286,7 +201,3 @@ class VersionAwareLayers(object):
     if name in serialization.LOCAL.ALL_OBJECTS:
       return serialization.LOCAL.ALL_OBJECTS[name]
     return super(VersionAwareLayers, self).__getattr__(name)
-
-del absolute_import
-del division
-del print_function

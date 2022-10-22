@@ -30,15 +30,17 @@ class BroadcastToOp : public XlaOpKernel {
 
   void Compile(XlaOpKernelContext* context) override {
     TensorShape output_shape;
-    OP_REQUIRES_OK(context, context->ConstantInputAsShape(1, &output_shape));
+    OP_REQUIRES_OK(context,
+                   context->ConstantInputAsShape(
+                       1, &output_shape, xla::ValueInferenceMode::kUpperBound));
     auto output_status_or =
         BroadcastTo(context->Input(0), output_shape.dim_sizes());
     OP_REQUIRES_OK(context, output_status_or.status());
-    auto output = output_status_or.ValueOrDie();
+    auto output = output_status_or.value();
     std::vector<bool> dynamic_dims;
     OP_REQUIRES_OK(
         context, context->ResolveInputDynamismIntoPredVector(1, &dynamic_dims));
-    for (int64 dim = 0; dim < dynamic_dims.size(); ++dim) {
+    for (int64_t dim = 0; dim < dynamic_dims.size(); ++dim) {
       if (dynamic_dims[dim]) {
         output = xla::SetDimensionSize(
             output,

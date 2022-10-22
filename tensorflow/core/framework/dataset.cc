@@ -18,16 +18,27 @@ limitations under the License.
 
 #include "tensorflow/core/framework/device_base.h"
 #include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/op_kernel.h"
+#include "tensorflow/core/framework/resource_mgr.h"
 #include "tensorflow/core/framework/variant_encode_decode.h"
 #include "tensorflow/core/framework/variant_op_registry.h"
+#include "tensorflow/core/framework/versions.pb.h"
 #include "tensorflow/core/graph/graph_def_builder.h"
 #include "tensorflow/core/graph/node_builder.h"
 #include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/mutex.h"
+#include "tensorflow/core/platform/refcount.h"
 #include "tensorflow/core/platform/resource.h"
+#include "tensorflow/core/platform/status.h"
 #include "tensorflow/core/platform/strcat.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
+#include "tensorflow/core/public/version.h"
+
+// On Windows, disable some macros that would break compile
+#if defined(PLATFORM_WINDOWS)
+#undef GetMessage
+#endif
 
 namespace tensorflow {
 namespace data {
@@ -41,6 +52,11 @@ static mutex* get_dataset_op_registry_lock() {
 static std::unordered_set<string>* get_dataset_op_registry() {
   static std::unordered_set<string>* names = new std::unordered_set<string>;
   return names;
+}
+
+std::string UniqueNodeName(const std::string& base) {
+  static std::atomic<int64_t> counter(0);
+  return strings::StrCat(base, "/", counter.fetch_add(1));
 }
 
 // A wrapper class for storing a `DatasetBase` instance in a DT_VARIANT tensor.
@@ -192,7 +208,7 @@ static Status WrappedDatasetVariantDeviceCopy(
     const WrappedDatasetVariantWrapper& from, WrappedDatasetVariantWrapper* to,
     const UnaryVariantOpRegistry::AsyncTensorDeviceCopyFn& copy) {
   *to = WrappedDatasetVariantWrapper(from);
-  return Status::OK();
+  return OkStatus();
 }
 
 #define REGISTER_OPTIONAL_COPY(DIRECTION)               \
@@ -209,37 +225,71 @@ REGISTER_UNARY_VARIANT_DECODE_FUNCTION(WrappedDatasetVariantWrapper,
 
 }  // namespace
 
+Status GraphDefBuilderWrapper::AddDataset(const DatasetBase* dataset,
+                                          const std::vector<Node*>& inputs,
+                                          Node** output) {
+  return AddDataset(dataset, inputs, {}, output);
+}
+
+Status GraphDefBuilderWrapper::AddDataset(
+    const DatasetBase* dataset, const std::vector<Node*>& inputs,
+    const std::vector<std::pair<StringPiece, AttrValue>>& attrs,
+    Node** output) {
+  std::vector<std::pair<size_t, Node*>> enumerated_inputs(inputs.size());
+  for (size_t i = 0; i < inputs.size(); i++) {
+    enumerated_inputs[i] = std::make_pair(i, inputs[i]);
+  }
+  return AddDataset(dataset, enumerated_inputs, {}, attrs, output);
+}
+
 Status GraphDefBuilderWrapper::AddDataset(
     const DatasetBase* dataset,
     const std::vector<std::pair<size_t, Node*>>& inputs,
     const std::vector<std::pair<size_t, gtl::ArraySlice<Node*>>>& list_inputs,
     const std::vector<std::pair<StringPiece, AttrValue>>& attrs,
     Node** output) {
-  const string& type_string = dataset->type_string();
-  std::unique_ptr<const GraphDefBuilder::Options> opts(
-      new GraphDefBuilder::Options(b_->opts()));
+  return AddDataset(dataset, inputs, list_inputs, attrs,
+                    /*use_dataset_name=*/false, output);
+}
+
+Status GraphDefBuilderWrapper::AddDataset(
+    const DatasetBase* dataset,
+    const std::vector<std::pair<size_t, Node*>>& inputs,
+    const std::vector<std::pair<size_t, gtl::ArraySlice<Node*>>>& list_inputs,
+    const std::vector<std::pair<StringPiece, AttrValue>>& attrs,
+    bool use_dataset_name, Node** output) {
+  auto& type_string = dataset->type_string();
+  auto opts = absl::make_unique<GraphDefBuilder::Options>(b_->opts());
   // TODO(srbs|mrry): Not all datasets have output_types and output_shapes
   // attributes defined. It will be nice to have a consistent pattern.
   bool has_output_types_attr = HasAttr(type_string, "output_types");
   bool has_output_shapes_attr = HasAttr(type_string, "output_shapes");
   if (has_output_shapes_attr) {
-    opts.reset(new GraphDefBuilder::Options(
-        opts->WithAttr("output_shapes", dataset->output_shapes())));
+    opts = absl::make_unique<GraphDefBuilder::Options>(
+        opts->WithAttr("output_shapes", dataset->output_shapes()));
   }
   if (has_output_types_attr) {
-    opts.reset(new GraphDefBuilder::Options(
-        opts->WithAttr("output_types", dataset->output_dtypes())));
+    opts = absl::make_unique<GraphDefBuilder::Options>(
+        opts->WithAttr("output_types", dataset->output_dtypes()));
+  }
+  bool has_metadata_attr = HasAttr(type_string, "metadata");
+  if (has_metadata_attr) {
+    std::string serialized_metadata;
+    dataset->metadata().SerializeToString(&serialized_metadata);
+    opts = absl::make_unique<GraphDefBuilder::Options>(
+        opts->WithAttr("metadata", serialized_metadata));
   }
   for (const auto& attr : attrs) {
-    opts.reset(
-        new GraphDefBuilder::Options(opts->WithAttr(attr.first, attr.second)));
+    opts = absl::make_unique<GraphDefBuilder::Options>(
+        opts->WithAttr(attr.first, attr.second));
   }
   if (opts->HaveError()) {
     return errors::Internal("AddDataset: Failed to build Options with error ",
                             opts->StatusToString());
   }
-  NodeBuilder node_builder(opts->GetNameForOp(type_string), type_string,
-                           opts->op_registry());
+  NodeBuilder node_builder(
+      use_dataset_name ? dataset->node_name() : opts->GetNameForOp(type_string),
+      type_string, opts->op_registry());
   {
     size_t total_size = inputs.size() + list_inputs.size();
     auto inputs_iter = inputs.begin();
@@ -267,7 +317,7 @@ Status GraphDefBuilderWrapper::AddDataset(
     return errors::Internal("AddDataset: Failed to build ", type_string,
                             " op with error ", opts->StatusToString());
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status GraphDefBuilderWrapper::AddFunction(
@@ -276,7 +326,7 @@ Status GraphDefBuilderWrapper::AddFunction(
   if (b_->HasFunction(function_name)) {
     VLOG(1) << "Function with name " << function_name << "already exists in"
             << " the graph. It will not be added again.";
-    return Status::OK();
+    return OkStatus();
   }
   const FunctionDef* f_def = lib_def.Find(function_name);
   if (f_def == nullptr) {
@@ -310,7 +360,7 @@ Status GraphDefBuilderWrapper::AddFunction(
   for (auto iter = f_def->attr().begin(); iter != f_def->attr().end(); iter++) {
     TF_RETURN_IF_ERROR(AddAttrFunctions(ctx, iter->second, lib_def));
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 void GraphDefBuilderWrapper::AddPlaceholderInternal(const Tensor& val,
@@ -337,6 +387,17 @@ bool GraphDefBuilderWrapper::HasAttr(const string& name,
   return HasAttr(op_def, attr_name);
 }
 
+int32_t GetRunnerThreadpoolSizeFromOpKernelContext(OpKernelContext* ctx) {
+  thread::ThreadPool* thread_pool =
+      ctx->device()->tensorflow_device_thread_pool();
+  if (thread_pool) {
+    return thread_pool->NumThreads();
+  } else {
+    static const int32_t kDefaultRunnerThreadpoolSize = port::MaxParallelism();
+    return kDefaultRunnerThreadpoolSize;
+  }
+}
+
 Status IteratorBase::InitializeBase(IteratorContext* ctx,
                                     const IteratorBase* parent) {
   parent_ = parent;
@@ -353,11 +414,11 @@ Status IteratorBase::InitializeBase(IteratorContext* ctx,
     model->AddNode(std::move(factory), prefix(), parent->model_node(), &node_);
     cleanup_fns_.push_back([this, model]() { model->RemoveNode(node_); });
   }
-  return Status::OK();
+  return OkStatus();
 }
 
-int64 GetAllocatedBytes(const std::vector<Tensor>& element) {
-  int64 allocated_bytes = 0;
+int64_t GetAllocatedBytes(const std::vector<Tensor>& element) {
+  int64_t allocated_bytes = 0;
   DatasetBase* dataset;
   for (auto& tensor : element) {
     if (tensor.dtype() == DT_VARIANT &&
@@ -370,8 +431,8 @@ int64 GetAllocatedBytes(const std::vector<Tensor>& element) {
   return allocated_bytes;
 }
 
-int64 GetTotalBytes(const std::vector<Tensor>& element) {
-  int64 total_bytes = 0;
+int64_t GetTotalBytes(const std::vector<Tensor>& element) {
+  int64_t total_bytes = 0;
   DatasetBase* dataset;
   for (auto& tensor : element) {
     if (tensor.dtype() == DT_VARIANT &&
@@ -408,7 +469,7 @@ Status GetDatasetFromVariantTensor(const Tensor& tensor,
   if (*out_dataset == nullptr) {
     return errors::Internal("Read uninitialized Dataset variant.");
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status StoreDatasetInVariantTensor(DatasetBase* dataset, Tensor* tensor) {
@@ -418,13 +479,221 @@ Status StoreDatasetInVariantTensor(DatasetBase* dataset, Tensor* tensor) {
         "Dataset tensor must be a scalar of dtype DT_VARIANT.");
   }
   tensor->scalar<Variant>()() = DatasetVariantWrapper(dataset);
-  return Status::OK();
+  return OkStatus();
+}
+
+namespace internal {
+
+#define WARN_PROTO_FIELD_CONFLICT(reflection, field, field_type, src, dst)     \
+  {                                                                            \
+    auto source_value = reflection->Get##field_type(src, field);               \
+    auto destination_value = reflection->Get##field_type(*dst, field);         \
+    if (source_value != destination_value) {                                   \
+      LOG(WARNING) << "Changing the value of option field " << field->name()   \
+                   << " from " << destination_value << " to " << source_value; \
+    }                                                                          \
+  }
+
+#define WARN_PROTO_ENUM_FIELD_CONFLICT(reflection, field, src, dst) \
+  {                                                                 \
+    auto source_value = reflection->GetEnum(src, field);            \
+    auto destination_value = reflection->GetEnum(*dst, field);      \
+    if (source_value != destination_value) {                        \
+      LOG(WARNING) << "Changing the value of option enum field "    \
+                   << field->name() << " from "                     \
+                   << destination_value->full_name() << " to "      \
+                   << source_value->full_name();                    \
+    }                                                               \
+  }
+
+void WarnProtoConflicts(const protobuf::Message& src, protobuf::Message* dst) {
+  std::vector<const protobuf::FieldDescriptor*> set_src;
+  std::vector<const protobuf::FieldDescriptor*> set_dst;
+  const protobuf::Reflection* reflection = src.GetReflection();
+  reflection->ListFields(src, &set_src);
+  reflection->ListFields(*dst, &set_dst);
+  std::sort(set_src.begin(), set_src.end());
+  std::sort(set_dst.begin(), set_dst.end());
+
+  std::vector<const protobuf::FieldDescriptor*> in_both;
+  std::set_intersection(set_src.begin(), set_src.end(), set_dst.begin(),
+                        set_dst.end(), std::back_inserter(in_both));
+
+  for (auto field : in_both) {
+    if (field->type() == protobuf::FieldDescriptor::TYPE_MESSAGE) {
+      WarnProtoConflicts(reflection->GetMessage(src, field),
+                         reflection->MutableMessage(dst, field));
+    } else {
+      switch (field->cpp_type()) {
+        case protobuf::FieldDescriptor::CPPTYPE_INT32:
+          WARN_PROTO_FIELD_CONFLICT(reflection, field, Int32, src, dst);
+          break;
+        case protobuf::FieldDescriptor::CPPTYPE_INT64:
+          WARN_PROTO_FIELD_CONFLICT(reflection, field, Int64, src, dst);
+          break;
+        case protobuf::FieldDescriptor::CPPTYPE_UINT32:
+          WARN_PROTO_FIELD_CONFLICT(reflection, field, UInt32, src, dst);
+          break;
+        case protobuf::FieldDescriptor::CPPTYPE_UINT64:
+          WARN_PROTO_FIELD_CONFLICT(reflection, field, UInt64, src, dst);
+          break;
+        case protobuf::FieldDescriptor::CPPTYPE_DOUBLE:
+          WARN_PROTO_FIELD_CONFLICT(reflection, field, Double, src, dst);
+          break;
+        case protobuf::FieldDescriptor::CPPTYPE_FLOAT:
+          WARN_PROTO_FIELD_CONFLICT(reflection, field, Float, src, dst);
+          break;
+        case protobuf::FieldDescriptor::CPPTYPE_BOOL:
+          WARN_PROTO_FIELD_CONFLICT(reflection, field, Bool, src, dst);
+          break;
+        case protobuf::FieldDescriptor::CPPTYPE_ENUM:
+          WARN_PROTO_ENUM_FIELD_CONFLICT(reflection, field, src, dst);
+          break;
+        default: {
+          LOG(ERROR) << "Unrecognized proto type for field "
+                     << field->full_name();
+        }
+      }
+    }
+  }
+}
+
+#undef WARN_PROTO_ENUM_FIELD_CONFLICT
+#undef WARN_PROTO_FIELD_CONFLICT
+
+void MergeOptions(const protobuf::Message& source,
+                  protobuf::Message* destination) {
+  WarnProtoConflicts(source, destination);
+  destination->MergeFrom(source);
+}
+
+void MergeOptions(const protobuf::MessageLite& source,
+                  protobuf::MessageLite* destination) {
+  destination->CheckTypeAndMergeFrom(source);
+}
+
+}  // namespace internal
+
+void DatasetBase::Initialize(const Metadata& metadata) {
+  Status s = ComputeNumSources();
+  if (!s.ok()) {
+    LOG(ERROR) << s;
+  }
+  s = MergeOptionsFromInputs();
+  if (!s.ok()) {
+    LOG(ERROR) << s;
+  }
+  metadata_ = metadata;
+  if (metadata_.name() == "") {
+    static std::atomic<int64_t> id_counter(0);
+    *metadata_.mutable_name() =
+        strings::StrCat(type_string(), ":", id_counter.fetch_add(1));
+  }
+}
+
+Status DatasetBase::ComputeNumSources() {
+  std::vector<const DatasetBase*> inputs;
+  Status s = InputDatasets(&inputs);
+  if (errors::IsUnimplemented(s)) {
+    return errors::Unimplemented(
+        "Cannot compute input sources for dataset of type ", type_string(),
+        ", because the dataset does not implement `InputDatasets`.");
+  }
+  if (num_sources_ >= 0) {
+    // Already computed.
+    return OkStatus();
+  }
+  num_sources_ = 0;
+  if (inputs.empty()) {
+    num_sources_ = 1;
+    return OkStatus();
+  }
+  for (const auto& input : inputs) {
+    if (input->num_sources() < 0) {
+      return errors::FailedPrecondition(
+          "Cannot compute input sources for dataset of type ", type_string(),
+          ", because sources could not be computed for input dataset of type ",
+          input->type_string());
+    }
+    num_sources_ += input->num_sources();
+  }
+  return OkStatus();
+}
+
+Status DatasetBase::CheckRandomAccessCompatible(const int64 index) const {
+  CardinalityOptions options;
+  options.set_compute_level(CardinalityOptions::CARDINALITY_COMPUTE_MODERATE);
+  int64 cardinality = Cardinality(options);
+  if (cardinality == kInfiniteCardinality ||
+      cardinality == kUnknownCardinality) {
+    return tensorflow::errors::FailedPrecondition(
+        "Dataset of type ", this->DebugString(), " has ",
+        cardinality == kInfiniteCardinality ? "infinite" : "unknown",
+        " cardinality, which does not support random access.");
+  }
+  if (index < 0 || index >= cardinality) {
+    return errors::OutOfRange("Index out of range [0, ", cardinality,
+                              "):", index);
+  }
+  return OkStatus();
+}
+
+Status DatasetBase::Get(OpKernelContext* ctx, int64 index,
+                        std::vector<Tensor>* out_tensors) const {
+  return errors::Unimplemented(
+      "Random access is not implemented for this dataset.");
+}
+
+StatusOr<DatasetBase*> DatasetBase::Finalize(
+    OpKernelContext* ctx,
+    std::function<StatusOr<core::RefCountPtr<DatasetBase>>()>
+        make_finalized_dataset) const {
+  mutex_lock l(mu_);
+  if (!finalized_dataset_) {
+    TF_ASSIGN_OR_RETURN(finalized_dataset_, make_finalized_dataset());
+  }
+  return finalized_dataset_.get();
+}
+
+Status DatasetBase::MergeOptionsFromInputs() {
+  std::vector<const DatasetBase*> inputs;
+  Status s = InputDatasets(&inputs);
+  if (errors::IsUnimplemented(s)) {
+    return errors::Unimplemented(
+        "Cannot merge options for dataset of type ", type_string(),
+        ", because the dataset does not implement `InputDatasets`.");
+  }
+  if (inputs.empty()) {
+    return OkStatus();
+  }
+  // Merge options from inputs sequentially before merging options from dataset.
+  // Since the last options merged takes precedence, the options that may be set
+  // for the current dataset through OptionsDataset takes precedence over those
+  // set on the input datasets.
+  Options merged_options = inputs[0]->options_;
+  for (int i = 1; i < inputs.size(); ++i) {
+    internal::MergeOptions(inputs[i]->options_, &merged_options);
+  }
+  internal::MergeOptions(options_, &merged_options);
+  options_ = merged_options;
+  return OkStatus();
 }
 
 Status DatasetBase::MakeIterator(
     IteratorContext* ctx, const IteratorBase* parent,
     const string& output_prefix,
     std::unique_ptr<IteratorBase>* iterator) const {
+  if (type_string() == "OptionsDataset" || type_string() == "FinalizeDataset") {
+    std::vector<const DatasetBase*> inputs;
+    Status s = InputDatasets(&inputs);
+    return inputs[0]->MakeIterator(ctx, parent, output_prefix, iterator);
+  }
+  profiler::TraceMe traceme(
+      [&] {
+        return profiler::TraceMeEncode(
+            strings::StrCat("MakeIterator::", type_string()), {});
+      },
+      profiler::TraceMeLevel::kInfo);
   *iterator = MakeIteratorInternal(output_prefix);
   Status s = (*iterator)->InitializeBase(ctx, parent);
   if (s.ok()) {
@@ -437,23 +706,40 @@ Status DatasetBase::MakeIterator(
   return s;
 }
 
-Status DatasetBase::MakeSplitProvider(
-    std::unique_ptr<SplitProvider>* split_provider) const {
+Status DatasetBase::MakeSplitProviders(
+    std::vector<std::unique_ptr<SplitProvider>>* split_providers) const {
   std::vector<const DatasetBase*> inputs;
   Status s = InputDatasets(&inputs);
   if (errors::IsUnimplemented(s)) {
     return errors::Unimplemented(
-        "Cannot create a split provider for dataset of type ", type_string(),
+        "Cannot create split providers for dataset of type ", type_string(),
         ", because the dataset implements neither `InputDatasets` nor "
         "`MakeSplitProvider`.");
   }
   if (inputs.size() != 1) {
     return errors::Unimplemented(
-        "Cannot create a split provider for dataset of type ", type_string(),
-        ", because the dataset is not unary (having arity ", inputs.size(),
+        "Cannot create split providers for dataset of type ", type_string(),
+        ", because the dataset is not unary (instead having arity ",
+        inputs.size(),
         "), and no custom implementation of `MakeSplitProvider` is defined.");
   }
-  return inputs[0]->MakeSplitProvider(split_provider);
+  return inputs[0]->MakeSplitProviders(split_providers);
+}
+
+int64_t DatasetBase::Cardinality() const {
+  mutex_lock l(cardinality_mu_);
+  if (cardinality_ == kUnknownCardinality) {
+    cardinality_ = CardinalityInternal();
+  }
+  return cardinality_;
+}
+
+int64_t DatasetBase::Cardinality(CardinalityOptions options) const {
+  mutex_lock l(cardinality_mu_);
+  if (cardinality_ == kUnknownCardinality) {
+    cardinality_ = CardinalityInternal(options);
+  }
+  return cardinality_;
 }
 
 Status DatasetBase::InputDatasets(
@@ -465,21 +751,28 @@ Status DatasetBase::InputDatasets(
 Status DatasetBase::DatasetGraphDefBuilder::AddInputDataset(
     SerializationContext* ctx, const DatasetBase* dataset, Node** output) {
   Status status = dataset->AsGraphDefInternal(ctx, this, output);
-  if (errors::IsUnimplemented(status) && !ctx->fail_if_unimplemented()) {
-    Tensor t(DT_VARIANT, TensorShape({}));
-    // `StoreDatasetInVariantTensor` will transfer ownership of `dataset`. We
-    // increment the refcount of `dataset` here to retain ownership.
-    dataset->Ref();
-    TF_RETURN_IF_ERROR(
-        StoreDatasetInVariantTensor(const_cast<DatasetBase*>(dataset), &t));
-    TF_RETURN_IF_ERROR(AddPlaceholder(t, output));
-    DCHECK_NE(ctx->input_list(), nullptr);
-    ctx->input_list()->emplace_back((*output)->name(), std::move(t));
-    LOG_EVERY_N_SEC(WARNING, 30)
-        << "Input of " << dataset->DebugString()
-        << " will not be optimized because the dataset does not implement the "
-           "AsGraphDefInternal() method needed to apply optimizations.";
-    return Status::OK();
+  if (ctx->is_graph_rewrite()) {
+    if (status.ok()) {
+      // Record cardinality in an unregistered attributes so that rewrites have
+      // this information.
+      (*output)->AddAttr(kCardinalityAttrForRewrite, dataset->Cardinality());
+    } else if (errors::IsUnimplemented(status)) {
+      Tensor t(DT_VARIANT, TensorShape({}));
+      // `StoreDatasetInVariantTensor` will transfer ownership of `dataset`. We
+      // increment the refcount of `dataset` here to retain ownership.
+      dataset->Ref();
+      TF_RETURN_IF_ERROR(
+          StoreDatasetInVariantTensor(const_cast<DatasetBase*>(dataset), &t));
+      TF_RETURN_IF_ERROR(AddPlaceholder(t, output));
+      DCHECK_NE(ctx->input_list(), nullptr);
+      ctx->input_list()->emplace_back((*output)->name(), std::move(t));
+      LOG_EVERY_N_SEC(WARNING, 30)
+          << "Input of " << dataset->DebugString()
+          << " will not be optimized because the dataset does not implement "
+             "the "
+             "AsGraphDefInternal() method needed to apply optimizations.";
+      return OkStatus();
+    }
   }
   return status;
 }
@@ -499,7 +792,24 @@ Status DatasetBase::DatasetGraphDefBuilder::AddDatasetOrTensor(
       return s;
     }
   }
+  if (t.dtype() == DT_RESOURCE && !ctx->is_graph_rewrite()) {
+    Status s = AddResourceHelper(ctx, t, output);
+    if (!errors::IsUnimplemented(s)) {
+      // Fall through to AddTensor if AsGraphDef is not implemented for this
+      // resource.
+      return s;
+    }
+  }
   return AddTensor(t, output);
+}
+
+Status DatasetBase::DatasetGraphDefBuilder::AddIdentity(
+    SerializationContext* ctx, const std::string& name_prefix, Node** input,
+    Node** output) {
+  *output =
+      ops::UnaryOp("Identity", *input,
+                   builder()->opts().WithName(UniqueNodeName(name_prefix)));
+  return OkStatus();
 }
 
 Status DatasetBase::DatasetGraphDefBuilder::AddDatasetOrTensorHelper(
@@ -521,14 +831,29 @@ Status DatasetBase::DatasetGraphDefBuilder::AddDatasetOrTensorHelper(
                            opts.op_registry());
   node_builder.Input(std::move(nodes));
   *output = opts.FinalizeBuilder(&node_builder);
-  return Status::OK();
+  return OkStatus();
+}
+
+Status DatasetBase::DatasetGraphDefBuilder::AddResourceHelper(
+    SerializationContext* ctx, const Tensor& t, Node** output) {
+  const ResourceHandle& handle = t.flat<ResourceHandle>()(0);
+  if (ctx->device_name() != handle.device()) {
+    return errors::InvalidArgument("Trying to access resource ", handle.name(),
+                                   " located in device ", handle.device(),
+                                   " from device ", ctx->device_name());
+  }
+  ResourceBase* resource;
+  TF_RETURN_IF_ERROR(ctx->resource_mgr()->Lookup(handle, &resource));
+  core::ScopedUnref unref(resource);
+  return resource->AsGraphDef(builder(), output);
 }
 
 DatasetBaseIterator::DatasetBaseIterator(const BaseParams& params)
     : params_(params) {
   params_.dataset->Ref();
   VLOG(2) << prefix() << " constructor";
-  strings::StrAppend(&traceme_metadata_, "shapes=");
+  strings::StrAppend(&traceme_metadata_, "name=", dataset()->metadata().name());
+  strings::StrAppend(&traceme_metadata_, ",shapes=");
   auto& shapes = output_shapes();
   for (int i = 0; i < shapes.size(); ++i) {
     if (i > 0) {
@@ -572,21 +897,26 @@ Status DatasetBaseIterator::GetNext(IteratorContext* ctx,
                              profiler::TraceMeLevel::kInfo);
   DVLOG(3) << prefix() << " GetNext enter";
   auto model = ctx->model();
-  if (model && model->collect_resource_usage() && node_) {
-    int64 now_nanos = EnvTime::NowNanos();
+  if (collect_resource_usage(ctx)) {
+    int64_t now_nanos = EnvTime::NowNanos();
     auto output = node_->output();
     if (output) {
       output->record_stop(now_nanos);
     }
     node_->record_start(now_nanos);
   }
+  out_tensors->clear();
   Status s = GetNextInternal(ctx, out_tensors, end_of_sequence);
-  if (TF_PREDICT_TRUE(s.ok() && !*end_of_sequence)) {
-    DCHECK_EQ(out_tensors->size(), dataset()->output_dtypes().size());
-    RecordElement(ctx, out_tensors);
+  if (TF_PREDICT_TRUE(s.ok())) {
+    if (TF_PREDICT_TRUE(!*end_of_sequence)) {
+      DCHECK_EQ(out_tensors->size(), dataset()->output_dtypes().size());
+      RecordElement(ctx, out_tensors);
+    } else {
+      out_tensors->clear();
+    }
   }
-  if (model && model->collect_resource_usage() && node_) {
-    int64 now_nanos = EnvTime::NowNanos();
+  if (collect_resource_usage(ctx)) {
+    int64_t now_nanos = EnvTime::NowNanos();
     node_->record_stop(now_nanos);
     auto output = node_->output();
     if (output) {
@@ -611,8 +941,8 @@ Status DatasetBaseIterator::Skip(IteratorContext* ctx, int num_to_skip,
                              profiler::TraceMeLevel::kInfo);
   DVLOG(3) << prefix() << " Skip enter";
   auto model = ctx->model();
-  if (model && model->collect_resource_usage() && node_) {
-    int64 now_nanos = EnvTime::NowNanos();
+  if (collect_resource_usage(ctx)) {
+    int64_t now_nanos = EnvTime::NowNanos();
     auto output = node_->output();
     if (output) {
       output->record_stop(now_nanos);
@@ -620,8 +950,8 @@ Status DatasetBaseIterator::Skip(IteratorContext* ctx, int num_to_skip,
     node_->record_start(now_nanos);
   }
   Status s = SkipInternal(ctx, num_to_skip, end_of_sequence, num_skipped);
-  if (model && model->collect_resource_usage() && node_) {
-    int64 now_nanos = EnvTime::NowNanos();
+  if (collect_resource_usage(ctx)) {
+    int64_t now_nanos = EnvTime::NowNanos();
     node_->record_stop(now_nanos);
     auto output = node_->output();
     if (output) {
@@ -648,19 +978,19 @@ Status DatasetBaseIterator::SkipInternal(IteratorContext* ctx, int num_to_skip,
     std::vector<Tensor> out_tensors;
     TF_RETURN_IF_ERROR(GetNextInternal(ctx, &out_tensors, end_of_sequence));
     if (*end_of_sequence) {
-      return Status::OK();
+      return OkStatus();
     }
     // RecordElement is used to count the number of element computed and
     // help calculate the CPU time spent on a given iterator to do the
     // autotuning.
     // Here we only call RecordElement in the default implementation of
     // SkipInternal (which trivially calls GetNextInternal) and assume
-    // that the overriden SkipInternal in the derived class will have
+    // that the overridden SkipInternal in the derived class will have
     // negligible cost compare to its GetNextInternal.
     RecordElement(ctx, &out_tensors);
     (*num_skipped)++;
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 void DatasetOpKernel::Compute(OpKernelContext* ctx) {
@@ -670,6 +1000,7 @@ void DatasetOpKernel::Compute(OpKernelContext* ctx) {
     Tensor* output = nullptr;
     OP_REQUIRES_OK(ctx, ctx->allocate_output(0, TensorShape({}), &output));
     OP_REQUIRES_OK(ctx, StoreDatasetInVariantTensor(dataset, output));
+    dataset->Initialize(metadata_);
   }
 }
 
@@ -679,15 +1010,22 @@ string DatasetOpKernel::TraceString(const OpKernelContext& ctx,
 }
 
 // static
-bool DatasetOpKernel::IsDatasetOp(const OpDef* op_def) {
-  if (DatasetOpRegistry::IsRegistered(op_def->name())) {
-    return true;
+bool DatasetOpKernel::IsDatasetOp(const OpDef& op_def) {
+  if (op_def.output_arg_size() != 1) return false;
+  if (op_def.output_arg(0).type() != DT_VARIANT) return false;
+  absl::string_view op_name = op_def.name();
+  if (op_name == "DatasetFromGraph") return true;
+  if (absl::EndsWith(op_name, "Dataset")) return true;
+  // Check if the suffix matches "DatasetV[0-9]+".
+  size_t index = op_name.length() - 1;
+  while (index >= 0 && isdigit(op_name[index])) {
+    index--;
   }
-
-  return (op_def->output_arg_size() == 1 &&
-          op_def->output_arg(0).type() == DT_VARIANT &&
-          (absl::EndsWith(op_def->name(), "Dataset") ||
-           absl::EndsWith(op_def->name(), "DatasetV2")));
+  constexpr absl::string_view kDatasetPrefix = "DatasetV";
+  constexpr absl::string_view::size_type kPrefixLength = kDatasetPrefix.size();
+  if (index < kPrefixLength - 1 || index == op_name.length() - 1) return false;
+  return op_name.substr(index - kPrefixLength + 1, kPrefixLength) ==
+         kDatasetPrefix;
 }
 
 void UnaryDatasetOpKernel::MakeDataset(OpKernelContext* ctx,
@@ -759,19 +1097,6 @@ void BackgroundWorker::WorkerLoop() {
     DCHECK(work_item != nullptr);
     work_item();
   }
-}
-
-// static
-void DatasetOpRegistry::Register(const string& op_name) {
-  mutex_lock l(*get_dataset_op_registry_lock());
-  get_dataset_op_registry()->insert(op_name);
-}
-
-// static
-bool DatasetOpRegistry::IsRegistered(const string& op_name) {
-  mutex_lock l(*get_dataset_op_registry_lock());
-  std::unordered_set<string>* op_names = get_dataset_op_registry();
-  return op_names->find(op_name) != op_names->end();
 }
 
 namespace {

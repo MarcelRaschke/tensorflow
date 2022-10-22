@@ -33,7 +33,6 @@ namespace {
 
 constexpr char kBatchDataset[] = "BatchDatasetV2";
 constexpr char kParallelBatchDataset[] = "ParallelBatchDataset";
-constexpr char kParallelCopy[] = "parallel_copy";
 
 NodeDef MakeParallelBatch(const string& name, MutableGraphView* graph) {
   // The inputs of the node to be parallelized could be changed by the
@@ -50,7 +49,6 @@ NodeDef MakeParallelBatch(const string& name, MutableGraphView* graph) {
   string drop_remainder_name = parallel_batch.input(2);
   parallel_batch.set_input(2, num_parallel_calls->name());
   parallel_batch.add_input(drop_remainder_name);
-  parallel_batch.mutable_attr()->erase(kParallelCopy);
 
   return parallel_batch;
 }
@@ -65,15 +63,14 @@ Status BatchParallelization::OptimizeAndCollectStats(Cluster* cluster,
   if (!autotune_) {
     VLOG(1) << "The optimization batch_parallelization is not applied if "
                "autotune is off.";
-    return Status::OK();
+    return OkStatus();
   }
   MutableGraphView graph(output);
 
   // If the GrapplerItem is derived from a FunctionDef, we don't optimize it,
   // because we only want to enable extra batch parallelism on the main dataset
   // pipeline.
-  if (graph_utils::IsItemDerivedFromFunctionDef(item, graph))
-    return Status::OK();
+  if (graph_utils::IsItemDerivedFromFunctionDef(item, graph)) return OkStatus();
 
   absl::flat_hash_set<string> nodes_to_delete;
   FunctionLibraryDefinition function_library(OpRegistry::Global(),
@@ -96,13 +93,7 @@ Status BatchParallelization::OptimizeAndCollectStats(Cluster* cluster,
   }
 
   TF_RETURN_IF_ERROR(graph.DeleteNodes(nodes_to_delete));
-  return Status::OK();
-}
-
-void BatchParallelization::Feedback(Cluster* cluster, const GrapplerItem& item,
-                                    const GraphDef& optimize_output,
-                                    double result) {
-  // no-op
+  return OkStatus();
 }
 
 REGISTER_GRAPH_OPTIMIZER_AS(BatchParallelization, "batch_parallelization");

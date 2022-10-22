@@ -1,6 +1,6 @@
 package(
     default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 py_library(
@@ -18,8 +18,8 @@ py_library(
         "//tensorflow/python:tensor_util",
         "//tensorflow/python:util",
         "//tensorflow/python/ops/signal",
+        "//tensorflow/python/trackable:data_structures",
         "//third_party/py/numpy",
-        "@six_archive//:six",
     ],
 )
 

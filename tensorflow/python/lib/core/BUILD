@@ -33,7 +33,7 @@ visibility = [
 
 package(
     default_visibility = visibility,
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 cc_library(
@@ -48,13 +48,20 @@ cc_library(
 
 cc_library(
     name = "bfloat16_lib",
-    srcs = ["bfloat16.cc"],
-    hdrs = ["bfloat16.h"],
+    srcs = [
+        "bfloat16.cc",
+        "float8_e4m3b11.cc",
+    ],
+    hdrs = [
+        "bfloat16.h",
+        "float8_e4m3b11.h",
+    ],
     deps = [
         ":numpy_lib",
         "//tensorflow/core/platform:logging",
+        "//tensorflow/core/platform:types",
         "//third_party/eigen3",
-        "//third_party/python_runtime:headers",
+        "//third_party/python_runtime:headers",  # build_cleaner: keep; DNR: b/35864863
         "@com_google_absl//absl/strings",
     ],
 )
@@ -63,7 +70,6 @@ tf_python_pybind_extension(
     name = "_pywrap_bfloat16",
     srcs = ["bfloat16_wrapper.cc"],
     hdrs = ["bfloat16.h"],
-    module_name = "_pywrap_bfloat16",
     deps = [
         "//third_party/python_runtime:headers",
         "@pybind11",
@@ -129,6 +135,7 @@ cc_library(
         "py_exception_registry.h",
         "pybind11_status.h",
         "//tensorflow/c:headers",
+        "//tensorflow/c:tf_status_internal_headers",
         "//tensorflow/c/eager:headers",
     ],
     features = [
@@ -136,7 +143,6 @@ cc_library(
     ],
     visibility = tf_external_workspace_visible(visibility),
     deps = [
-        "//tensorflow/c:tf_status_headers",
         "//tensorflow/core:protos_all_cc",
         "//tensorflow/core/common_runtime:core_cpu_headers_lib",
         "//third_party/python_runtime:headers",
@@ -149,7 +155,6 @@ cc_library(
     hdrs = [
         "py_exception_registry.h",
         "pybind11_status.h",
-        "//tensorflow/c:headers",
     ],
     features = ["-parse_headers"],
     visibility = tf_external_workspace_visible(visibility),
@@ -237,7 +242,6 @@ cc_library(
 tf_python_pybind_extension(
     name = "_pywrap_py_func",
     srcs = ["py_func_wrapper.cc"],
-    module_name = "_pywrap_py_func",
     deps = [
         "//tensorflow/python:py_func_headers_lib",
         "//third_party/python_runtime:headers",

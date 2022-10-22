@@ -29,10 +29,11 @@ limitations under the License.
 #include <gtest/gtest.h>
 #include "flatbuffers/flatbuffers.h"  // from @flatbuffers
 #include "tensorflow/lite/allocation.h"
+#include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/core/api/error_reporter.h"
 #include "tensorflow/lite/core/api/op_resolver.h"
 #include "tensorflow/lite/core/api/verifier.h"
-#include "tensorflow/lite/interpreter.h"
+#include "tensorflow/lite/core/interpreter.h"
 #include "tensorflow/lite/interpreter_builder.h"
 #include "tensorflow/lite/interpreter_test_util.h"
 #include "tensorflow/lite/kernels/register.h"
@@ -267,6 +268,94 @@ TEST(BasicFlatBufferModel, TestModelInInterpreter) {
   }
 }
 
+TEST(BasicFlatBufferModel, TestWithNumThreads) {
+  TestErrorReporter reporter;
+  auto model = FlatBufferModel::BuildFromFile(
+      "tensorflow/lite/testdata/test_model.bin", &reporter);
+  ASSERT_TRUE(model);
+  TrivialResolver resolver(&dummy_reg);
+  InterpreterBuilder builder(*model, resolver);
+
+  std::unique_ptr<Interpreter> interpreter;
+  ASSERT_EQ(builder(&interpreter, /*num_threads=*/42), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+  ASSERT_EQ(interpreter->subgraph(0)->context()->recommended_num_threads, 42);
+
+  interpreter.reset();
+  ASSERT_EQ(builder(&interpreter, 0), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+  ASSERT_EQ(interpreter->subgraph(0)->context()->recommended_num_threads, 1);
+
+  interpreter.reset();
+  ASSERT_EQ(builder(&interpreter, -1), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+  ASSERT_EQ(interpreter->subgraph(0)->context()->recommended_num_threads, -1);
+
+  ASSERT_EQ(reporter.num_calls(), 0);
+  interpreter = std::make_unique<Interpreter>();
+  ASSERT_EQ(builder(&interpreter, -2), kTfLiteError);
+  ASSERT_EQ(interpreter, nullptr);
+  ASSERT_EQ(reporter.num_calls(), 1);
+  ASSERT_PRED_FORMAT2(testing::IsSubstring,
+                      "num_threads should be >= 0 or just -1",
+                      reporter.error_messages());
+}
+
+TEST(BasicFlatBufferModel, TestSetNumThreads) {
+  TestErrorReporter reporter;
+  auto model = FlatBufferModel::BuildFromFile(
+      "tensorflow/lite/testdata/test_model.bin", &reporter);
+  ASSERT_TRUE(model);
+  std::unique_ptr<Interpreter> interpreter;
+  TrivialResolver resolver(&dummy_reg);
+  InterpreterBuilder builder(*model, resolver);
+
+  ASSERT_EQ(builder.SetNumThreads(42), kTfLiteOk);
+  interpreter.reset();
+  ASSERT_EQ(builder(&interpreter), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+
+  ASSERT_EQ(builder.SetNumThreads(0), kTfLiteOk);
+  interpreter.reset();
+  ASSERT_EQ(builder(&interpreter), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+
+  ASSERT_EQ(builder.SetNumThreads(-1), kTfLiteOk);
+  interpreter.reset();
+  ASSERT_EQ(builder(&interpreter), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+
+  ASSERT_EQ(reporter.num_calls(), 0);
+  ASSERT_EQ(builder.SetNumThreads(-2), kTfLiteError);
+  interpreter.reset();
+  ASSERT_EQ(builder(&interpreter), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+  ASSERT_EQ(reporter.num_calls(), 1);
+  ASSERT_PRED_FORMAT2(testing::IsSubstring,
+                      "num_threads should be >= 0 or just -1",
+                      reporter.error_messages());
+}
+
+TEST(BasicFlatBufferModel, TestSetNumThreadsWithMultipleSubgraphs) {
+  TestErrorReporter reporter;
+  auto model = FlatBufferModel::BuildFromFile(
+      "tensorflow/lite/testdata/2_subgraphs.bin", &reporter);
+  ASSERT_TRUE(model);
+  std::unique_ptr<Interpreter> interpreter;
+  TrivialResolver resolver(&dummy_reg);
+  InterpreterBuilder builder(*model, resolver);
+
+  ASSERT_EQ(builder.SetNumThreads(4), kTfLiteOk);
+  interpreter.reset();
+  ASSERT_EQ(builder(&interpreter), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+
+  // Check that each subgraph has the expected number of threads set.
+  for (int i = 0; i < interpreter->subgraphs_size(); ++i) {
+    EXPECT_EQ(interpreter->subgraph(i)->context()->recommended_num_threads, 4);
+  }
+}
+
 // Test that loading a model with TensorFlow ops fails when the flex delegate is
 // not linked into the target.
 TEST(FlexModel, FailureWithoutFlexDelegate) {
@@ -285,7 +374,7 @@ TEST(FlexModel, FailureWithoutFlexDelegate) {
 
   // As the flex ops weren't resolved implicitly by the flex delegate, runtime
   // allocation and execution will fail.
-  ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteError);
+  ASSERT_EQ(interpreter->AllocateTensors(), kTfLiteUnresolvedOps);
 }
 
 // This tests on a flatbuffer that defines a shape of 2 to be a memory mapped
@@ -435,6 +524,62 @@ TEST(BasicFlatBufferModel, TestReadRuntimeVersionFromModel) {
   ASSERT_TRUE(model2);
   // Check that we have read the runtime string correctly.
   ASSERT_EQ(model2->GetMinimumRuntime(), "1.5.0");
+}
+
+// Test reading all metadata from the model
+TEST(BasicFlatBufferModel, TestReadMetadataFromModel) {
+  // First read a model that doesn't have the runtime string.
+  auto model1 = FlatBufferModel::BuildFromFile(
+      "tensorflow/lite/testdata/test_model.bin");
+  ASSERT_TRUE(model1);
+  std::map<std::string, std::string> metadata = model1->ReadAllMetadata();
+  ASSERT_EQ(metadata.size(), 0);
+
+  // Read a model that has reduced precision support mask populated
+  auto model2 = FlatBufferModel::BuildFromFile(
+      "tensorflow/lite/testdata/test_model_redux_precision.bin");
+  ASSERT_TRUE(model2);
+  // Check that we have read the runtime string correctly.
+  metadata = model2->ReadAllMetadata();
+  ASSERT_EQ(metadata["reduced_precision_support"], "fp16bf16accfp32");
+}
+
+TEST(BasicFlatBufferModel, TestReadMetadataFromContext) {
+  const std::string reduced_precision_meta_key = "reduced_precision_support";
+  // First read a model that doesn't have any metadata.
+  auto model1 = FlatBufferModel::BuildFromFile(
+      "tensorflow/lite/testdata/test_model.bin");
+  ASSERT_TRUE(model1);
+  std::unique_ptr<Interpreter> interpreter;
+  TrivialResolver resolver(&dummy_reg);
+  InterpreterBuilder builder1(*model1, resolver);
+  interpreter.reset();
+  ASSERT_EQ(builder1(&interpreter), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+
+  const char* ptr = nullptr;
+  size_t bytes;
+  auto* context = interpreter->subgraph(0)->context();
+  ASSERT_EQ(context->GetModelMetadata(
+                context, reduced_precision_meta_key.c_str(), &ptr, &bytes),
+            kTfLiteError);
+
+  // This model has metadata mapped to kTfLiteReducedPrecisionKey.
+  auto model2 = FlatBufferModel::BuildFromFile(
+      "tensorflow/lite/testdata/test_model_redux_precision.bin");
+  ASSERT_TRUE(model2);
+  InterpreterBuilder builder2(*model2, resolver);
+  interpreter.reset();
+  ASSERT_EQ(builder2(&interpreter), kTfLiteOk);
+  ASSERT_NE(interpreter, nullptr);
+
+  context = interpreter->subgraph(0)->context();
+  ASSERT_EQ(context->GetModelMetadata(
+                context, reduced_precision_meta_key.c_str(), &ptr, &bytes),
+            kTfLiteOk);
+  ASSERT_EQ(std::string(ptr, bytes), "fp16bf16accfp32");
+  ASSERT_EQ(context->GetModelMetadata(context, "unknown_key", &ptr, &bytes),
+            kTfLiteError);
 }
 
 // The test model has the following tensor encoded in the TACO format:
@@ -587,7 +732,9 @@ TEST(TestAddDelegateOwnership, AddDelegateDoesNotTakeOwnership) {
       ASSERT_TRUE(model);
       // Now try to build it into an interpreter.
       std::unique_ptr<Interpreter> interpreter;
-      InterpreterBuilder builder(*model, TrivialResolver());
+
+      TrivialResolver resolver;
+      InterpreterBuilder builder(*model, resolver);
       builder.AddDelegate(delegate.get());  // Does not transfer ownership.
       // Loop to check we can construct multiple interpreters from one builder.
       for (int i = 0; i < 3; i++) {
@@ -643,14 +790,33 @@ TEST(BasicFlatBufferModel, TestHandleModelWithWhileOpContainsForwardingInput) {
   ASSERT_EQ(interpreter->Invoke(), kTfLiteOk);
 }
 
+TEST(BasicFlatBufferModel, TestHandleZeroSizeConstant) {
+  TestErrorReporter reporter;
+  FileCopyAllocation model_allocation(
+      "tensorflow/lite/testdata/zero_size_constant.bin", &reporter);
+  EXPECT_TRUE(model_allocation.valid());
+  ::flatbuffers::Verifier verifier(
+      reinterpret_cast<const uint8_t*>(model_allocation.base()),
+      model_allocation.bytes());
+  EXPECT_TRUE(VerifyModelBuffer(verifier));
+  const Model* model_fb = ::tflite::GetModel(model_allocation.base());
+
+  auto model = FlatBufferModel::BuildFromModel(model_fb);
+  EXPECT_TRUE(model);
+
+  std::unique_ptr<Interpreter> interpreter;
+  EXPECT_EQ(
+      InterpreterBuilder(*model, TrivialResolver(&dummy_reg))(&interpreter),
+      kTfLiteOk);
+  EXPECT_NE(interpreter, nullptr);
+
+  EXPECT_EQ(interpreter->tensors_size(), 3);
+  // Second tensor should be treated as constant.
+  ASSERT_EQ(interpreter->tensor(1)->allocation_type, kTfLiteMmapRo);
+}
+
 // TODO(aselle): Add tests for serialization of builtin op data types.
 // These tests will occur with the evaluation tests of individual operators,
 // not here.
 
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

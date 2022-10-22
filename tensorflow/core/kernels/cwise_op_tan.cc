@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/core/kernels/cwise_ops_common.h"
 
 namespace tensorflow {
+
 REGISTER6(UnaryOp, CPU, "Tan", functor::tan, Eigen::half, bfloat16, float,
           double, complex64, complex128);
 

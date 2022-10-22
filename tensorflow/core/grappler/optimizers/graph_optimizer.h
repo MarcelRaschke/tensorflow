@@ -48,7 +48,7 @@ class GraphOptimizer {
 
   // Routine called to allow an algorithm to propose a rewritten graph
   // for the graph, feeds and fetches in "item" to run more efficiently
-  // on "cluster". If the returned status is Status::OK() then
+  // on "cluster". If the returned status is OkStatus() then
   // *optimized_graph contains the rewritten graph.
   // Returns an error status if it failed to generate a solution.
   //
@@ -63,12 +63,6 @@ class GraphOptimizer {
                           GraphDef* optimized_graph) {
     return Optimize(cluster, item, optimized_graph);
   }
-
-  // Method invoked by the framework so that it can provide feedback
-  // on how well the "optimized_graph" (produced as *optimized_graph from a
-  // call to Optimize) performed.  Lower "result" scores are better.
-  virtual void Feedback(Cluster* cluster, const GrapplerItem& item,
-                        const GraphDef& optimized_graph, double result) = 0;
 
   // Set deadline in microseconds since epoch. A value of zero means no
   // deadline.

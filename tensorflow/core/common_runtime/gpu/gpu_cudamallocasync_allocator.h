@@ -64,10 +64,10 @@ namespace tensorflow {
 // driver can return the excess memory to other processes.
 class GpuCudaMallocAsyncAllocator : public Allocator {
  public:
-  explicit GpuCudaMallocAsyncAllocator(PlatformGpuId platform_gpu_id,
+  explicit GpuCudaMallocAsyncAllocator(PlatformDeviceId platform_device_id,
                                        size_t pool_size,
                                        bool reserve_memory = false,
-                                       bool compute_stats = false);
+                                       bool compute_stats = true);
   ~GpuCudaMallocAsyncAllocator() override;
   string Name() override { return name_; }
   void* AllocateRaw(size_t alignment, size_t num_bytes) override;
@@ -81,7 +81,21 @@ class GpuCudaMallocAsyncAllocator : public Allocator {
 
   absl::optional<AllocatorStats> GetStats() override;
 
-  void ClearStats() override;
+  bool ClearStats() override;
+
+  void SetStreamAndPreallocateMemory(void* stream) override;
+
+  // With the right VLOG set, it prints:
+  // - the number of ptr currently allocated per size (histogram).
+  // - each ptr value and its size.
+  // - If CUDA_VERSION >= 11030, print cudaMallocAsync statistics.
+  void PrintAllocatorStatistics();
+
+  static int GetInstantiatedCountTestOnly() { return number_instantiated_; }
+
+  AllocatorMemoryType GetMemoryType() const override {
+    return AllocatorMemoryType::kDevice;
+  }
 
  private:
 #if TF_CUDA_MALLOC_ASYNC_SUPPORTED
@@ -91,6 +105,7 @@ class GpuCudaMallocAsyncAllocator : public Allocator {
   // compute stream and already synchronize with the h2d, d2h and d2d
   // stream. So we do not need to ask cudaMallocAsync to add extra
   // synchronization.
+  // Not owned.
   CUstream cuda_stream_;
 
   // Not owned. The default pool of the associated GPU.
@@ -99,13 +114,19 @@ class GpuCudaMallocAsyncAllocator : public Allocator {
   CUmemoryPool pool_;
 #endif  // TF_CUDA_MALLOC_ASYNC_SUPPORTED
 
+  // Just a counter for the number of time this class is instantiated.
+  // Only useful for tests.
+  static std::atomic<int> number_instantiated_;
+
   string name_;
+
+  bool reserve_memory_;
 
   TF_DISALLOW_COPY_AND_ASSIGN(GpuCudaMallocAsyncAllocator);
 
   // Stats.
   // Structures mutable after construction
-  mutable mutex lock_;
+  mutable tsl::mutex lock_;
   std::unique_ptr<AllocatorStats> stats_ TF_PT_GUARDED_BY(lock_);
   absl::flat_hash_map<const void*, size_t> size_map_ TF_GUARDED_BY(lock_);
 };

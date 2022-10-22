@@ -24,6 +24,12 @@ limitations under the License.
 namespace xla {
 namespace hlo_query {
 
+bool IsCollectiveCommunicationOp(HloOpcode op) {
+  return op == HloOpcode::kAllReduce || op == HloOpcode::kAllGather ||
+         op == HloOpcode::kAllToAll || op == HloOpcode::kCollectivePermute ||
+         op == HloOpcode::kReduceScatter;
+}
+
 bool IsConstantR0F32(HloInstruction* instruction, float* out) {
   if (instruction->opcode() == HloOpcode::kConstant &&
       ShapeUtil::IsScalarWithElementType(instruction->shape(), F32)) {
@@ -62,9 +68,8 @@ bool AllOperandsAreConstants(const HloInstruction& instruction) {
   return true;
 }
 
-HloInstruction* GetMatchingOperand(
-    const std::function<bool(const HloInstruction*)>& matcher,
-    HloInstruction* instruction) {
+HloInstruction* GetMatchingOperand(const HloPredicate& matcher,
+                                   HloInstruction* instruction) {
   for (HloInstruction* op : instruction->operands()) {
     if (matcher(op)) {
       return op;
@@ -73,10 +78,10 @@ HloInstruction* GetMatchingOperand(
   return nullptr;
 }
 
-bool MatchBinaryInstructionOperand(
-    const std::function<bool(const HloInstruction*)>& matcher,
-    HloInstruction* instruction, HloInstruction** matching_operand,
-    HloInstruction** other_operand) {
+bool MatchBinaryInstructionOperand(const HloPredicate& matcher,
+                                   HloInstruction* instruction,
+                                   HloInstruction** matching_operand,
+                                   HloInstruction** other_operand) {
   CHECK_EQ(instruction->operand_count(), 2);
   if (matcher(instruction->operand(0))) {
     *matching_operand = instruction->mutable_operand(0);
@@ -121,11 +126,14 @@ bool ContainsInstrWithOpcode(const HloComputation* comp,
   return false;
 }
 
-bool ContainsLayoutConstrainedAllReduce(const HloModule& module) {
+bool ContainsLayoutConstrainedCollective(const HloModule& module,
+                                         HloOpcode op) {
+  CHECK(IsCollectiveCommunicationOp(op));
+
   for (auto computation : module.computations()) {
     for (auto hlo : computation->instructions()) {
-      if (hlo->opcode() == HloOpcode::kAllReduce &&
-          DynCast<HloAllReduceInstruction>(hlo)->constrain_layout()) {
+      if (hlo->opcode() == op &&
+          DynCast<HloCollectiveInstruction>(hlo)->constrain_layout()) {
         return true;
       }
     }
@@ -133,8 +141,8 @@ bool ContainsLayoutConstrainedAllReduce(const HloModule& module) {
   return false;
 }
 
-int64 NextChannelId(const HloModule& module) {
-  int64 next_channel_id = 1;
+int64_t NextChannelId(const HloModule& module) {
+  int64_t next_channel_id = 1;
   for (const HloComputation* comp : module.computations()) {
     for (const HloInstruction* hlo : comp->instructions()) {
       const HloChannelInstruction* channel_instr =

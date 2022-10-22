@@ -83,8 +83,8 @@ MatrixTriangularSolveOp::Broadcast(xla::XlaOp lhs, const TensorShape& lhs_shape,
                                    xla::XlaOp rhs, const TensorShape& rhs_shape,
                                    const MatMulBCast& broadcast_helper) {
   // Get the batch shape.
-  int64 m = lhs_shape.dim_size(lhs_shape.dims() - 1);
-  int64 n = rhs_shape.dim_size(rhs_shape.dims() - 1);
+  int64_t m = lhs_shape.dim_size(lhs_shape.dims() - 1);
+  int64_t n = rhs_shape.dim_size(rhs_shape.dims() - 1);
 
   TensorShape lhs_broadcast_shape(broadcast_helper.output_batch_shape());
   lhs_broadcast_shape.AddDim(m);
@@ -103,7 +103,7 @@ MatrixTriangularSolveOp::Broadcast(xla::XlaOp lhs, const TensorShape& lhs_shape,
     xla::XlaOp error = rhs.builder()->ReportError(rhs_output.status());
     return {error, error};
   }
-  return {lhs_output.ValueOrDie(), rhs_output.ValueOrDie()};
+  return {lhs_output.value(), rhs_output.value()};
 }
 
 REGISTER_XLA_OP(Name("MatrixTriangularSolve"), MatrixTriangularSolveOp);

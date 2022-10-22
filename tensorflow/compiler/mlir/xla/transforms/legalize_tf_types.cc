@@ -22,6 +22,7 @@ limitations under the License.
 
 #include "llvm/ADT/SmallVector.h"
 #include "llvm/ADT/TypeSwitch.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/PatternMatch.h"  // from @llvm-project
@@ -30,7 +31,6 @@ limitations under the License.
 #include "mlir/Support/LogicalResult.h"  // from @llvm-project
 #include "mlir/Transforms/DialectConversion.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/ir/tf_types.h"
-#include "tensorflow/compiler/mlir/xla/transforms/xla_legalize_tf_passes_detail.h"
 
 #define DEBUG_TYPE "xla-legalize-tf-types"
 
@@ -98,17 +98,14 @@ class TfTypeConversionTarget : public ConversionTarget {
  public:
   explicit TfTypeConversionTarget(MLIRContext &ctx, TfTypeConverter &converter)
       : ConversionTarget(ctx), converter_(converter) {
-    markUnknownOpDynamicallyLegal();
-  }
-
- protected:
-  bool isDynamicallyLegal(Operation *op) const override {
-    // The FuncOp type can contain types that the op's operand and result types
-    // do not contain.
-    if (auto func = dyn_cast<FuncOp>(op)) {
-      if (!converter_.isSignatureLegal(func.getType())) return false;
-    }
-    return converter_.isLegal(op);
+    markUnknownOpDynamicallyLegal([this](Operation *op) {
+      // The FuncOp type can contain types that the op's operand and result
+      // types do not contain.
+      if (auto func = dyn_cast<func::FuncOp>(op)) {
+        if (!converter_.isSignatureLegal(func.getFunctionType())) return false;
+      }
+      return converter_.isLegal(op);
+    });
   }
 
  private:
@@ -118,7 +115,7 @@ class TfTypeConversionTarget : public ConversionTarget {
 class TfTypePattern : public ConversionPattern {
  public:
   TfTypePattern(MLIRContext *ctx, TypeConverter &converter)
-      : ConversionPattern(1, converter, MatchAnyOpTypeTag()) {}
+      : ConversionPattern(converter, MatchAnyOpTypeTag(), 1, ctx) {}
 
   // The dialect conversion framework will call this matchAndRewrite on each
   // Operation in the IR tree. This call matchAndRewrite needs to update the
@@ -143,30 +140,30 @@ class TfTypePattern : public ConversionPattern {
       if (failed(rewriter.convertRegionTypes(&new_region, *getTypeConverter())))
         return failure();
     }
-    rewriter.replaceOp(op, rewriter.createOperation(state)->getResults());
+    rewriter.replaceOp(op, rewriter.create(state)->getResults());
 
     return success();
   }
 };
 
+#define GEN_PASS_DEF_LEGALIZETFTYPESPASS
+#include "tensorflow/compiler/mlir/xla/transforms/xla_legalize_tf_passes.h.inc"
+
 struct LegalizeTfTypesPass
-    : public LegalizeTfTypesPassBase<LegalizeTfTypesPass> {
+    : public impl::LegalizeTfTypesPassBase<LegalizeTfTypesPass> {
   void runOnOperation() override;
 };
 
 void LegalizeTfTypesPass::runOnOperation() {
   TfTypeConverter converter;
-  OwningRewritePatternList patterns;
-  patterns.insert<TfTypePattern>(&getContext(), converter);
-  populateFuncOpTypeConversionPattern(patterns, &getContext(), converter);
+  RewritePatternSet patterns(&getContext());
+  patterns.add<TfTypePattern>(&getContext(), converter);
+  populateFunctionOpInterfaceTypeConversionPattern<func::FuncOp>(patterns,
+                                                                 converter);
   TfTypeConversionTarget target(getContext(), converter);
   if (failed(applyFullConversion(getOperation(), target, std::move(patterns))))
     return signalPassFailure();
 }
-
-static PassRegistration<LegalizeTfTypesPass> registration(
-    "xla-legalize-tf-types",
-    "Replace TensorFlow types with types that are legal in the MHLO dialect");
 
 }  // namespace
 

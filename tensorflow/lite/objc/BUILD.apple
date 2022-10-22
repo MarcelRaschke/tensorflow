@@ -1,12 +1,12 @@
 # TensorFlow Lite for Objective-C
 
-load("//tensorflow/lite:special_rules.bzl", "ios_visibility_whitelist", "tflite_ios_lab_runner")
+load("//tensorflow/lite:special_rules.bzl", "ios_visibility_allowlist", "tflite_ios_lab_runner")
 load("//tensorflow/lite/ios:ios.bzl", "TFL_DEFAULT_TAGS", "TFL_DISABLED_SANITIZER_TAGS", "TFL_MINIMUM_OS_VERSION")
 load("@build_bazel_rules_apple//apple:ios.bzl", "ios_application", "ios_unit_test")
 
 package(
     default_visibility = ["//visibility:private"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 SOURCES = glob([
@@ -61,9 +61,10 @@ objc_library(
     hdrs = API_HEADERS,
     copts = RELEASE_COPTS,
     tags = TFL_DEFAULT_TAGS,
-    visibility = ios_visibility_whitelist(),
+    visibility = ios_visibility_allowlist(),
     deps = [
         "//tensorflow/lite/c:c_api",
+        "//tensorflow/lite/c:c_api_experimental",
         "//tensorflow/lite/delegates/coreml:coreml_delegate",
         "//tensorflow/lite/delegates/gpu:metal_delegate",
         "//tensorflow/lite/delegates/xnnpack:xnnpack_delegate",
@@ -99,6 +100,7 @@ objc_library(
     data = [
         "//tensorflow/lite:testdata/add.bin",
         "//tensorflow/lite:testdata/add_quantized.bin",
+        "//tensorflow/lite:testdata/multi_signatures.bin",
     ],
     tags = TFL_DEFAULT_TAGS + ["builder_default_ios_x86_64"],
     deps = [
@@ -116,13 +118,9 @@ ios_application(
     ],
     infoplists = ["apps/TestApp/TestApp/Info.plist"],
     minimum_os_version = TFL_MINIMUM_OS_VERSION,
-    sdk_frameworks = [
-        "CoreGraphics",
-    ],
+    sdk_frameworks = ["CoreGraphics"],
     tags = TFL_DEFAULT_TAGS,
-    deps = [
-        ":TestAppLibrary",
-    ],
+    deps = [":TestAppLibrary"],
 )
 
 objc_library(

@@ -31,8 +31,11 @@ limitations under the License.
 #include "tensorflow/core/common_runtime/memory_types.h"
 #include "tensorflow/core/common_runtime/process_function_library_runtime.h"
 #include "tensorflow/core/common_runtime/rendezvous_mgr.h"
+#include "tensorflow/core/common_runtime/single_threaded_executor.h"
 #include "tensorflow/core/framework/collective.h"
 #include "tensorflow/core/framework/function.h"
+#include "tensorflow/core/framework/function_handle_cache.h"
+#include "tensorflow/core/framework/metrics.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/framework/op.h"
@@ -45,6 +48,7 @@ limitations under the License.
 #include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/gtl/map_util.h"
 #include "tensorflow/core/platform/macros.h"
+#include "tensorflow/core/platform/str_util.h"
 #include "tensorflow/core/profiler/lib/connected_traceme.h"
 #include "tensorflow/core/profiler/lib/traceme.h"
 #include "tensorflow/core/protobuf/config.pb.h"
@@ -412,6 +416,8 @@ class FunctionLibraryRuntimeImpl : public FunctionLibraryRuntime {
     Executor* exec = nullptr;
     FunctionLibraryRuntimeOverlay* overlay_flr = nullptr;
     string executor_type;
+    bool allow_small_function_optimizations = false;
+    bool allow_control_flow_sync_execution = false;
 
     ~Item() {
       delete this->func_graph;
@@ -419,9 +425,9 @@ class FunctionLibraryRuntimeImpl : public FunctionLibraryRuntime {
       delete this->overlay_flr;
     }
   };
-  std::unique_ptr<std::unordered_map<Handle, std::unique_ptr<Item>>> items_
+  std::unique_ptr<absl::flat_hash_map<Handle, std::unique_ptr<Item>>> items_
       TF_GUARDED_BY(mu_);
-
+  std::unique_ptr<FunctionHandleCache> function_handle_cache_;
   ProcessFunctionLibraryRuntime* parent_ = nullptr;  // not owned.
 
   // Overloads the CreateKernel method, providing a FunctionLibraryRuntime
@@ -444,6 +450,8 @@ class FunctionLibraryRuntimeImpl : public FunctionLibraryRuntime {
                  gtl::ArraySlice<Tensor> args, std::vector<Tensor>* rets,
                  Item* item, DoneCallback done);
 
+  // TODO(fishx): Avoid using std::unique_ptr for PrivateIntraProcessRendezvous,
+  // since it will allocate the object on heap.
   Status PrepareRunSync(
       Handle handle, Options* run_opts, Item** out_item,
       std::unique_ptr<PrivateIntraProcessRendezvous>* out_rendezvous);
@@ -475,7 +483,9 @@ FunctionLibraryRuntimeImpl::FunctionLibraryRuntimeImpl(
                        ? ProcessFunctionLibraryRuntime::kDefaultFLRDevice
                        : device_->name()),
       next_handle_(0),
-      items_(new std::unordered_map<Handle, std::unique_ptr<Item>>),
+      items_(std::make_unique<
+             absl::flat_hash_map<Handle, std::unique_ptr<Item>>>()),
+      function_handle_cache_(std::make_unique<FunctionHandleCache>(this)),
       parent_(parent) {
   get_func_sig_ = [this](const string& op, const OpDef** sig) {
     return base_lib_def_->LookUpOpDef(op, sig);
@@ -533,18 +543,13 @@ class CallOp : public AsyncOpKernel {
     opts.runner = ctx->runner();
     opts.run_all_kernels_inline = ctx->run_all_kernels_inline();
     opts.collective_executor = ctx->collective_executor();
+    opts.stack_trace = ctx->stack_trace();
     std::vector<Tensor> args;
     args.reserve(ctx->num_inputs());
     for (int i = 0; i < ctx->num_inputs(); ++i) {
       args.push_back(ctx->input(i));
     }
     std::vector<Tensor>* rets = new std::vector<Tensor>;
-    profiler::TraceMe trace_me(
-        [&] {
-          return absl::StrCat("CallOp #parent_step_id=", ctx->step_id(),
-                              ",function_step_id=", opts.step_id, "#");
-        },
-        /*level=*/2);
     lib->Run(opts, handle_, args, rets,
              [ctx, done, rets](const Status& status) {
                if (!status.ok()) {
@@ -592,7 +597,7 @@ Status FunctionLibraryRuntimeImpl::GetRetTypes(Handle h,
   }
   const FunctionBody* fbody = GetFunctionBody(h);
   *ret_types = fbody->ret_types;
-  return Status::OK();
+  return OkStatus();
 }
 
 Status FunctionLibraryRuntimeImpl::CreateKernel(
@@ -608,9 +613,9 @@ Status FunctionLibraryRuntimeImpl::CreateKernel(
   const CustomKernelCreator* custom_kernel_creator =
       GetDefaultCustomKernelCreator();
   if (custom_kernel_creator &&
-      custom_kernel_creator->CanCreateKernel(*this, props)) {
+      custom_kernel_creator->CanCreateKernel(*flr, props)) {
     std::unique_ptr<OpKernel> ret;
-    s = custom_kernel_creator->CreateKernel(this, props, &ret);
+    s = custom_kernel_creator->CreateKernel(flr, props, &ret);
     if (s.ok()) {
       *kernel = ret.release();
     } else {
@@ -714,7 +719,7 @@ Status FunctionLibraryRuntimeImpl::InstantiateSymbolicGradient(
     CHECK_NOTNULL(f_body);
     *g_body = SymbolicGradient(*f_body);
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 bool FunctionLibraryRuntimeImpl::IsLocalTarget(
@@ -744,6 +749,13 @@ Status FunctionLibraryRuntimeImpl::Instantiate(
     return parent_->Instantiate(function_name, attrs, options, handle);
   }
 
+  if (options.use_function_cache) {
+    InstantiateOptions options_copy(options);
+    options_copy.use_function_cache = false;
+    return function_handle_cache_->Instantiate(function_name, attrs,
+                                               options_copy, handle);
+  }
+
   // Since this is a local target, ensure that the local `device_name_` appears
   // in the canonical key.
   InstantiateOptions options_copy(options);
@@ -767,7 +779,7 @@ Status FunctionLibraryRuntimeImpl::Instantiate(
                                 " not found in items.");
       }
       ++item_handle->second->instantiation_counter;
-      return Status::OK();
+      return OkStatus();
     }
   }
 
@@ -809,6 +821,10 @@ Status FunctionLibraryRuntimeImpl::Instantiate(
       item->func_graph = fbody.release();
       item->instantiation_counter = 1;
       item->executor_type = ExecutorType(options, attrs);
+      item->allow_small_function_optimizations =
+          options.allow_small_function_optimizations;
+      item->allow_control_flow_sync_execution =
+          options.allow_control_flow_sync_execution;
       if (options.lib_def) {
         item->overlay_flr =
             new FunctionLibraryRuntimeOverlay(this, options.lib_def);
@@ -823,7 +839,7 @@ Status FunctionLibraryRuntimeImpl::Instantiate(
     TF_RETURN_IF_ERROR(GetOrCreateItem(local_handle, &item));
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status FunctionLibraryRuntimeImpl::ReleaseHandle(Handle handle) {
@@ -836,7 +852,7 @@ Status FunctionLibraryRuntimeImpl::ReleaseHandle(Handle handle) {
   {
     mutex_lock l(mu_);
     // Return directly if all items has already been released.
-    if (items_ == nullptr) return Status::OK();
+    if (items_ == nullptr) return OkStatus();
 
     auto it = items_->find(h);
     if (it == items_->end()) {
@@ -862,6 +878,7 @@ Status FunctionLibraryRuntimeImpl::ReleaseHandle(Handle handle) {
 }
 
 namespace {
+
 // Removes all stateless nodes that do not contribute to a return
 // value from the function body. Unlike `RemoveDeadNodes()`, which is
 // triggered by `OptimizerOptions.do_function_inlining`, this pass
@@ -901,6 +918,7 @@ void PruneFunctionBody(const FunctionDef& fdef, Graph* g) {
     FixupSourceAndSinkEdges(g);
   }
 }
+
 }  // namespace
 
 Status FunctionLibraryRuntimeImpl::CreateItem(Item** item) {
@@ -917,11 +935,11 @@ Status FunctionLibraryRuntimeImpl::CreateItem(Item** item) {
   }
   const FunctionLibraryDefinition* lib_def =
       flr->GetFunctionLibraryDefinition();
-  std::unique_ptr<Graph> g(new Graph(lib_def));
+  auto g = std::make_unique<Graph>(lib_def);
   CopyGraph(*fbody->graph, g.get());
 
   PruneFunctionBody(fbody->fdef, g.get());
-  optimizer_.Optimize(this, env(), device(), &g, /*shape_map=*/nullptr);
+  optimizer_.Optimize(this, env(), device(), &g, GraphOptimizer::Options());
   TF_RETURN_IF_ERROR(EnsureMemoryTypes(DeviceType(device()->device_type()),
                                        device()->name(), g.get()));
 
@@ -930,6 +948,8 @@ Status FunctionLibraryRuntimeImpl::CreateItem(Item** item) {
   LocalExecutorParams params;
   params.device = device_;
   params.function_library = flr;
+  params.allow_control_flow_sync_execution =
+      (*item)->allow_control_flow_sync_execution;
   if (flr == this) {
     params.create_kernel = create_kernel_;
   } else {
@@ -944,6 +964,18 @@ Status FunctionLibraryRuntimeImpl::CreateItem(Item** item) {
   };
   params.session_metadata = session_metadata_;
   std::unique_ptr<Executor> exec;
+
+  // When the instantiation options request small function optimizations, all
+  // graphs which are safe for synchronous execution will set this flag to true:
+  if ((*item)->allow_small_function_optimizations && executor_type.empty()) {
+    executor_type = "SINGLE_THREADED_EXECUTOR";
+  }
+
+  metrics::IncrementTestCounter("flr_executor",
+                                (executor_type == "SINGLE_THREADED_EXECUTOR")
+                                    ? "single_threaded"
+                                    : "default");
+
   TF_RETURN_IF_ERROR(NewExecutor(executor_type, params, *g, &exec));
   {
     // Guard item since it is already inserted in items_.
@@ -953,7 +985,7 @@ Status FunctionLibraryRuntimeImpl::CreateItem(Item** item) {
       (*item)->exec = exec.release();
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status FunctionLibraryRuntimeImpl::GetOrCreateItem(LocalHandle local_handle,
@@ -967,7 +999,7 @@ Status FunctionLibraryRuntimeImpl::GetOrCreateItem(LocalHandle local_handle,
     }
     *item = iter->second.get();
     if ((*item)->exec != nullptr) {
-      return Status::OK();
+      return OkStatus();
     }
   }
   // NOTE: We need to call CreateItem out of mu_ because creating an
@@ -992,6 +1024,9 @@ void FunctionLibraryRuntimeImpl::ExecutorArgsFromOptions(
   exec_args->collective_executor = run_opts.collective_executor;
   exec_args->call_frame = frame;
   exec_args->run_all_kernels_inline = run_opts.run_all_kernels_inline;
+  exec_args->user_intra_op_threadpool = run_opts.user_intra_op_threadpool;
+  exec_args->coordination_service_agent = run_opts.coordination_service_agent;
+  exec_args->stack_trace = run_opts.stack_trace;
 }
 
 void FunctionLibraryRuntimeImpl::RunRemote(const Options& opts, Handle handle,
@@ -1007,7 +1042,7 @@ void FunctionLibraryRuntimeImpl::RunRemote(const Options& opts, Handle handle,
     done(s);
     return;
   }
-  int64 src_incarnation, target_incarnation;
+  int64_t src_incarnation, target_incarnation;
   s = parent_->GetDeviceIncarnation(source_device, &src_incarnation);
   s.Update(parent_->GetDeviceIncarnation(target_device, &target_incarnation));
   if (!s.ok()) {
@@ -1099,11 +1134,11 @@ void FunctionLibraryRuntimeImpl::Run(const Options& opts, Handle handle,
   }
   Options run_opts = opts;
   if (opts.create_rendezvous) {
-    auto* rendezvous = new PrivateIntraProcessRendezvous(device_mgr_);
+    auto* rendezvous = new RefCountedIntraProcessRendezvous(device_mgr_);
     run_opts.rendezvous = rendezvous;
     run_opts.create_rendezvous = false;
     done = [done = std::move(done), rendezvous](const Status& status) mutable {
-      delete rendezvous;
+      rendezvous->Unref();
       done(status);
     };
   }
@@ -1145,7 +1180,8 @@ void FunctionLibraryRuntimeImpl::Run(const Options& opts, Handle handle,
   profiler::TraceMeProducer activity(
       // To TraceMeConsumers in ExecutorState::Process/Finish.
       [&opts] {
-        return profiler::TraceMeEncode("FunctionRun", {{"id", opts.step_id}});
+        return profiler::TraceMeEncode("FunctionRun",
+                                       {{"id", opts.step_id}, {"_r", 1}});
       },
       profiler::ContextType::kTfExecutor, opts.step_id,
       profiler::TraceMeLevel::kInfo);
@@ -1178,11 +1214,11 @@ void FunctionLibraryRuntimeImpl::Run(const Options& opts, Handle handle,
 
   Options run_opts = opts;
   if (opts.create_rendezvous) {
-    auto* rendezvous = new PrivateIntraProcessRendezvous(device_mgr_);
+    auto* rendezvous = new RefCountedIntraProcessRendezvous(device_mgr_);
     run_opts.rendezvous = rendezvous;
     run_opts.create_rendezvous = false;
     done = [done = std::move(done), rendezvous](const Status& status) mutable {
-      delete rendezvous;
+      rendezvous->Unref();
       done(status);
     };
   }
@@ -1217,7 +1253,8 @@ void FunctionLibraryRuntimeImpl::Run(const Options& opts, Handle handle,
   profiler::TraceMeProducer activity(
       // To TraceMeConsumers in ExecutorState::Process/Finish.
       [&opts] {
-        return profiler::TraceMeEncode("FunctionRun", {{"id", opts.step_id}});
+        return profiler::TraceMeEncode("FunctionRun",
+                                       {{"id", opts.step_id}, {"_r", 1}});
       },
       profiler::ContextType::kTfExecutor, opts.step_id,
       profiler::TraceMeLevel::kInfo);
@@ -1245,7 +1282,7 @@ Status FunctionLibraryRuntimeImpl::PrepareRunSync(
 
   if (run_opts->create_rendezvous) {
     *out_rendezvous =
-        absl::make_unique<PrivateIntraProcessRendezvous>(device_mgr_);
+        std::make_unique<PrivateIntraProcessRendezvous>(device_mgr_);
     run_opts->rendezvous = out_rendezvous->get();
     run_opts->create_rendezvous = false;
   }
@@ -1254,7 +1291,7 @@ Status FunctionLibraryRuntimeImpl::PrepareRunSync(
       device_name_, handle, /*include_multi_device=*/true);
   if (local_handle == kInvalidLocalHandle) {
     *out_item = nullptr;
-    return Status::OK();
+    return OkStatus();
   }
 
   TF_RETURN_IF_ERROR(GetOrCreateItem(local_handle, out_item));
@@ -1264,7 +1301,7 @@ Status FunctionLibraryRuntimeImpl::PrepareRunSync(
   }
   DCHECK(run_opts->runner != nullptr);
 
-  return Status::OK();
+  return OkStatus();
 }
 
 Status FunctionLibraryRuntimeImpl::RunSync(Options opts, Handle handle,
@@ -1331,7 +1368,7 @@ Status FunctionLibraryRuntimeImpl::Clone(
                                     skip_flib_def));
   *out_flr = (*out_pflr)->GetFLR(device_->name());
   if (*out_flr != nullptr) {
-    return Status::OK();
+    return OkStatus();
   } else {
     return errors::Internal("Cloning FunctionLibraryRuntime failed.");
   }
@@ -1341,16 +1378,16 @@ namespace {
 
 struct CustomCreatorSingleton {
   mutex mu;
-  CustomKernelCreator* custom_creator = nullptr;
+  std::unique_ptr<CustomKernelCreator> custom_creator = nullptr;
 
   void Set(CustomKernelCreator* cb) {
     mutex_lock l(mu);
-    custom_creator = cb;
+    custom_creator.reset(cb);
   }
 
   CustomKernelCreator* Get() {
     mutex_lock l(mu);
-    return custom_creator;
+    return custom_creator.get();
   }
 };
 

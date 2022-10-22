@@ -15,6 +15,8 @@ limitations under the License.
 #include "tensorflow/core/tpu/kernels/tpu_program_group.h"
 
 #include "tensorflow/compiler/xla/service/hlo_module_group.h"
+#include "tensorflow/compiler/xla/stream_executor/tpu/proto_helper.h"
+#include "tensorflow/compiler/xla/stream_executor/tpu/status_helper.h"
 #include "tensorflow/compiler/xla/xla.pb.h"
 #include "tensorflow/core/lib/gtl/cleanup.h"
 #include "tensorflow/core/platform/casts.h"
@@ -23,8 +25,6 @@ limitations under the License.
 #include "tensorflow/core/tpu/kernels/tpu_compile_op_support.h"
 #include "tensorflow/core/tpu/tpu_api.h"
 #include "tensorflow/core/tpu/tpu_ops_c_api.h"
-#include "tensorflow/stream_executor/tpu/proto_helper.h"
-#include "tensorflow/stream_executor/tpu/status_helper.h"
 
 namespace tensorflow {
 namespace tpu {
@@ -87,6 +87,9 @@ void TpuProgramGroup::Initialize(
   CHECK_EQ(program_count(), 0) << "Reinitialization of an existing "
                                   "`TpuProgramGroup` instance is prohibited.";
   set_tpu_programs(xla_tpu_programs);
+
+  CHECK_EQ(tpu_program_fingerprints_.size(), 0);
+  set_fingerprints();
 
   std::vector<bool> may_modify_variables_array(tpu_programs_.size(), false);
   std::vector<TPUExecutableInfoProto> executable_infos(tpu_programs_.size());
@@ -185,13 +188,6 @@ void TpuProgramGroup::RefreshHloMetadatasPtrs() {
   }
 }
 
-Status TpuProgramGroup::LogCompilationStats(const TpuCompilationCacheKey& key,
-                                            absl::Duration duration) {
-  // A placeholder for tracking compilation statistics for future work. The
-  // implementation can be pushing into some external storage for analytics.
-  return Status::OK();
-}
-
 const std::vector<bool>& TpuProgramGroup::may_modify_variables_list() const {
   return may_modify_variables_;
 }
@@ -212,6 +208,24 @@ bool TpuProgramGroup::may_modify_variables(int index) const {
 
 const std::vector<XLA_TpuProgram*>& TpuProgramGroup::tpu_programs() const {
   return tpu_programs_;
+}
+
+const std::vector<std::string>& TpuProgramGroup::fingerprints() const {
+  return tpu_program_fingerprints_;
+}
+
+void TpuProgramGroup::set_fingerprints() {
+  for (const XLA_TpuProgram* tpu_program : tpu_programs_) {
+    TpuProgramFingerprint fingerprint =
+        OpsApiFn()->TpuProgram_GetFingerprintFn(tpu_program);
+    tpu_program_fingerprints_.emplace_back(
+        std::string(fingerprint.bytes, fingerprint.size));
+    OpsApiFn()->TpuProgram_DestroyFingerprintFn(fingerprint);
+  }
+}
+
+const std::string& TpuProgramGroup::fingerprint(int index) const {
+  return fingerprints().at(index);
 }
 
 const XLA_TpuProgram* TpuProgramGroup::tpu_program(int index) const {
@@ -344,7 +358,7 @@ Status TpuProgramGroup::DeserializeFromRpcResponseProtos(
   }
 
   Initialize(tpu_programs);
-  return Status::OK();
+  return OkStatus();
 }
 
 Status TpuProgramGroup::SerializeExecutable(

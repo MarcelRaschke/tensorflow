@@ -15,11 +15,11 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
 
+#include <optional>
 #include <vector>
 
 #include "absl/algorithm/container.h"
 #include "absl/strings/str_join.h"
-#include "absl/types/optional.h"
 #include "tensorflow/compiler/xla/layout_util.h"
 #include "tensorflow/compiler/xla/literal_util.h"
 #include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
@@ -31,7 +31,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
-#include "tensorflow/core/platform/logging.h"
+#include "tensorflow/tsl/platform/logging.h"
 
 namespace xla {
 bool AllToAllDecomposer::InstructionMatchesPattern(
@@ -55,25 +55,26 @@ bool AllToAllDecomposer::InstructionMatchesPattern(
 StatusOr<HloInstruction*> AllToAllDecomposer::ExpandInstruction(
     HloInstruction* instruction) {
   auto* all_to_all = Cast<HloAllToAllInstruction>(instruction);
-  int64 split_dim = *all_to_all->split_dimension();
-  int64 all_to_all_group_size =
+  int64_t split_dim = *all_to_all->split_dimension();
+  int64_t all_to_all_group_size =
       all_to_all->replica_groups().empty()
-          ? instruction->parent()->parent()->config().replica_count()
+          ? instruction->GetModule()->config().replica_count()
           : all_to_all->replica_groups()[0].replica_ids_size();
-  int64 split_size =
+  int64_t split_size =
       all_to_all->shape().dimensions(split_dim) / all_to_all_group_size;
   if (!decompose_to_tuple_) {
     Shape new_all_to_all_shape;
     new_all_to_all_shape.set_element_type(
         instruction->operand(0)->shape().element_type());
-    for (int64 i = 0; i < instruction->shape().rank(); ++i) {
+    for (int64_t i = 0; i < instruction->shape().rank(); ++i) {
       if (i != split_dim) {
         new_all_to_all_shape.add_dimensions(all_to_all->shape().dimensions(i));
         continue;
       }
       new_all_to_all_shape.add_dimensions(all_to_all_group_size);
       new_all_to_all_shape.add_dimensions(split_size);
-      for (int64 j = all_to_all->shape().rank() + 1; j < min_array_rank_; ++j) {
+      for (int64_t j = all_to_all->shape().rank() + 1; j < min_array_rank_;
+           ++j) {
         new_all_to_all_shape.add_dimensions(1);
       }
     }
@@ -101,7 +102,7 @@ StatusOr<HloInstruction*> AllToAllDecomposer::ExpandInstruction(
   std::vector<HloInstruction*> slices;
   slices.reserve(all_to_all_group_size);
   HloInstruction* operand = all_to_all->mutable_operand(0);
-  for (int64 i = 0; i < all_to_all_group_size; ++i) {
+  for (int64_t i = 0; i < all_to_all_group_size; ++i) {
     slices.push_back(
         all_to_all->parent()->AddInstruction(HloInstruction::CreateSlice(
             slice_shape, operand, slice_starts, slice_limits, slice_strides)));
@@ -109,15 +110,15 @@ StatusOr<HloInstruction*> AllToAllDecomposer::ExpandInstruction(
     slice_starts[split_dim] = slice_limits[split_dim];
     slice_limits[split_dim] += split_size;
   }
-  Shape all_to_all_shape = ShapeUtil::MakeTupleShape(
-      std::vector<Shape>(all_to_all_group_size, slice_shape));
+  Shape all_to_all_shape = ShapeUtil::MakeTupleShapeWithPtrs(
+      std::vector<const Shape*>(all_to_all_group_size, &slice_shape));
   HloInstruction* new_all_to_all =
       all_to_all->parent()->AddInstruction(HloInstruction::CreateAllToAll(
           all_to_all_shape, slices, all_to_all->replica_groups(), false,
-          all_to_all->channel_id(), absl::nullopt));
+          all_to_all->channel_id(), std::nullopt));
   std::vector<HloInstruction*> gtes;
   gtes.reserve(all_to_all_group_size);
-  for (int64 i = 0; i < all_to_all_group_size; ++i) {
+  for (int64_t i = 0; i < all_to_all_group_size; ++i) {
     gtes.push_back(all_to_all->parent()->AddInstruction(
         HloInstruction::CreateGetTupleElement(slice_shape, new_all_to_all, i)));
     all_to_all->SetupDerivedInstruction(new_all_to_all);

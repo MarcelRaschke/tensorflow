@@ -8,7 +8,7 @@ To allow conversion, users can provide their own custom implementation of an
 unsupported TensorFlow operator in TensorFlow Lite, known as a custom operator.
 *If instead, you wish to combine a series of unsupported (or supported)
 TensorFlow operators into a single fused optimized custom operator, refer to
-[operator fusing](https://www.tensorflow.org/lite/convert/operation_fusion).*
+[operator fusing](https://www.tensorflow.org/lite/models/convert/operation_fusion).*
 
 Using custom operators consists of four steps.
 
@@ -64,7 +64,7 @@ offset = tf.Variable(0.0)
 def sin(x):
   return tf.sin(x + offset, name="Sin")
 
-  # Train model
+# Train model
 optimizer = tf.optimizers.Adam(0.01)
 def train(x, y):
     with tf.GradientTape() as t:
@@ -101,7 +101,7 @@ Create a TensorFlow Lite model with custom operators, by setting the converter
 attribute `allow_custom_ops` as shown below:
 
 <pre>
-converter = tf.lite.TFLiteConverter.from_concrete_functions([sin.get_concrete_function(x)])
+converter = tf.lite.TFLiteConverter.from_concrete_functions([sin.get_concrete_function(x)], sin)
 <b>converter.allow_custom_ops = True</b>
 tflite_model = converter.convert()
 </pre>
@@ -278,7 +278,7 @@ in a given model. This is the equivalent of TensorFlow's selective registration
 
 If you want to define your custom operators in Java, you would currently need to
 build your own custom JNI layer and compile your own AAR
-[in this jni code](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/lite/java/src/main/native/builtin_ops_jni.cc).
+[in this jni code](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/lite/java/src/main/native/nativeinterpreterwrapper_jni.cc).
 Similarly, if you wish to define these operators available in Python you can
 place your registrations in the
 [Python wrapper code](https://github.com/tensorflow/tensorflow/blob/master/tensorflow/lite/python/interpreter_wrapper/interpreter_wrapper.cc).

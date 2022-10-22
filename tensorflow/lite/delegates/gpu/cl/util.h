@@ -52,10 +52,17 @@ void CopyLinearFLT4(const tflite::gpu::Tensor<Linear, S>& src,
 absl::Status CreateCLBuffer(cl_context context, int size_in_bytes,
                             bool read_only, void* data, cl_mem* result);
 
-cl_channel_type DataTypeToChannelType(DataType type, bool normalized = false);
+absl::Status CreateCLSubBuffer(cl_context context, cl_mem parent,
+                               size_t origin_in_bytes, size_t size_in_bytes,
+                               bool read_only, cl_mem* result);
+
 absl::Status CreateRGBAImage2D(cl_context context, int width, int height,
                                cl_channel_type channel_type, void* data,
                                cl_mem* result);
+
+absl::Status CreateQcomConvolutionFilter(cl_context context, int kernel_x,
+                                         int kernel_y, cl_mem* filter,
+                                         const void* data);
 }  // namespace cl
 }  // namespace gpu
 }  // namespace tflite

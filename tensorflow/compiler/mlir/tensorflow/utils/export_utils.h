@@ -27,12 +27,12 @@ limitations under the License.
 #include "mlir/IR/Location.h"  // from @llvm-project
 #include "mlir/IR/Operation.h"  // from @llvm-project
 #include "mlir/IR/Types.h"  // from @llvm-project
+#include "tensorflow/compiler/xla/stream_executor/lib/statusor.h"
 #include "tensorflow/core/framework/attr_value.pb.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/framework/node_def.pb.h"
 #include "tensorflow/core/framework/node_def_util.h"
 #include "tensorflow/core/lib/core/status.h"
-#include "tensorflow/stream_executor/lib/statusor.h"
 
 namespace mlir {
 class ShapedType;
@@ -61,6 +61,22 @@ Status ConvertAttributes(
     const llvm::ArrayRef<mlir::NamedAttribute> attrs,
     const absl::flat_hash_set<absl::string_view>& attrs_to_ignore,
     bool remove_ref_type, AttrValueMap* values);
+
+// Fill in the contents of TensorShapeProto for the given shape.
+// ShapeContainerT is any type with the following methods:
+//   bool hasRank()
+//   ArrayRef<int64_t> getShape()
+// This includes mlir::TF::ShapeAttr and mlir::ShapedType.
+template <typename ShapeContainerT>
+void SetTensorShapeProto(ShapeContainerT shape, TensorShapeProto* proto) {
+  if (shape.hasRank()) {
+    for (int64_t dim : shape.getShape()) {
+      proto->add_dim()->set_size(dim);
+    }
+  } else {
+    proto->set_unknown_rank(true);
+  }
+}
 
 // Sets shape attribute with the given name. If the attribute already exists
 // with a different value, returns an error.

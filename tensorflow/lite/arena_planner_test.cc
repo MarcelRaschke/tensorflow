@@ -14,8 +14,6 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/lite/arena_planner.h"
 
-#include <stdio.h>
-
 #include <algorithm>
 #include <cstdarg>
 #include <cstddef>
@@ -33,6 +31,19 @@ limitations under the License.
 #include "tensorflow/lite/testing/util.h"
 
 namespace tflite {
+
+// Profiler allocation hook for testing.
+int gNumAlloc = 0;
+void OnTfLiteArenaAlloc(int subgraph_index, int arena_id, size_t num_bytes) {
+  gNumAlloc++;
+}
+
+// Profiler deallocation hook for testing.
+int gNumDealloc = 0;
+void OnTfLiteArenaDealloc(int subgraph_index, int arena_id, size_t num_bytes) {
+  gNumDealloc++;
+}
+
 namespace {
 
 constexpr const int kTensorAlignment = 4;
@@ -141,6 +152,7 @@ class TestGraphInfo : public GraphInfo {
   explicit TestGraphInfo(TestGraph* graph) : graph_(graph) {}
 
   size_t num_tensors() const override { return graph_->tensors()->size(); }
+  TfLiteTensor* tensors() override { return graph_->tensors()->data(); }
   TfLiteTensor* tensor(size_t index) override {
     return &graph_->tensors()->at(index);
   }
@@ -174,13 +186,12 @@ void ReportError(TfLiteContext* context, const char* format, ...) {
 
 class ArenaPlannerTest : public ::testing::Test {
  protected:
-  void SetGraph(TestGraph* graph, bool preserve_inputs = false,
-                bool preserve_intermediates = false) {
+  void SetGraph(TestGraph* graph, bool preserve_all_tensors = false) {
     graph_ = graph;
     context_.ReportError = ReportError;
-    planner_.reset(new ArenaPlanner(
+    planner_ = std::make_unique<ArenaPlanner>(
         &context_, std::unique_ptr<GraphInfo>(new TestGraphInfo(graph)),
-        preserve_inputs, preserve_intermediates, kTensorAlignment));
+        preserve_all_tensors, kTensorAlignment);
     CHECK(planner_->ResetAllocations() == kTfLiteOk);
     CHECK(planner_->PlanAllocations() == kTfLiteOk);
   }
@@ -209,6 +220,8 @@ class ArenaPlannerTest : public ::testing::Test {
   bool HasNonPersistentMemory() {
     return planner_ && planner_->HasNonPersistentMemory();
   }
+
+  void Destroy() { planner_.reset(); }
 
   // Returns the actual offset of a given tensor, relative to the start of its
   // arena.
@@ -242,13 +255,13 @@ class ArenaPlannerTest : public ::testing::Test {
 TEST_F(ArenaPlannerTest, EmptyGraph) {
   TestGraph graph({}, {}, {});
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 }
 
-TEST_F(ArenaPlannerTest, GraphWithNoOps) {
-  TestGraph graph({0, 10}, {}, {5, 11});
+TEST_F(ArenaPlannerTest, GraphWithOneOp) {
+  TestGraph graph({0, 10}, {{{0}, {}, {}}, {{10}, {}, {}}}, {5, 11});
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
   EXPECT_EQ(GetOffset(0), 0);
   EXPECT_EQ(GetOffset(10), GetOffsetAfter(0));
   // The outputs are never allocated because they are not connected to any
@@ -257,19 +270,19 @@ TEST_F(ArenaPlannerTest, GraphWithNoOps) {
   EXPECT_TRUE((*graph.tensors())[11].data.raw == nullptr);
 }
 
-TEST_F(ArenaPlannerTest, GraphWithOneOp) {
+TEST_F(ArenaPlannerTest, GraphWithOneOp2) {
   TestGraph graph({1}, {{{1}, {2}, {}}}, {2});
   SetGraph(&graph);
-  Execute(0, 10);
-  EXPECT_EQ(GetOffset(2), 0);
-  EXPECT_EQ(GetOffset(1), GetOffsetAfter(2));
+  Execute(0, graph.nodes().size() - 1);
+  EXPECT_EQ(GetOffset(2), 8);
+  EXPECT_EQ(GetOffsetAfter(2), 20);
 }
 
 TEST_F(ArenaPlannerTest, ZeroSizedTensors) {
   TestGraph graph({1}, {{{1}, {2}, {}}}, {2});
   (*graph.tensors())[1].bytes = 0;
   SetGraph(&graph);
-  ASSERT_EQ(planner_->ExecuteAllocations(0, 10), kTfLiteOk);
+  Execute(0, graph.nodes().size() - 1);
   EXPECT_EQ((*graph_->tensors())[1].data.raw, nullptr);
 }
 
@@ -283,15 +296,14 @@ TEST_F(ArenaPlannerTest, SimpleGraph) {
                   },
                   {3});
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +4 +5 -2 -0 +3 -4 -5
-  EXPECT_EQ(GetOffset(5), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 +4 +5 -2 +3 -4 -5
+  EXPECT_EQ(GetOffset(5), 12);
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
   EXPECT_EQ(GetOffset(3), GetOffsetAfter(4));
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(4));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(1), 0);
+  EXPECT_EQ(GetOffset(1), 4);
 }
 
 TEST_F(ArenaPlannerTest, SimpleGraphInputsPreserved) {
@@ -303,8 +315,8 @@ TEST_F(ArenaPlannerTest, SimpleGraphInputsPreserved) {
                       {{4, 5}, {3}, {}}      // Third op
                   },
                   {3});
-  SetGraph(&graph, /*preserve_inputs=*/true);
-  Execute(0, 10);
+  SetGraph(&graph);
+  Execute(0, graph.nodes().size() - 1);
 
   // Alloc(+) and dealloc(-) order: +0 +1 +2 +4 +5 -2 +3 -4 -5
   EXPECT_EQ(GetOffset(0), 0);
@@ -325,15 +337,14 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithTemporary) {
                   },
                   {3});
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +5 +4 -2 -0 -5 +3 -4
-  EXPECT_EQ(GetOffset(3), 0);
-  EXPECT_EQ(GetOffset(5), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 +5 +4 -2 -5 +3 -4
+  EXPECT_EQ(GetOffset(3), 12);
+  EXPECT_EQ(GetOffset(5), 12);
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(4));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(1), 0);
+  EXPECT_EQ(GetOffset(1), 4);
 }
 
 TEST_F(ArenaPlannerTest, SimpleGraphWithResetAllocationsAfter) {
@@ -346,15 +357,13 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithResetAllocationsAfter) {
                   },
                   {3});
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +5 +4 -2 -0 -5 +3 -4
-  EXPECT_EQ(GetOffset(3), 0);
-  EXPECT_EQ(GetOffset(5), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 +5 +4 -2 -5 +3 -4
+  EXPECT_EQ(GetOffset(3), 12);
+  EXPECT_EQ(GetOffset(5), 12);
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(4));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(1), 0);
 
   // Reset allocations after the first node
   ResetAllocationsAfter(0);
@@ -379,7 +388,7 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithPersistentResetAllocationsAfter) {
   // Make the tensor #5 persistent.
   (*graph.tensors())[5].allocation_type = kTfLiteArenaRwPersistent;
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
   // Save the pointer of the persistent temporary tensor #5.
   void* tensor5_ptr = (*graph.tensors())[5].data.raw;
@@ -395,7 +404,7 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithPersistentResetAllocationsAfter) {
   EXPECT_FALSE(IsUnallocated(5));
 
   // Second run
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
   // Check if the persistent pointer isn't changed.
   EXPECT_TRUE(tensor5_ptr == (*graph.tensors())[5].data.raw);
@@ -411,24 +420,23 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithOptionals) {
                   },
                   {3});
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +4 +5 -2 -0 +3 -4 -5
-  EXPECT_EQ(GetOffset(5), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 +4 +5 -2 +3 -4 -5
+  EXPECT_EQ(GetOffset(5), 12);
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
   EXPECT_EQ(GetOffset(3), GetOffsetAfter(4));
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(4));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(1), 0);
 }
 
 TEST_F(ArenaPlannerTest, SimpleGraphWithLargeTensor) {
-  TestGraph graph({0, -1, 1},
+  TestGraph graph({0, -1},
                   {
                       /* in, out, tmp */
-                      {{0, 1}, {2}, {}},   // First op
-                      {{2, 0}, {4}, {5}},  // Second op, with temporary
-                      {{4, -1}, {3}, {}}   // Third op, with optional
+                      {{0}, {1}, {}},      // First op
+                      {{1}, {2}, {}},      // Second op
+                      {{2, 0}, {4}, {5}},  // Third op, with temporary
+                      {{4, -1}, {3}, {}}   // Fourth op, with optional
                   },
                   {3});
 
@@ -436,14 +444,13 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithLargeTensor) {
   (*graph.tensors())[1].bytes = 40;
 
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +5 +4 -2 -0 -5 +3 -4
-  EXPECT_EQ(GetOffset(1), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +5 +4 -2 -5 +3 -4
+  EXPECT_EQ(GetOffset(1), 4);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(1));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(3), 0);
-  EXPECT_EQ(GetOffset(5), 0);
+  EXPECT_EQ(GetOffset(3), 4);
+  EXPECT_EQ(GetOffset(5), 4);
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
 }
 
@@ -463,18 +470,18 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithPersistentTensor) {
   graph.SetVariables({1});
 
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
   // Make sure #0 and #1 were given different memory locations (because they
   // will both have offset=0, in different arenas.)
   EXPECT_NE((*graph.tensors())[0].data.raw, (*graph.tensors())[1].data.raw);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +5 +4 -2 -0 -5 +3 -4
-  EXPECT_EQ(GetOffset(5), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 +5 +4 -2 -5 +3 -4
+  EXPECT_EQ(GetOffset(5), 4);
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
-  EXPECT_EQ(GetOffset(3), 0);
+  EXPECT_EQ(GetOffset(3), 4);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(4));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(2));
+  EXPECT_EQ(GetOffset(0), 0);
   EXPECT_EQ(GetOffset(1), 0);
 }
 
@@ -492,16 +499,15 @@ TEST_F(ArenaPlannerTest, SimpleGraphWithDynamicTensor) {
   (*graph.tensors())[1].allocation_type = kTfLiteDynamic;
 
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
   EXPECT_EQ((*graph.tensors())[1].data.raw, nullptr);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 +2 -1 +5 +4 -2 -0 -5 +3 -4
-  EXPECT_EQ(GetOffset(5), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 +5 +4 -2 -5 +3 -4
+  EXPECT_EQ(GetOffset(5), 4);
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
-  EXPECT_EQ(GetOffset(3), 0);
+  EXPECT_EQ(GetOffset(3), 4);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(4));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(2));
 }
 
 TEST_F(ArenaPlannerTest, LargerGraphAndStepwiseAllocation) {
@@ -520,16 +526,14 @@ TEST_F(ArenaPlannerTest, LargerGraphAndStepwiseAllocation) {
   // The allocation plan is made at the beginning and is independent of
   // the execution steps. Here's the allocation order:
   //   Op0: +0 +1 +2 +3
-  //   Op1: +6 +4 +5 -6 -0 -2
-  //   Op2: +7 -1
+  //   Op1: +6 +4 +5 -6 -2
+  //   Op2: +7
   //   Op3: +9 +8 -9 -3 -7
   //   Op4: +10 -4 -5 -8
 
   Execute(0, 0);
-  EXPECT_EQ(GetOffset(3), 0);
+  EXPECT_EQ(GetOffset(3), 12);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(3));
-  EXPECT_EQ(GetOffset(1), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(1));
   EXPECT_TRUE(IsUnallocated(6));
   EXPECT_TRUE(IsUnallocated(4));
   EXPECT_TRUE(IsUnallocated(5));
@@ -539,11 +543,9 @@ TEST_F(ArenaPlannerTest, LargerGraphAndStepwiseAllocation) {
   EXPECT_TRUE(IsUnallocated(10));
 
   Execute(1, 1);
-  EXPECT_EQ(GetOffset(3), 0);
+  EXPECT_EQ(GetOffset(3), 12);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(3));
-  EXPECT_EQ(GetOffset(1), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(1));
-  EXPECT_EQ(GetOffset(6), GetOffsetAfter(0));
+  EXPECT_EQ(GetOffset(6), GetOffsetAfter(2));
   EXPECT_EQ(GetOffset(5), GetOffsetAfter(6));
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
   EXPECT_TRUE(IsUnallocated(7));
@@ -552,50 +554,37 @@ TEST_F(ArenaPlannerTest, LargerGraphAndStepwiseAllocation) {
   EXPECT_TRUE(IsUnallocated(10));
 
   Execute(2, 2);
-  EXPECT_EQ(GetOffset(3), 0);
+  EXPECT_EQ(GetOffset(3), 12);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(3));
-  EXPECT_EQ(GetOffset(1), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(1));
-  EXPECT_EQ(GetOffset(6), GetOffsetAfter(0));
+  EXPECT_EQ(GetOffset(6), GetOffsetAfter(2));
   EXPECT_EQ(GetOffset(5), GetOffsetAfter(6));
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
-  // #7 (24 bytes) is allocated at the place, where #0 and #6 (4+24=28 bytes)
-  // were before their deallocation.
-  EXPECT_EQ(GetOffset(7), GetOffsetAfter(1));
+  EXPECT_EQ(GetOffset(7), GetOffsetAfter(3));
   EXPECT_TRUE(IsUnallocated(9));
   EXPECT_TRUE(IsUnallocated(8));
   EXPECT_TRUE(IsUnallocated(10));
 
   Execute(3, 3);
-  EXPECT_EQ(GetOffset(3), 0);
+  EXPECT_EQ(GetOffset(3), 12);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(3));
-  EXPECT_EQ(GetOffset(1), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(1));
-  EXPECT_EQ(GetOffset(6), GetOffsetAfter(0));
+  EXPECT_EQ(GetOffset(6), GetOffsetAfter(2));
   EXPECT_EQ(GetOffset(5), GetOffsetAfter(6));
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
-  EXPECT_EQ(GetOffset(7), GetOffsetAfter(1));
-  // The deallocation of #1 and #2 frees up 20 bytes but that's not enough
-  // neither for #9, nor for #8, so they both go at the end.
+  EXPECT_EQ(GetOffset(7), GetOffsetAfter(3));
   EXPECT_EQ(GetOffset(9), GetOffsetAfter(4));
   EXPECT_EQ(GetOffset(8), GetOffsetAfter(9));
   EXPECT_TRUE(IsUnallocated(10));
 
   Execute(4, 4);
-  EXPECT_EQ(GetOffset(3), 0);
+  EXPECT_EQ(GetOffset(3), 12);
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(3));
-  EXPECT_EQ(GetOffset(1), GetOffsetAfter(2));
-  EXPECT_EQ(GetOffset(0), GetOffsetAfter(1));
-  EXPECT_EQ(GetOffset(6), GetOffsetAfter(0));
+  EXPECT_EQ(GetOffset(6), GetOffsetAfter(2));
   EXPECT_EQ(GetOffset(5), GetOffsetAfter(6));
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(5));
-  EXPECT_EQ(GetOffset(7), GetOffsetAfter(1));
+  EXPECT_EQ(GetOffset(7), GetOffsetAfter(3));
   EXPECT_EQ(GetOffset(9), GetOffsetAfter(4));
   EXPECT_EQ(GetOffset(8), GetOffsetAfter(9));
-  // There is enough space at the beginning for #10 due to the
-  // deallocation of #7, #1, #2 and #3 (total 56 bytes, #10 needs
-  // only 33.)
-  EXPECT_EQ(GetOffset(10), 0);
+  EXPECT_EQ(GetOffset(10), 12);
 }
 
 TEST_F(ArenaPlannerTest, ModifiedGraph) {
@@ -607,8 +596,8 @@ TEST_F(ArenaPlannerTest, ModifiedGraph) {
                       {{4, 5}, {3}, {}}      // Third op
                   },
                   {3});
-  SetGraph(&graph, /*preserve_inputs=*/true);
-  Execute(0, 10);
+  SetGraph(&graph);
+  Execute(0, graph.nodes().size() - 1);
 
   // Now update the graph data used by the existing allocator. It should behave
   // as if it had been recreated with the new graph.
@@ -619,7 +608,7 @@ TEST_F(ArenaPlannerTest, ModifiedGraph) {
                          },
                          {3});
   SwapGraph(&pruned_graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
   EXPECT_EQ(GetOffset(0), 0);
   EXPECT_EQ(GetOffset(1), GetOffsetAfter(0));
@@ -635,8 +624,8 @@ TEST_F(ArenaPlannerTest, ModifiedGraph_DeallocateNonPersistentArena) {
                       {{4, 5}, {3}, {}}      // Third op
                   },
                   {3});
-  SetGraph(&graph, /*preserve_inputs=*/true);
-  Execute(0, 10);
+  SetGraph(&graph);
+  Execute(0, graph.nodes().size() - 1);
 
   // Should be no-ops, since ReleaseNonPersistentMemory() hasn't been called.
   AcquireNonPersistentMemory();
@@ -661,7 +650,7 @@ TEST_F(ArenaPlannerTest, ModifiedGraph_DeallocateNonPersistentArena) {
                          },
                          {3});
   SwapGraph(&pruned_graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
   // Should be a no-op.
   AcquireNonPersistentMemory();
@@ -699,10 +688,10 @@ TEST_F(ArenaPlannerTest, ComplexGraph) {
   (*graph.tensors())[6].bytes = 10;
   (*graph.tensors())[7].bytes = 40;
   SetGraph(&graph);
-  Execute(0, 10);
+  Execute(0, graph.nodes().size() - 1);
 
-  // Alloc(+) and dealloc(-) order: +0 +1 -0 +2 +3 +4 -1 +5 -2 -3 -4 +6 +7 -5 +8
-  EXPECT_EQ(GetOffset(5), 0);
+  // Alloc(+) and dealloc(-) order: +0 +1 +2 +3 +4 -1 +5 -2 -3 -4 +6 +7 -5 +8
+  EXPECT_EQ(GetOffset(5), 32);
   EXPECT_EQ(GetOffset(7), GetOffsetAfter(5));
   EXPECT_EQ(GetOffset(6), GetOffsetAfter(7));
   EXPECT_EQ(GetOffset(2), GetOffsetAfter(5));
@@ -710,7 +699,7 @@ TEST_F(ArenaPlannerTest, ComplexGraph) {
   EXPECT_EQ(GetOffset(4), GetOffsetAfter(3));
   EXPECT_EQ(GetOffset(0), 0);
   EXPECT_EQ(GetOffset(1), GetOffsetAfter(0));
-  EXPECT_EQ(GetOffset(8), 0);
+  EXPECT_EQ(GetOffset(8), 32);
 }
 
 TEST_F(ArenaPlannerTest, GraphWithIntermediates) {
@@ -725,8 +714,8 @@ TEST_F(ArenaPlannerTest, GraphWithIntermediates) {
                       {{7, 13}, {14}, {15}},
                   },
                   {11, 14});
-  SetGraph(&graph, /*preserve_inputs=*/true);
-  Execute(0, 10);
+  SetGraph(&graph);
+  Execute(0, graph.nodes().size() - 1);
 
   // Alloc(+) and dealloc(-) order by operation:
   // Op0: +0 +1 +2 +3 -3
@@ -765,31 +754,37 @@ TEST_F(ArenaPlannerTest, DebugTensors) {
                       {{4}, {3}, {7}}      // Third op, with temporary
                   },
                   {3});
-  SetGraph(&graph, false, /*preserve_intermediates=*/false);
-  Execute(0, 10);
+  SetGraph(&graph, /*preserve_all_tensors=*/false);
+  Execute(0, graph.nodes().size() - 1);
 
   // Memory of temporary tensors are shared by default.
-  EXPECT_EQ(GetOffset(5), 0);
-  EXPECT_EQ(GetOffset(6), 0);
-  EXPECT_EQ(GetOffset(7), 0);
+  EXPECT_EQ(GetOffset(5), GetOffset(6));
+  EXPECT_EQ(GetOffset(6), GetOffset(7));
 
-  SetGraph(&graph, false, /*preserve_intermediates=*/true);
-  Execute(0, 10);
+  SetGraph(&graph, /*preserve_all_tensors=*/true);
+  Execute(0, graph.nodes().size() - 1);
 
   std::set<std::ptrdiff_t> tensorOffsets;
   for (int i = 0; i < 8; i++) {
     tensorOffsets.insert(GetOffset(i));
   }
   // Every tensor should have unique memory allocation with
-  // preserve_intermediates.
+  // preserve_all_tensors.
   EXPECT_EQ(tensorOffsets.size(), 8);
+}
+
+TEST_F(ArenaPlannerTest, SimpleProfilerTest) {
+  gNumAlloc = 0;
+  gNumDealloc = 0;
+  TestGraph graph({1}, {{{1}, {2}, {}}}, {2});
+  SetGraph(&graph);
+  Execute(0, graph.nodes().size() - 1);
+
+  EXPECT_EQ(gNumAlloc, 2);
+  EXPECT_EQ(gNumDealloc, 0);
+  Destroy();
+  EXPECT_EQ(gNumDealloc, 2);
 }
 
 }  // namespace
 }  // namespace tflite
-
-int main(int argc, char** argv) {
-  ::tflite::LogToStderr();
-  ::testing::InitGoogleTest(&argc, argv);
-  return RUN_ALL_TESTS();
-}

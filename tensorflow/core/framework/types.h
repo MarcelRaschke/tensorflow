@@ -27,6 +27,7 @@ limitations under the License.
 #include "third_party/eigen3/unsupported/Eigen/CXX11/FixedPoint"
 // clang-format on
 #include "tensorflow/core/framework/bfloat16.h"
+#include "tensorflow/core/framework/full_type.pb.h"
 #include "tensorflow/core/framework/numeric_types.h"
 #include "tensorflow/core/framework/resource_handle.h"
 #include "tensorflow/core/framework/types.pb.h"
@@ -35,6 +36,7 @@ limitations under the License.
 #include "tensorflow/core/lib/gtl/inlined_vector.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/types.h"
+#include "tensorflow/tsl/framework/device_type.h"
 
 namespace tensorflow {
 
@@ -49,31 +51,15 @@ enum MemoryType {
   HOST_MEMORY = 1,
 };
 
-// A DeviceType is just a string, but we wrap it up in a class to give
-// some type checking as we're passing these around
-class DeviceType {
- public:
-  DeviceType(const char* type)  // NOLINT(runtime/explicit)
-      : type_(type) {}
+using tsl::DeviceType;  // NOLINT
 
-  explicit DeviceType(StringPiece type) : type_(type.data(), type.size()) {}
-
-  const char* type() const { return type_.c_str(); }
-  const std::string& type_string() const { return type_; }
-
-  bool operator<(const DeviceType& other) const;
-  bool operator==(const DeviceType& other) const;
-  bool operator!=(const DeviceType& other) const { return !(*this == other); }
-
- private:
-  std::string type_;
-};
-std::ostream& operator<<(std::ostream& os, const DeviceType& d);
-
-// Convenient constants that can be passed to a DeviceType constructor
+// Convenient constants that can be passed to a DeviceType constructor.
+// See comments for CreateOpKernel in op_kernel.h for uses of DEVICE_DEFAULT
+// and other device types.
 TF_EXPORT extern const char* const DEVICE_DEFAULT;     // "DEFAULT"
 TF_EXPORT extern const char* const DEVICE_CPU;         // "CPU"
 TF_EXPORT extern const char* const DEVICE_GPU;         // "GPU"
+TF_EXPORT extern const char* const DEVICE_TPU;         // "TPU"
 TF_EXPORT extern const char* const DEVICE_TPU_SYSTEM;  // "TPU_SYSTEM"
 
 template <typename Device>
@@ -411,7 +397,7 @@ struct IsValidDataType<long> {
 };
 template <>
 struct EnumToDataType<DT_INT64> {
-  typedef tensorflow::int64 Type;
+  typedef int64_t Type;
 };
 
 template <>
@@ -461,7 +447,7 @@ struct IsValidDataType {
 };
 
 // Extra validity checking; not part of public API.
-static_assert(IsValidDataType<int64>::value, "Incorrect impl for int64");
+static_assert(IsValidDataType<int64_t>::value, "Incorrect impl for int64");
 static_assert(IsValidDataType<int32>::value, "Incorrect impl for int32");
 
 // TODO(jeff): Maybe unify this with Tensor::CanUseDMA, or the underlying
@@ -534,6 +520,34 @@ MemoryType MTypeFromDTypeIntsOnDevice(const DataType dtype);
 // For DT_RESOURCE, the handle always sits on host (even if the underlying
 // object has device-allocated resources).
 bool DataTypeAlwaysOnHost(DataType dt);
+
+// FullType implementation.
+
+// Reference container for a type definition. These values are usually interned.
+// These containers admit a notion of ordering for efficient access. The
+// ordering has no semantic otherwise.
+struct TypeRef {
+  std::shared_ptr<FullTypeDef> full_type;
+
+  bool operator==(const TypeRef& other) const {
+    // TODO(mdan): This should be more efficient.
+    return full_type->SerializeAsString() ==
+           other.full_type->SerializeAsString();
+  }
+  bool operator<(const TypeRef& other) const {
+    return full_type->SerializeAsString() <
+           other.full_type->SerializeAsString();
+  }
+};
+
+struct TypeHasher {
+  std::size_t operator()(const TypeRef& k) const {
+    return std::hash<std::string>()(k.full_type->SerializeAsString());
+  }
+};
+
+// Maps a legacy DType proto enum to an equivalent FullType ID.
+void map_dtype_to_tensor(const DataType& dtype, FullTypeDef& t);
 
 }  // namespace tensorflow
 

@@ -15,17 +15,18 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/pjrt/tracked_device_buffer.h"
 
+#include <atomic>
 #include <iterator>
 #include <memory>
 
 #include "absl/synchronization/mutex.h"
 #include "tensorflow/compiler/xla/pjrt/local_device_state.h"
 #include "tensorflow/compiler/xla/service/shaped_buffer.h"
+#include "tensorflow/compiler/xla/stream_executor/device_memory.h"
+#include "tensorflow/compiler/xla/stream_executor/device_memory_allocator.h"
+#include "tensorflow/compiler/xla/stream_executor/event.h"
+#include "tensorflow/compiler/xla/stream_executor/stream.h"
 #include "tensorflow/compiler/xla/types.h"
-#include "tensorflow/stream_executor/device_memory.h"
-#include "tensorflow/stream_executor/device_memory_allocator.h"
-#include "tensorflow/stream_executor/event.h"
-#include "tensorflow/stream_executor/stream.h"
 
 namespace xla {
 
@@ -36,16 +37,17 @@ void BufferSequencingEvent::SetSequencingEvent(EventPool::Handle event,
   event_ = std::move(event);
   CHECK(streams_defined_on_.empty());
   streams_defined_on_.push_back(stream);
+  sequence_number_.store(event_.sequence_number(), std::memory_order_seq_cst);
 }
 
 bool BufferSequencingEvent::EventHasBeenRecorded() const {
   return event_.event() != nullptr;
 }
 
-uint64 BufferSequencingEvent::sequence_number() const {
-  absl::MutexLock lock(&mu_);
-  CHECK(EventHasBeenRecorded());
-  return event_.sequence_number();
+uint64_t BufferSequencingEvent::sequence_number() const {
+  uint64_t seq = sequence_number_.load(std::memory_order_seq_cst);
+  CHECK_NE(seq, 0);
+  return seq;
 }
 
 void BufferSequencingEvent::WaitForEventOnStream(se::Stream* stream) {

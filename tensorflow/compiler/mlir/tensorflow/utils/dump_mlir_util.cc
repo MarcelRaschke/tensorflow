@@ -26,6 +26,8 @@ limitations under the License.
 #include "llvm/Support/FormatVariadic.h"
 #include "llvm/Support/raw_ostream.h"
 #include "mlir/IR/Operation.h"  // from @llvm-project
+#include "mlir/Pass/Pass.h"  // from @llvm-project
+#include "tensorflow/core/platform/crash_analysis.h"
 #include "tensorflow/core/platform/env.h"
 #include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/platform/path.h"
@@ -110,6 +112,29 @@ struct CrashReproducerStream : public mlir::PassManager::ReproducerStream {
   std::string name;
   std::unique_ptr<llvm::raw_ostream> ostream;
 };
+
+// MLIR crash reproducer which reports failures to the crash analysis system.
+struct CrashAnalysisCrashReproducerStream
+    : public mlir::PassManager::ReproducerStream {
+ public:
+  CrashAnalysisCrashReproducerStream()
+      : internal_str(""), string_stream(internal_str) {}
+
+  ~CrashAnalysisCrashReproducerStream() override {
+    crash_analysis::ReportEvent(
+        "mlir_crash_reproducer.mlir",
+        "Pass pipeline failure; crash reproducer attached",
+        string_stream.str());
+  }
+
+  llvm::StringRef description() override { return "mlir_crash_reproducer"; }
+  raw_ostream& os() override { return string_stream; }
+
+ private:
+  std::string internal_str;
+  llvm::raw_string_ostream string_stream;
+};
+
 }  // namespace
 
 Status CreateFileForDumping(llvm::StringRef name,
@@ -126,7 +151,7 @@ Status CreateFileForDumping(llvm::StringRef name,
                   "(TF_DUMP_GRAPH_PREFIX not specified)");
   }
 
-  if (dir == "-") {
+  if (dir == kCrashReproducerStdErr) {
     *os = std::make_unique<LogInfoRawStream>();
     *filepath = "(stderr)";
     return Status();
@@ -153,14 +178,47 @@ Status CreateFileForDumping(llvm::StringRef name,
   return Status();
 }
 
+// Prints the pass pipeline of `pass_manager` to `os`.
+void PrintPassPipeline(const mlir::PassManager& pass_manager,
+                       mlir::Operation* op, llvm::raw_ostream& os) {
+  std::string str;
+  llvm::raw_string_ostream passOS(str);
+  llvm::interleaveComma(
+      pass_manager.getPasses(), passOS,
+      [&](mlir::Pass& pass) { pass.printAsTextualPipeline(passOS); });
+  os << "{-# external_resources: { mlir_reproducer: { pipeline: \""
+     << passOS.str() << "\", ";
+  os << "disable_threading: true, ";
+  os << "verify_each: true } } #-}";
+  os << "\n\n";
+}
+
+std::string DumpCrashReproducerToFile(llvm::StringRef name,
+                                      const mlir::PassManager& pm,
+                                      mlir::Operation* op,
+                                      llvm::StringRef dirname) {
+  std::unique_ptr<llvm::raw_ostream> os;
+  std::string filepath;
+  Status result = CreateFileForDumping(name, &os, &filepath, dirname);
+  if (!result.ok()) return result.error_message();
+
+  PrintPassPipeline(pm, op, *os);
+  op->print(*os, mlir::OpPrintingFlags().useLocalScope());
+  LOG(INFO) << "Dumped MLIR operation '" << op->getName().getStringRef().str()
+            << "' to '" << filepath << "'";
+  return filepath;
+}
+
 std::string DumpMlirOpToFile(llvm::StringRef name, mlir::Operation* op,
-                             llvm::StringRef dirname) {
+                             llvm::StringRef dirname,
+                             const mlir::PassManager* pass_manager) {
   std::unique_ptr<raw_ostream> os;
   std::string filepath;
   Status result = CreateFileForDumping(name, &os, &filepath, dirname);
   if (!result.ok()) return result.error_message();
 
-  op->print(*os, mlir::OpPrintingFlags().useLocalScope().printGenericOpForm());
+  if (pass_manager) PrintPassPipeline(*pass_manager, op, *os);
+  op->print(*os, mlir::OpPrintingFlags().useLocalScope());
   LOG(INFO) << "Dumped MLIR operation '" << op->getName().getStringRef().str()
             << "' to '" << filepath << "'";
   return filepath;
@@ -171,7 +229,7 @@ std::string GetDumpDirFromEnvVar() {
   if (!prefix_env) {
     LOG(WARNING)
         << "Failed to dump MLIR module because dump location is not "
-        << " specified through TF_DUMP_GRAPH_PREFIX environment variable.";
+        << "specified through TF_DUMP_GRAPH_PREFIX environment variable.";
     return "";
   }
 
@@ -200,7 +258,7 @@ std::string DumpRawStringToFile(llvm::StringRef name, llvm::StringRef content,
 
 void SetCrashReproducer(mlir::PassManager& pm, llvm::StringRef dir_path) {
   std::string path = dir_path.str();
-  if (path.empty()) {
+  if (path.empty() || path == kCrashReproducerCrashAnalysis) {
     if (getenv("MLIR_CRASH_REPRODUCER_DIRECTORY"))
       path = getenv("MLIR_CRASH_REPRODUCER_DIRECTORY");
     else if (getenv("TEST_UNDECLARED_OUTPUTS_DIR"))
@@ -225,7 +283,9 @@ void SetCrashReproducer(mlir::PassManager& pm, llvm::StringRef dir_path) {
     }
   }
 
-  if (path != "-") {
+  // kCrashReproducerStdErr and kCrashReproducerCrashAnalysis settings do not
+  // require explicit file creation.
+  if (path != kCrashReproducerStdErr && path != kCrashReproducerCrashAnalysis) {
     auto* env = tensorflow::Env::Default();
     auto status = env->RecursivelyCreateDir(path);
     if (!status.ok()) {
@@ -246,10 +306,12 @@ void SetCrashReproducer(mlir::PassManager& pm, llvm::StringRef dir_path) {
   mlir::PassManager::ReproducerStreamFactory factory =
       [path](std::string& error)
       -> std::unique_ptr<mlir::PassManager::ReproducerStream> {
-    // Use the stderr stream.
-    if (path == "-")
+    if (path == kCrashReproducerStdErr)
       return std::make_unique<CrashReproducerStream>(
           "(stderr)", std::make_unique<LogInfoRawStream>());
+    if (path == kCrashReproducerCrashAnalysis) {
+      return std::make_unique<CrashAnalysisCrashReproducerStream>();
+    }
 
     // Try to open the file and generate a raw_ostream.
     std::unique_ptr<WritableFile> file;

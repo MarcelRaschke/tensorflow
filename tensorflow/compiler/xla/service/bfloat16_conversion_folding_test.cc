@@ -33,7 +33,7 @@ class TestBFloat16Support : public BFloat16Support {
   ~TestBFloat16Support() override {}
 
   bool SupportsBF16Operand(const HloInstruction& hlo,
-                           int64 operand_index) const override {
+                           int64_t operand_index) const override {
     if (hlo.opcode() == HloOpcode::kAdd ||
         hlo.opcode() == HloOpcode::kSubtract ||
         hlo.opcode() == HloOpcode::kTuple ||
@@ -76,7 +76,7 @@ class BFloat16ConversionFoldingTest : public HloTestBase {
     BFloat16ConversionFolding fold(&bfloat16_support_);
     StatusOr<bool> result = fold.Run(module);
     EXPECT_IS_OK(result.status());
-    return result.ValueOrDie();
+    return result.value();
   }
 };
 
@@ -240,7 +240,7 @@ TEST_F(BFloat16ConversionFoldingTest, FoldAllReduceTupleOutput) {
       ShapeUtil::MakeTupleShape({f32_shape, f32_shape}), {convert_a, b}, sum,
       /*replica_groups=*/{},
       /*constrain_layout=*/false,
-      /*channel_id=*/absl::nullopt, /*use_global_device_ids=*/false));
+      /*channel_id=*/std::nullopt, /*use_global_device_ids=*/false));
   HloInstruction* gte_a = builder.AddInstruction(
       HloInstruction::CreateGetTupleElement(f32_shape, crs, 0));
   HloInstruction* gte_b = builder.AddInstruction(

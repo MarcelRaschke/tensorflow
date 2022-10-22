@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/python/types.h"
 
 #include "absl/container/flat_hash_map.h"
+#include "tensorflow/compiler/xla/python/exceptions.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/python/lib/core/bfloat16.h"
 
@@ -55,21 +56,21 @@ xla::StatusOr<py::dtype> PrimitiveTypeToDtype(PrimitiveType type) {
     case PRED:
       return py::dtype::of<bool>();
     case S8:
-      return py::dtype::of<int8>();
+      return py::dtype::of<int8_t>();
     case S16:
-      return py::dtype::of<int16>();
+      return py::dtype::of<int16_t>();
     case S32:
-      return py::dtype::of<int32>();
+      return py::dtype::of<int32_t>();
     case S64:
-      return py::dtype::of<int64>();
+      return py::dtype::of<int64_t>();
     case U8:
-      return py::dtype::of<uint8>();
+      return py::dtype::of<uint8_t>();
     case U16:
-      return py::dtype::of<uint16>();
+      return py::dtype::of<uint16_t>();
     case U32:
-      return py::dtype::of<uint32>();
+      return py::dtype::of<uint32_t>();
     case U64:
-      return py::dtype::of<uint64>();
+      return py::dtype::of<uint64_t>();
     case BF16: {
       py::handle bfloat16(tensorflow::Bfloat16Dtype());
       return py::dtype::from_args(py::reinterpret_borrow<py::object>(bfloat16));
@@ -88,6 +89,33 @@ xla::StatusOr<py::dtype> PrimitiveTypeToDtype(PrimitiveType type) {
       return Unimplemented("Unimplemented primitive type %s",
                            PrimitiveType_Name(type));
   }
+}
+
+const NumpyScalarTypes& GetNumpyScalarTypes() {
+  static const NumpyScalarTypes* singleton = []() {
+    NumpyScalarTypes* dtypes = new NumpyScalarTypes();
+    const auto numpy = py::module::import("numpy");
+    dtypes->np_bool = py::object(numpy.attr("bool_"));
+    dtypes->np_int8 = py::object(numpy.attr("int8"));
+    dtypes->np_int16 = py::object(numpy.attr("int16"));
+    dtypes->np_int32 = py::object(numpy.attr("int32"));
+    dtypes->np_int64 = py::object(numpy.attr("int64"));
+    dtypes->np_uint8 = py::object(numpy.attr("uint8"));
+    dtypes->np_uint16 = py::object(numpy.attr("uint16"));
+    dtypes->np_uint32 = py::object(numpy.attr("uint32"));
+    dtypes->np_uint64 = py::object(numpy.attr("uint64"));
+    dtypes->np_bfloat16 =
+        py::reinterpret_borrow<py::object>(tensorflow::Bfloat16Dtype());
+    dtypes->np_float16 = py::object(numpy.attr("float16"));
+    dtypes->np_float32 = py::object(numpy.attr("float32"));
+    dtypes->np_float64 = py::object(numpy.attr("float64"));
+    dtypes->np_complex64 = py::object(numpy.attr("complex64"));
+    dtypes->np_complex128 = py::object(numpy.attr("complex128"));
+    dtypes->np_longlong = py::object(numpy.attr("longlong"));
+    dtypes->np_intc = py::object(numpy.attr("intc"));
+    return dtypes;
+  }();
+  return *singleton;
 }
 
 // Returns a numpy-style format descriptor string for `type`.
@@ -170,6 +198,21 @@ StatusOr<py::str> TypeDescriptorForPrimitiveType(PrimitiveType type) {
   }
 }
 
+PrimitiveType Squash64BitTypes(PrimitiveType type) {
+  switch (type) {
+    case S64:
+      return S32;
+    case U64:
+      return U32;
+    case F64:
+      return F32;
+    case C128:
+      return C64;
+    default:
+      return type;
+  }
+}
+
 // Returns the strides for `shape`.
 std::vector<ssize_t> ByteStridesForShape(const Shape& shape) {
   std::vector<ssize_t> strides;
@@ -185,6 +228,20 @@ std::vector<ssize_t> ByteStridesForShape(const Shape& shape) {
   return strides;
 }
 
+std::vector<int64_t> ByteStridesForShapeInt64(const Shape& shape) {
+  std::vector<int64_t> strides;
+  CHECK(shape.IsArray());
+  CHECK(shape.has_layout());
+
+  strides.resize(shape.dimensions_size());
+  int64_t stride = ShapeUtil::ByteSizeOfPrimitiveType(shape.element_type());
+  for (int i : shape.layout().minor_to_major()) {
+    strides.at(i) = stride;
+    stride *= shape.dimensions(i);
+  }
+  return strides;
+}
+
 StatusOr<py::object> LiteralToPython(std::shared_ptr<xla::Literal> literal) {
   xla::Literal& m = *literal;
   if (m.shape().IsTuple()) {
@@ -193,7 +250,7 @@ StatusOr<py::object> LiteralToPython(std::shared_ptr<xla::Literal> literal) {
     for (int i = 0; i < elems.size(); ++i) {
       TF_ASSIGN_OR_RETURN(
           arrays[i],
-          LiteralToPython(absl::make_unique<Literal>(std::move(elems[i]))));
+          LiteralToPython(std::make_unique<Literal>(std::move(elems[i]))));
     }
     py::tuple result(elems.size());
     for (int i = 0; i < elems.size(); ++i) {
@@ -250,40 +307,34 @@ static py::tuple IntSpanToTupleHelper(absl::Span<IntType const> xs) {
   return out;
 }
 
-py::tuple IntSpanToTuple(absl::Span<int64 const> xs) {
+template <>
+pybind11::tuple SpanToTuple(absl::Span<int const> xs) {
   return IntSpanToTupleHelper(xs);
 }
-py::tuple IntSpanToTuple(absl::Span<int const> xs) {
+template <>
+pybind11::tuple SpanToTuple(absl::Span<int64_t const> xs) {
   return IntSpanToTupleHelper(xs);
 }
 
-std::vector<int64> IntSequenceToVector(const py::object& sequence) {
-  std::vector<int64> output;
-  for (auto item : sequence) {
-    output.push_back(item.cast<int64>());
-  }
-  return output;
-}
-
-absl::optional<CastToArrayResult> CastToArray(py::handle h) {
+std::optional<CastToArrayResult> CastToArray(py::handle h) {
   py::array array = py::array::ensure(
       h, py::array::c_style | py::detail::npy_api::NPY_ARRAY_ALIGNED_);
   if (!array) {
-    return absl::nullopt;
+    return std::nullopt;
   }
   auto type_or_status = DtypeToPrimitiveType(array.dtype());
   if (!type_or_status.ok()) {
-    throw std::runtime_error(type_or_status.status().ToString());
+    throw xla::XlaRuntimeError(type_or_status.status());
   }
-  PrimitiveType type = type_or_status.ValueOrDie();
+  PrimitiveType type = type_or_status.value();
 
-  absl::InlinedVector<int64, 4> dims(array.ndim());
+  absl::InlinedVector<int64_t, 4> dims(array.ndim());
   for (int i = 0; i < array.ndim(); ++i) {
     dims[i] = array.shape(i);
   }
   Shape shape = ShapeUtil::MakeShape(type, dims);
   if (array.size() * array.itemsize() != ShapeUtil::ByteSizeOf(shape)) {
-    throw std::runtime_error(absl::StrCat(
+    throw xla::XlaRuntimeError(absl::StrCat(
         "Size mismatch for buffer: ", array.size() * array.itemsize(), " vs. ",
         ShapeUtil::ByteSizeOf(shape)));
   }

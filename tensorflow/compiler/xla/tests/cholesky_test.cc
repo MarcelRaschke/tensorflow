@@ -29,8 +29,8 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/literal_test_util.h"
 #include "tensorflow/compiler/xla/tests/test_macros.h"
 #include "tensorflow/compiler/xla/types.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/platform/tensor_float_32_utils.h"
+#include "tensorflow/tsl/lib/core/status_test_util.h"
+#include "tensorflow/tsl/platform/tensor_float_32_utils.h"
 
 namespace xla {
 namespace {
@@ -213,7 +213,7 @@ XLA_TEST_F(CholeskyTest, SimpleBatched) {
                              ErrorSpec(1e-4, 1e-4));
 }
 
-using CholeskyTestCase = std::tuple<int64, int64, bool>;
+using CholeskyTestCase = std::tuple<int64_t, int64_t, bool>;
 
 class RandomCholeskyTest
     : public ClientLibraryTestBase,
@@ -221,13 +221,13 @@ class RandomCholeskyTest
 
 XLA_TEST_P(RandomCholeskyTest, Real) {
   // Test fails with TensorFloat-32 enabled
-  tensorflow::enable_tensor_float_32_execution(false);
+  tsl::enable_tensor_float_32_execution(false);
   XlaBuilder builder(TestName());
 
   auto test_params = GetParam();
-  std::vector<int64> dimensions = {std::get<0>(test_params),
-                                   std::get<1>(test_params),
-                                   std::get<1>(test_params)};
+  std::vector<int64_t> dimensions = {std::get<0>(test_params),
+                                     std::get<1>(test_params),
+                                     std::get<1>(test_params)};
   bool lower = std::get<2>(test_params);
   Shape shape = ShapeUtil::MakeShape(F32, dimensions);
   TF_ASSERT_OK_AND_ASSIGN(
@@ -260,13 +260,13 @@ XLA_TEST_P(RandomCholeskyTest, Real) {
 
 XLA_TEST_P(RandomCholeskyTest, Complex) {
   // Test fails with TensorFloat-32 enabled
-  tensorflow::enable_tensor_float_32_execution(false);
+  tsl::enable_tensor_float_32_execution(false);
   XlaBuilder builder(TestName());
 
   auto test_params = GetParam();
-  std::vector<int64> dimensions = {std::get<0>(test_params),
-                                   std::get<1>(test_params),
-                                   std::get<1>(test_params)};
+  std::vector<int64_t> dimensions = {std::get<0>(test_params),
+                                     std::get<1>(test_params),
+                                     std::get<1>(test_params)};
   bool lower = std::get<2>(test_params);
   Shape shape = ShapeUtil::MakeShape(F32, dimensions);
   TF_ASSERT_OK_AND_ASSIGN(

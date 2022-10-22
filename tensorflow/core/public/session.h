@@ -28,13 +28,18 @@ limitations under the License.
 #include "tensorflow/core/protobuf/config.pb.h"
 #include "tensorflow/core/public/session_options.h"
 
+namespace tsl {
+namespace thread {
+struct ThreadPoolOptions;
+}
+}  // namespace tsl
+
 namespace tensorflow {
+
 class DeviceMgr;
 
 namespace thread {
-
-struct ThreadPoolOptions;
-
+using tsl::thread::ThreadPoolOptions;
 }
 
 /// \brief A Session instance lets a caller drive a TensorFlow graph
@@ -115,7 +120,7 @@ class Session {
   /// \brief Runs the graph with the provided input tensors and fills
   /// `outputs` for the endpoints specified in `output_tensor_names`.
   /// Runs to but does not return Tensors for the nodes in
-  /// `target_node_names`.
+  /// `target_tensor_names`.
   ///
   /// The order of tensors in `outputs` will match the order provided
   /// by `output_tensor_names`.
@@ -128,12 +133,12 @@ class Session {
   /// match a "Tensor endpoint" in the `GraphDef` passed to `Create()`.
   ///
   /// REQUIRES: At least one of `output_tensor_names` and
-  /// `target_node_names` must be non-empty.
+  /// `target_tensor_names` must be non-empty.
   ///
   /// REQUIRES: outputs is not nullptr if `output_tensor_names` is non-empty.
   virtual Status Run(const std::vector<std::pair<std::string, Tensor> >& inputs,
                      const std::vector<std::string>& output_tensor_names,
-                     const std::vector<std::string>& target_node_names,
+                     const std::vector<std::string>& target_tensor_names,
                      std::vector<Tensor>* outputs) = 0;
 
   /// \brief Implementations which support `RunOptions`.
@@ -171,7 +176,7 @@ class Session {
   virtual Status Run(const RunOptions& run_options,
                      const std::vector<std::pair<std::string, Tensor> >& inputs,
                      const std::vector<std::string>& output_tensor_names,
-                     const std::vector<std::string>& target_node_names,
+                     const std::vector<std::string>& target_tensor_names,
                      std::vector<Tensor>* outputs, RunMetadata* run_metadata);
 
   /// \brief Like `Run` with `RunOptions` proto, but allows user to provide
@@ -180,7 +185,7 @@ class Session {
   virtual Status Run(const RunOptions& run_options,
                      const std::vector<std::pair<std::string, Tensor> >& inputs,
                      const std::vector<std::string>& output_tensor_names,
-                     const std::vector<std::string>& target_node_names,
+                     const std::vector<std::string>& target_tensor_names,
                      std::vector<Tensor>* outputs, RunMetadata* run_metadata,
                      const thread::ThreadPoolOptions& threadpool_options) {
     return errors::Unimplemented(
@@ -232,7 +237,7 @@ class Session {
   }
 
   /// \brief A handle to a subgraph, created with `Session::MakeCallable()`.
-  typedef int64 CallableHandle;
+  typedef int64_t CallableHandle;
 
   /// \brief Creates a `handle` for invoking the subgraph defined by
   /// `callable_options`.

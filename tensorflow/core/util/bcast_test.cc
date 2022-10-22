@@ -375,6 +375,13 @@ TEST(BCastTest, Basic_Tensor_Scalar) {
             "[11,7,5,3,2]"
             "[11,7,5,3,2]"
             "[0,1,2,3,4][]");
+
+  // int32 edge-case:
+  EXPECT_EQ(BCast({1, 2147483648}, {1}),
+            "[2147483648][1][1][2147483648]"
+            "[2147483648]"
+            "[1,2147483648]"
+            "[0][0,1]");
 }
 
 TEST(BCastTest, Basic_Tensor_With_DimSize_1_Scalar) {
@@ -547,8 +554,8 @@ TEST(BCastTest, Basic_Tensor_Matrix_As_Tensor) {
 }
 
 TEST(BCastTest, Basic_SymbolicShape) {
-  constexpr int64 kSymDim1 = -10'000'000'000;
-  constexpr int64 kSymDim2 = -10'000'000'001;
+  constexpr int64_t kSymDim1 = -10'000'000'000;
+  constexpr int64_t kSymDim2 = -10'000'000'001;
 
   const tensorflow::BCast bcast({10, kSymDim1, kSymDim2}, {10, 1, 1}, false);
   EXPECT_TRUE(bcast.IsValid());

@@ -52,6 +52,16 @@ std::unordered_set<string>* UnaryVariantOpRegistry::PersistentStringStorage() {
   return string_storage;
 }
 
+// Get a pointer to a global UnaryVariantOpRegistry object
+UnaryVariantOpRegistry* UnaryVariantOpRegistryGlobal() {
+  static UnaryVariantOpRegistry* global_unary_variant_op_registry = nullptr;
+
+  if (global_unary_variant_op_registry == nullptr) {
+    global_unary_variant_op_registry = new UnaryVariantOpRegistry;
+  }
+  return global_unary_variant_op_registry;
+}
+
 UnaryVariantOpRegistry::VariantDecodeFn* UnaryVariantOpRegistry::GetDecodeFn(
     StringPiece type_name) {
   auto found = decode_fns.find(type_name);
@@ -139,7 +149,7 @@ Status DeviceCopyPrimitiveType(
   // Dummy copy, we don't actually bother copying to the device and back for
   // testing.
   *out = in;
-  return Status::OK();
+  return OkStatus();
 }
 }  // namespace
 
@@ -167,7 +177,7 @@ template <typename T>
 Status ZerosLikeVariantPrimitiveType(OpKernelContext* ctx, const T& t,
                                      T* t_out) {
   *t_out = T(0);
-  return Status::OK();
+  return OkStatus();
 }
 }  // namespace
 
@@ -189,7 +199,7 @@ template <typename T>
 Status AddVariantPrimitiveType(OpKernelContext* ctx, const T& a, const T& b,
                                T* out) {
   *out = a + b;
-  return Status::OK();
+  return OkStatus();
 }
 }  // namespace
 

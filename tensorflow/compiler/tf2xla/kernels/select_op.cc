@@ -16,6 +16,7 @@ limitations under the License.
 #include <numeric>
 
 #include "tensorflow/compiler/tf2xla/lib/broadcast.h"
+#include "tensorflow/compiler/tf2xla/mlir_xla_op_kernel.h"
 #include "tensorflow/compiler/tf2xla/type_util.h"
 #include "tensorflow/compiler/tf2xla/xla_helpers.h"
 #include "tensorflow/compiler/tf2xla/xla_op_kernel.h"
@@ -65,7 +66,7 @@ class SelectOp : public XlaOpKernel {
                                           cond_shape.num_elements()));
 
       // Broadcast into the dimensions on the right.
-      std::vector<int64> broadcast_dimensions(cond_shape.dims());
+      std::vector<int64_t> broadcast_dimensions(cond_shape.dims());
       absl::c_iota(broadcast_dimensions, 0);
       cond_handle = xla::BroadcastInDim(cond_handle, then_shape.dim_sizes(),
                                         broadcast_dimensions);
@@ -77,7 +78,7 @@ class SelectOp : public XlaOpKernel {
   TF_DISALLOW_COPY_AND_ASSIGN(SelectOp);
 };
 
-REGISTER_XLA_OP(Name("Select"), SelectOp);
+REGISTER_XLA_OP(Name("Select"), MlirXlaOpKernel);
 
 class SelectOpV2 : public XlaOpKernel {
  public:
@@ -113,15 +114,15 @@ class SelectOpV2 : public XlaOpKernel {
 
     auto bcasted_cond = BroadcastTo(ctx->Input(0), bcast.output_shape());
     OP_REQUIRES_OK(ctx, bcasted_cond.status());
-    auto cond_handle = bcasted_cond.ValueOrDie();
+    auto cond_handle = bcasted_cond.value();
 
     auto bcasted_then = BroadcastTo(ctx->Input(1), bcast.output_shape());
     OP_REQUIRES_OK(ctx, bcasted_then.status());
-    auto then_handle = bcasted_then.ValueOrDie();
+    auto then_handle = bcasted_then.value();
 
     auto bcasted_else = BroadcastTo(ctx->Input(2), bcast.output_shape());
     OP_REQUIRES_OK(ctx, bcasted_else.status());
-    auto else_handle = bcasted_else.ValueOrDie();
+    auto else_handle = bcasted_else.value();
 
     ctx->SetOutput(0, xla::Select(cond_handle, then_handle, else_handle));
   }

@@ -16,13 +16,17 @@ limitations under the License.
 #ifndef TENSORFLOW_CORE_TPU_TPU_EXECUTOR_API_H_
 #define TENSORFLOW_CORE_TPU_TPU_EXECUTOR_API_H_
 
+#include "tensorflow/compiler/xla/stream_executor/tpu/tpu_executor_c_api.h"
 #include "tensorflow/core/tpu/libtftpu.h"
-#include "tensorflow/stream_executor/tpu/tpu_executor_c_api.h"
 
 namespace tensorflow {
 namespace tpu {
 
 TfTpu_ExecutorApiFn* ExecutorApiFn();
+
+// Returns whether function pointers in `executor_api_fn` have been set and
+// stream_executor is enabled.
+bool IsStreamExecutorEnabled(TfTpu_ExecutorApiFn* executor_api_fn);
 
 // Returns whether function pointers in `executor_api_fn` have been set.  If
 // false, it probably means an appropriate initializer needs to be linked in.

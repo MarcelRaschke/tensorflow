@@ -3,10 +3,7 @@
 
 load("//tensorflow:tensorflow.bzl", "filegroup")
 
-package(
-    default_visibility = ["//tensorflow:internal"],
-    licenses = ["notice"],  # Apache 2.0
-)
+package(licenses = ["notice"])
 
 filegroup(
     name = "python_api_def",

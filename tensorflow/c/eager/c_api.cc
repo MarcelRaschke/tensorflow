@@ -33,6 +33,8 @@ limitations under the License.
 #include "tensorflow/c/eager/tfe_context_internal.h"
 #include "tensorflow/c/eager/tfe_op_internal.h"
 #include "tensorflow/c/eager/tfe_tensorhandle_internal.h"
+#include "tensorflow/c/tf_buffer_internal.h"
+#include "tensorflow/c/tf_status.h"
 #include "tensorflow/c/tf_tensor_internal.h"
 #include "tensorflow/core/common_runtime/copy_tensor.h"
 #include "tensorflow/core/common_runtime/device.h"
@@ -119,7 +121,7 @@ TFE_Context* TFE_NewContext(const TFE_ContextOptions* opts, TF_Status* status) {
         opts->session_options.options,
         static_cast<tensorflow::ContextDevicePlacementPolicy>(
             opts->device_placement_policy),
-        opts->async);
+        opts->async, opts->use_tfrt_distributed_runtime);
 #if !defined(IS_MOBILE_PLATFORM)
     tfrt_context->SetDistributedManager(
         tfrt::tf::CreateDistributedManagerContext(
@@ -137,7 +139,7 @@ TFE_Context* TFE_NewContext(const TFE_ContextOptions* opts, TF_Status* status) {
       &devices);
   if (!status->status.ok()) return nullptr;
   std::unique_ptr<tensorflow::DeviceMgr> device_mgr(
-      new tensorflow::StaticDeviceMgr(std::move(devices)));
+      new tensorflow::DynamicDeviceMgr(std::move(devices)));
 
   tensorflow::Rendezvous* r =
       new tensorflow::IntraProcessRendezvous(device_mgr.get());
@@ -146,7 +148,11 @@ TFE_Context* TFE_NewContext(const TFE_ContextOptions* opts, TF_Status* status) {
       static_cast<tensorflow::ContextDevicePlacementPolicy>(
           opts->device_placement_policy),
       opts->async, device_mgr.release(),
-      /*device_mgr_owned*/ true, r);
+      /*device_mgr_owned*/ true, r,
+      /*cluster_flr=*/nullptr,
+      /*collective_executor_mgr=*/nullptr,
+      /*run_eager_op_as_function=*/opts->run_eager_op_as_function,
+      /*jit_compile_rewrite=*/opts->jit_compile_rewrite);
 #if !defined(IS_MOBILE_PLATFORM)
   eager_context->SetDistributedManager(
       std::make_unique<tensorflow::EagerContextDistributedManager>(
@@ -242,7 +248,7 @@ TF_CAPI_EXPORT extern bool TFE_ContextCheckAlive(TFE_Context* ctx,
 TF_CAPI_EXPORT extern void TFE_ContextAsyncWait(TFE_Context* ctx,
                                                 TF_Status* status) {
 #if defined(IS_MOBILE_PLATFORM)
-  status->status = tensorflow::Status::OK();
+  status->status = tensorflow::OkStatus();
 #else   // !defined(IS_MOBILE_PLATFORM)
   status->status = tensorflow::unwrap(ctx)->AsyncWait();
 #endif  // !IS_MOBILE_PLATFORM
@@ -302,7 +308,7 @@ int64_t TFE_TensorHandleNumElements(TFE_TensorHandle* h, TF_Status* status) {
     return -1;
   }
 
-  tensorflow::int64 num_elements = -1;
+  int64_t num_elements = -1;
   status->status = tensorflow::unwrap(h)->NumElements(&num_elements);
   return num_elements;
 }
@@ -314,7 +320,7 @@ int64_t TFE_TensorHandleDim(TFE_TensorHandle* h, int dim_index,
     return -1;
   }
 
-  tensorflow::int64 dim = -1;
+  int64_t dim = -1;
   status->status = tensorflow::unwrap(h)->Dim(dim_index, &dim);
   return dim;
 }
@@ -474,6 +480,17 @@ class CustomDeviceAPI : public tensorflow::CustomDevice {
     return status.status;
   }
 
+  tensorflow::StatusOr<bool> ShallPinToThisDevice(
+      const ImmediateExecutionOperation* op) override {
+    TF_Status status;
+    // Let this custom device choose the device to pin this op on if it
+    // implements the pinning function.
+    if (device_.shall_pin_to_this_device != nullptr) {
+      return device_.shall_pin_to_this_device(tensorflow::wrap(op), &status);
+    }
+    return errors::Unimplemented("No custom device pinning implementation.");
+  }
+
  private:
   TFE_Context* context_;
   TFE_CustomDevice device_;
@@ -501,10 +518,29 @@ class CAPICustomDeviceTensorHandle
     *num_dims = methods_.num_dims(data_, &s);
     return s.status;
   }
-  Status Dim(int dim_index, int64* dim) const override {
+  Status Dim(int dim_index, int64_t* dim) const override {
     TF_Status s;
     *dim = methods_.dim(data_, dim_index, &s);
     return s.status;
+  }
+
+  bool PreferCustomSummarizer() const override {
+    return methods_.summarize != nullptr;
+  }
+
+  Status SummarizeValue(std::string& summary) const override {
+    if (methods_.summarize == nullptr) {
+      return tensorflow::CustomDeviceTensorHandle::SummarizeValue(summary);
+    }
+    TF_Status c_status;
+    std::unique_ptr<TF_Buffer, decltype(&TF_DeleteBuffer)> summary_buffer(
+        methods_.summarize(data_, &c_status), TF_DeleteBuffer);
+    if (!c_status.status.ok()) {
+      return c_status.status;
+    }
+    summary = std::string(reinterpret_cast<const char*>(summary_buffer->data),
+                          summary_buffer->length);
+    return OkStatus();
   }
 
  private:
@@ -518,8 +554,7 @@ class CAPICustomDeviceTensorHandle
 TFE_TensorHandle* TFE_NewCustomDeviceTensorHandle(
     TFE_Context* ctx, const char* device_name, TF_DataType dtype, void* data,
     TFE_CustomDeviceTensorHandleMethods methods, TF_Status* status) {
-  tensorflow::EagerContext* context =
-      tensorflow::ContextFromInterface(tensorflow::unwrap(ctx));
+  tensorflow::ImmediateExecutionContext* context = tensorflow::unwrap(ctx);
   tensorflow::CustomDevice* device = nullptr;
   if (!context->GetCustomDeviceOpHandler().FindCustomDeviceFromName(device_name,
                                                                     &device)) {
@@ -548,9 +583,9 @@ TFE_TensorHandle* TFE_NewTensorHandleFromDeviceMemory(
         tensorflow::errors::InvalidArgument(device_name, " unknown device.");
     return nullptr;
   }
-  std::vector<tensorflow::int64> dimvec(num_dims);
+  std::vector<int64_t> dimvec(num_dims);
   for (int i = 0; i < num_dims; ++i) {
-    dimvec[i] = static_cast<tensorflow::int64>(dims[i]);
+    dimvec[i] = static_cast<int64_t>(dims[i]);
   }
 
   // TODO(apassos) do we need to wrap the deallocator here to make sure to sync
@@ -870,8 +905,13 @@ TFE_TensorHandle* TFE_TensorHandleCopyToDevice(TFE_TensorHandle* h,
     return nullptr;
   }
 
-  auto* result = tensorflow::unwrap(ctx)->CopyTensorHandleToDevice(
-      tensorflow::unwrap(h), device_name, &status->status);
+  tensorflow::ImmediateExecutionContext* unwrapped_ctx =
+      tensorflow::unwrap(ctx);
+
+  auto* result =
+      unwrapped_ctx->GetCustomDeviceOpHandler().CopyTensorHandleToDevice(
+          unwrapped_ctx, tensorflow::unwrap(h), device_name, &status->status);
+
   if (status->status.ok()) {
     return tensorflow::wrap(result);
   }
@@ -1017,7 +1057,9 @@ void SetOpAttrValueScalar(TFE_Context* ctx, TFE_Op* op,
       // String
       if (const int s_size = default_value.list().s_size()) {
         absl::InlinedVector<const void*, 4> values_vector;
+        values_vector.reserve(s_size);
         absl::InlinedVector<size_t, 4> lengths_vector;
+        lengths_vector.reserve(s_size);
         for (int i = 0; i < s_size; ++i) {
           const string& v = default_value.list().s(i);
           values_vector.push_back(v.data());
@@ -1030,6 +1072,7 @@ void SetOpAttrValueScalar(TFE_Context* ctx, TFE_Op* op,
       // Int
       if (const int i_size = default_value.list().i_size()) {
         absl::InlinedVector<int64_t, 4> i_vector;
+        i_vector.reserve(i_size);
         for (int i = 0; i < i_size; ++i) {
           i_vector.push_back(default_value.list().i(i));
         }
@@ -1038,6 +1081,7 @@ void SetOpAttrValueScalar(TFE_Context* ctx, TFE_Op* op,
       // Float
       if (const int f_size = default_value.list().f_size()) {
         absl::InlinedVector<float, 4> f_vector;
+        f_vector.reserve(f_size);
         for (int i = 0; i < f_size; ++i) {
           f_vector.push_back(default_value.list().f(i));
         }
@@ -1046,6 +1090,7 @@ void SetOpAttrValueScalar(TFE_Context* ctx, TFE_Op* op,
       // Bool
       if (const int b_size = default_value.list().b_size()) {
         absl::InlinedVector<unsigned char, 4> b_vector;
+        b_vector.reserve(b_size);
         for (int i = 0; i < b_size; i++) {
           b_vector.push_back(default_value.list().b(i));
         }
@@ -1054,6 +1099,7 @@ void SetOpAttrValueScalar(TFE_Context* ctx, TFE_Op* op,
       // Type
       if (const int type_size = default_value.list().type_size()) {
         absl::InlinedVector<unsigned int, 4> type_vector;
+        type_vector.reserve(type_size);
         for (int i = 0; i < type_size; ++i) {
           type_vector.push_back(default_value.list().type(i));
         }
@@ -1100,6 +1146,10 @@ TFE_TensorHandle* DefaultCustomDevicePack(TFE_Context* context,
 }  // namespace
 
 extern "C" {
+
+bool TFE_IsCustomDevice(TFE_Context* ctx, const char* device_name) {
+  return tensorflow::unwrap(ctx)->IsCustomDevice(device_name);
+}
 
 void TFE_RegisterCustomDevice(TFE_Context* ctx, TFE_CustomDevice device,
                               const char* device_name, void* device_info,

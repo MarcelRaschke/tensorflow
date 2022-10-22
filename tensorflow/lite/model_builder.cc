@@ -47,9 +47,9 @@ std::unique_ptr<Allocation> GetAllocationFromFile(
     const char* filename, ErrorReporter* error_reporter) {
   std::unique_ptr<Allocation> allocation;
   if (MMAPAllocation::IsSupported()) {
-    allocation.reset(new MMAPAllocation(filename, error_reporter));
+    allocation = std::make_unique<MMAPAllocation>(filename, error_reporter);
   } else {
-    allocation.reset(new FileCopyAllocation(filename, error_reporter));
+    allocation = std::make_unique<FileCopyAllocation>(filename, error_reporter);
   }
   return allocation;
 }
@@ -167,6 +167,27 @@ string FlatBufferModel::GetMinimumRuntime() const {
     }
   }
   return "";
+}
+
+std::map<std::string, std::string> FlatBufferModel::ReadAllMetadata() const {
+  std::map<std::string, std::string> keys_values;
+  if (!model_ || !model_->metadata() || !model_->buffers()) return keys_values;
+
+  for (int i = 0; i < model_->metadata()->size(); ++i) {
+    auto metadata = model_->metadata()->Get(i);
+    auto buf = metadata->buffer();
+    if (buf >= model_->buffers()->size()) continue;
+    const tflite::Buffer* buffer = (*model_->buffers())[buf];
+    if (!buffer || !buffer->data()) continue;
+    const flatbuffers::Vector<uint8_t>* array = buffer->data();
+    if (!array) continue;
+    std::string val =
+        string(reinterpret_cast<const char*>(array->data()), array->size());
+    // Skip if key or value of metadata is empty.
+    if (!metadata->name() || val.empty()) continue;
+    keys_values[metadata->name()->str()] = val;
+  }
+  return keys_values;
 }
 
 bool FlatBufferModel::CheckModelIdentifier() const {

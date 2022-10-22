@@ -794,7 +794,7 @@ Status BuildSwapPair(NodeDef* node, int input_to_swap,
   (*swap_out_node->mutable_attr())["T"].set_type(input_type);
   *swap_pair = std::make_pair(swap_out_node, swap_in_node);
 
-  return Status::OK();
+  return OkStatus();
 }
 
 struct SwapInfo {
@@ -970,7 +970,7 @@ static bool IsSwappable(MutableGraphView::InputPort input) {
 
 struct MemInfo {
   MutableGraphView::OutputPort port;
-  int64 memory_used;
+  int64_t memory_used;
   std::vector<MutableGraphView::InputPort> uses_left;
   double fitness;
 
@@ -1009,7 +1009,7 @@ static bool IdentifySwappingCandidates(
     if (mem_usage.used_memory <= prop.memory_size()) {
       continue;
     }
-    int64 required_savings = mem_usage.used_memory - prop.memory_size();
+    int64_t required_savings = mem_usage.used_memory - prop.memory_size();
 
     std::unordered_map<string, Costs::NanoSeconds> op_completion_times;
     {
@@ -1163,11 +1163,11 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
       SwapInfo& swap_info = nodes_to_swap[&node];
       const AttrValue& val = node.attr().at("_swap_to_host");
       if (val.has_list()) {
-        for (int64 input_id : val.list().i()) {
+        for (int64_t input_id : val.list().i()) {
           swap_info.inputs_to_swap.push_back(input_id);
         }
       } else {
-        int64 input_id = val.i();
+        int64_t input_id = val.i();
         swap_info.inputs_to_swap.push_back(input_id);
       }
     }
@@ -1191,8 +1191,8 @@ bool SwappingPass(RewriterConfig::MemOptType optimization_level,
     const std::vector<OpInfo::TensorProperties>& props =
         properties.GetInputProperties(node->name());
     SwapInfo& swap_info = swap.second;
-    int64 bytes_to_swap = 0;
-    for (int64 input_id : swap_info.inputs_to_swap) {
+    int64_t bytes_to_swap = 0;
+    for (int64_t input_id : swap_info.inputs_to_swap) {
       const OpInfo::TensorProperties& t = props[input_id];
       bytes_to_swap += CalculateTensorSize(t);
     }
@@ -1313,7 +1313,7 @@ Status FindAssignNodesToRelax(const GraphDef& graph,
   }
   if (!found_send && devices.size() == 1) {
     nodes_to_relax->insert(assign_nodes.begin(), assign_nodes.end());
-    return Status::OK();
+    return OkStatus();
   }
 
   GraphTopologyView graph_view;
@@ -1373,7 +1373,7 @@ Status FindAssignNodesToRelax(const GraphDef& graph,
       }
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -1439,12 +1439,7 @@ Status MemoryOptimizer::Optimize(Cluster* cluster, const GrapplerItem& item,
   }
 
   optimized_graph->Swap(&optimized_item.graph);
-  return Status::OK();
-}
-
-void MemoryOptimizer::Feedback(Cluster* cluster, const GrapplerItem& item,
-                               const GraphDef& optimized_graph, double result) {
-  // Nothing to do for MemoryOptimizer.
+  return OkStatus();
 }
 
 }  // end namespace grappler

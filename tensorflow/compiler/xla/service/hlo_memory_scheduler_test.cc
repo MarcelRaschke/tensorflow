@@ -31,29 +31,29 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/hlo_test_base.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
+#include "tensorflow/tsl/lib/core/status_test_util.h"
 
 namespace xla {
 namespace {
 
 class HloSchedulingTest : public HloTestBase {};
 
-int64 PeakMemoryUseOfEntryComputation(
+int64_t PeakMemoryUseOfEntryComputation(
     HloModule* module, LogicalBuffer::SizeFunction size_function) {
   CHECK(module->has_entry_computation());
   CHECK(module->has_schedule());
 
   std::unique_ptr<HloAliasAnalysis> alias_analysis =
-      HloAliasAnalysis::Run(module).ConsumeValueOrDie();
+      HloAliasAnalysis::Run(module).value();
 
   const HloSchedule& schedule = module->schedule();
 
   HloComputation* computation = module->entry_computation();
   const HloInstructionSequence& sequence = schedule.sequence(computation);
   return HeapSimulator::Run(
-             absl::make_unique<NoFragmentationStatsHeap<HloValue>>(),
+             std::make_unique<NoFragmentationStatsHeap<HloValue>>(),
              *computation, sequence, *alias_analysis, size_function)
-      .ValueOrDie()
+      .value()
       .heap_size;
 }
 
@@ -141,19 +141,19 @@ ENTRY root {
   auto size_fn = [](const BufferValue& buffer) {
     return ShapeUtil::ByteSizeOf(buffer.shape(), /*pointer_size=*/8);
   };
-  int64 peak_memory;
+  int64_t peak_memory;
   TF_ASSERT_OK_AND_ASSIGN(
       HloSchedule schedule,
       ScheduleModule(module.get(), size_fn,
                      ComputationSchedulerToModuleScheduler(ListMemoryScheduler),
-                     &peak_memory));
+                     /*execution_threads=*/{}, &peak_memory));
   TF_ASSERT_OK(module->set_schedule(schedule));
   // Verify that all instructions are in the sequence.
   const std::vector<HloInstruction*>& sequence =
       schedule.sequence(module->entry_computation()).instructions();
   EXPECT_EQ(module->entry_computation()->instruction_count(), sequence.size());
 
-  std::unordered_map<string, const HloInstruction*> instructions_by_name;
+  absl::flat_hash_map<std::string, const HloInstruction*> instructions_by_name;
   for (const HloInstruction* instruction : sequence) {
     instructions_by_name[instruction->name()] = instruction;
   }
@@ -204,14 +204,13 @@ ENTRY entry {
       schedule.sequence(module->entry_computation()).instructions();
   EXPECT_EQ(module->entry_computation()->instruction_count(), sequence.size());
 
-  std::unordered_map<string, const HloInstruction*> instructions_by_name;
+  absl::flat_hash_map<std::string, const HloInstruction*> instructions_by_name;
   for (const HloInstruction* instruction : sequence) {
     instructions_by_name[instruction->name()] = instruction;
   }
 
-  SequentialHloOrdering ordering(schedule);
-  EXPECT_TRUE(ordering.ExecutesBefore(instructions_by_name.at("send-done"),
-                                      instructions_by_name.at("n1")));
+  EXPECT_LT(absl::c_find(sequence, instructions_by_name.at("send-done")),
+            absl::c_find(sequence, instructions_by_name.at("n1")));
 }
 
 TEST_F(HloSchedulingTest, TuplesAreAccountedCorrectly) {

@@ -19,6 +19,7 @@ limitations under the License.
 
 #include "tensorflow/core/lib/core/status_test_util.h"
 #include "tensorflow/core/platform/env.h"
+#include "tensorflow/core/platform/errors.h"
 #include "tensorflow/core/platform/str_util.h"
 #include "tensorflow/core/platform/test.h"
 
@@ -27,17 +28,17 @@ namespace {
 
 TEST(RetryingUtilsTest, CallWithRetries_RetryDelays) {
   std::vector<double> requested_delays;  // requested delays in seconds
-  std::function<void(int64)> sleep = [&requested_delays](int64 delay) {
+  std::function<void(int64_t)> sleep = [&requested_delays](int64_t delay) {
     requested_delays.emplace_back(delay / 1000000.0);
   };
   std::function<Status()> f = []() { return errors::Unavailable("Failed."); };
 
   const auto& status = RetryingUtils::CallWithRetries(
       f, sleep, RetryConfig(500000 /* init_delay_time_us */));
-  EXPECT_EQ(errors::Code::ABORTED, status.code());
+  EXPECT_TRUE(errors::IsAborted(status));
   EXPECT_TRUE(absl::StrContains(
       status.error_message(),
-      "All 10 retry attempts failed. The last failure: Unavailable: Failed."))
+      "All 10 retry attempts failed. The last failure: Failed."))
       << status;
 
   EXPECT_EQ(10, requested_delays.size());
@@ -63,15 +64,13 @@ TEST(RetryingUtilsTest, CallWithRetries_NotFoundIsNotRetried) {
     results.erase(results.begin());
     return result;
   };
-  EXPECT_EQ(
-      errors::Code::NOT_FOUND,
-      RetryingUtils::CallWithRetries(f, RetryConfig(0 /* init_delay_time_us */))
-          .code());
+  EXPECT_TRUE(errors::IsNotFound(RetryingUtils::CallWithRetries(
+      f, RetryConfig(0 /* init_delay_time_us */))));
 }
 
 TEST(RetryingUtilsTest, CallWithRetries_ImmediateSuccess) {
-  std::vector<Status> results({Status::OK()});
-  std::function<void(int64)> sleep = [](int64 delay) {
+  std::vector<Status> results({OkStatus()});
+  std::function<void(int64_t)> sleep = [](int64_t delay) {
     ADD_FAILURE() << "Unexpected call to sleep.";
   };
   std::function<Status()> f = [&results]() {
@@ -86,7 +85,7 @@ TEST(RetryingUtilsTest, CallWithRetries_ImmediateSuccess) {
 TEST(RetryingUtilsTest, CallWithRetries_EventualSuccess) {
   std::vector<Status> results({errors::Unavailable("Failed."),
                                errors::Unavailable("Failed again."),
-                               Status::OK()});
+                               OkStatus()});
   std::function<Status()> f = [&results]() {
     auto result = results[0];
     results.erase(results.begin());
@@ -97,7 +96,7 @@ TEST(RetryingUtilsTest, CallWithRetries_EventualSuccess) {
 }
 
 TEST(RetryingUtilsTest, DeleteWithRetries_ImmediateSuccess) {
-  std::vector<Status> delete_results({Status::OK()});
+  std::vector<Status> delete_results({OkStatus()});
   const auto delete_func = [&delete_results]() {
     auto result = delete_results[0];
     delete_results.erase(delete_results.begin());
@@ -108,7 +107,7 @@ TEST(RetryingUtilsTest, DeleteWithRetries_ImmediateSuccess) {
 }
 
 TEST(RetryingUtilsTest, DeleteWithRetries_EventualSuccess) {
-  std::vector<Status> delete_results({errors::Unavailable(""), Status::OK()});
+  std::vector<Status> delete_results({errors::Unavailable(""), OkStatus()});
   const auto delete_func = [&delete_results]() {
     auto result = delete_results[0];
     delete_results.erase(delete_results.begin());
@@ -126,10 +125,8 @@ TEST(RetryingUtilsTest, DeleteWithRetries_PermissionDeniedNotRetried) {
     delete_results.erase(delete_results.begin());
     return result;
   };
-  EXPECT_EQ(errors::Code::PERMISSION_DENIED,
-            RetryingUtils::DeleteWithRetries(
-                delete_func, RetryConfig(0 /* init_delay_time_us */))
-                .code());
+  EXPECT_TRUE(errors::IsPermissionDenied(RetryingUtils::DeleteWithRetries(
+      delete_func, RetryConfig(0 /* init_delay_time_us */))));
 }
 
 TEST(RetryingUtilsTest, DeleteWithRetries_SuccessThroughFileNotFound) {

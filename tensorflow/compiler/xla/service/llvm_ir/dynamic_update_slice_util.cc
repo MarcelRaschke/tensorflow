@@ -15,6 +15,7 @@ limitations under the License.
 
 #include "tensorflow/compiler/xla/service/llvm_ir/dynamic_update_slice_util.h"
 
+#include "tensorflow/compiler/xla/service/cpu/backend_config.pb.h"
 #include "tensorflow/compiler/xla/service/gpu/launch_dimensions.h"
 #include "tensorflow/compiler/xla/service/gpu/parallel_loop_emitter.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
@@ -29,7 +30,9 @@ bool MayBeImplementedAsInPlaceDynamicUpdateSlice(const HloInstruction* instr) {
   // then ParallelTaskAssigner would have to somehow know whether a node *will*
   // be emitted as an in-place DUS, and it can't, because it doesn't have a
   // buffer assignment when it runs.
-  if (!instr->outer_dimension_partitions().empty()) {
+  auto cpu_backend_config_or = instr->backend_config<xla::cpu::BackendConfig>();
+  if (cpu_backend_config_or.ok() &&
+      !cpu_backend_config_or->outer_dimension_partitions().empty()) {
     return false;
   }
 
@@ -90,7 +93,7 @@ bool CanEmitFusedDynamicUpdateSliceInPlace(HloInstruction* fusion,
 // EmitFusedDynamicUpdateSliceInPlace.
 //
 // Emits a sequential loop if launch_dimensions is null.
-using IndexGenerator = std::function<StatusOr<llvm::Value*>(int64)>;
+using IndexGenerator = std::function<StatusOr<llvm::Value*>(int64_t)>;
 
 static Status EmitDynamicUpdateSliceInPlaceImpl(
     const Shape& update_shape, const IndexGenerator& start_indices_generator,
@@ -100,9 +103,9 @@ static Status EmitDynamicUpdateSliceInPlaceImpl(
   const Shape& output_shape = output_array.GetShape();
 
   // Read start indices from start_indices_generator.
-  const int64 rank = output_shape.rank();
+  const int64_t rank = output_shape.rank();
   std::vector<llvm::Value*> start_multi_index(rank);
-  for (int64 i = 0; i < rank; ++i) {
+  for (int64_t i = 0; i < rank; ++i) {
     TF_ASSIGN_OR_RETURN(start_multi_index[i], start_indices_generator(i));
     llvm::Value* output_dim_size = llvm::ConstantInt::get(
         start_multi_index[i]->getType(), output_shape.dimensions(i));
@@ -134,7 +137,7 @@ static Status EmitDynamicUpdateSliceInPlaceImpl(
     //   output_index[dim] = start_index[dim] + update_index[dim]
     //
     std::vector<llvm::Value*> output_multi_index(rank);
-    for (int64 i = 0; i < rank; ++i) {
+    for (int64_t i = 0; i < rank; ++i) {
       llvm::Value* start_index0 = b->CreateSExtOrBitCast(
           start_multi_index[i], update_index[i]->getType());
       output_multi_index[i] = b->CreateAdd(start_index0, update_index[i]);
@@ -146,7 +149,7 @@ static Status EmitDynamicUpdateSliceInPlaceImpl(
     TF_ASSIGN_OR_RETURN(llvm::Value * update_data,
                         update_array_generator(update_index));
     output_array.EmitWriteArrayElement(output_index, update_data, b);
-    return Status::OK();
+    return OkStatus();
   };
 
   if (launch_dimensions != nullptr) {
@@ -170,7 +173,7 @@ Status EmitDynamicUpdateSliceInPlace(absl::Span<const IrArray> operand_arrays,
   Shape output_shape = output_array.GetShape();
   Shape update_shape = update_array.GetShape();
 
-  IndexGenerator start_indices_generator = [&](int64 index) {
+  IndexGenerator start_indices_generator = [&](int64_t index) {
     return operand_arrays[2 + index].EmitReadArrayElement(
         IrArray::Index(b->getInt64Ty()), b);
   };
@@ -218,13 +221,13 @@ static Status EmitFusedDynamicUpdateSliceInPlaceImpl(
 
   // Create element generators for update and start_indices.
   TF_ASSIGN_OR_RETURN(ElementGenerator update_array_generator,
-                      fused_emitter->GetGenerator(update));
+                      fused_emitter->GetGenerator(*update));
 
   IndexGenerator start_indices_generator =
-      [&](int64 index) -> StatusOr<llvm::Value*> {
+      [&](int64_t index) -> StatusOr<llvm::Value*> {
     TF_ASSIGN_OR_RETURN(
         ElementGenerator element_generator,
-        fused_emitter->GetGenerator(dynamic_update_slice->operand(2 + index)));
+        fused_emitter->GetGenerator(*dynamic_update_slice->operand(2 + index)));
     return element_generator(IrArray::Index(b->getInt64Ty()));
   };
   bool is_signed = ShapeUtil::ElementIsSigned(start_indices->shape());

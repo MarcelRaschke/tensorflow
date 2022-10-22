@@ -30,7 +30,7 @@ REGISTER_OP("_XlaHostComputeMlir")
     .Attr("Toutputs: list(type) >= 0")
     .Attr("send_key: string")
     .Attr("recv_key: string")
-    .Attr("tpu_core: int = 0")
+    .Attr("host_mlir_module: string=\"\"")
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       return ::tensorflow::shape_inference::UnknownShape(c);
     })
@@ -44,7 +44,9 @@ Tinputs: The element types of each element in `inputs`.
 Toutputs: The element types of each element in `outputs`.
 send_key: A unique identifier for this region used to match up host recv.
 recv_key: A unique identifier for this region used to match up host send.
-tpu_core: Default core to use for host to device transfers.
+host_mlir_module: MLIR module with the host computation used for shape inference. Should be set to empty string if output shapes are static.
+If non-empty, should contain a serialized mlir module with a function named `host_func` with the same number of inputs and outputs as this op
+as it will be used to refine output shapes.
 )doc");
 
 REGISTER_OP("XlaHostCompute")
@@ -56,15 +58,17 @@ REGISTER_OP("XlaHostCompute")
     .Attr("shapes: list(shape) >= 0")
     .Attr("shape_inference_graph: func")
     .Attr("key: string")
+    .Attr("send_key: string = ''")
+    .Attr("recv_key: string = ''")
     .Attr("cost_estimate_ns: int=1000000")
     .Attr("tpu_core: int = 0")
     .SetIsStateful()
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       const AttrValue* graph;
-      TF_RETURN_IF_ERROR(c->attrs().Find("shape_inference_graph", &graph));
+      TF_RETURN_IF_ERROR(c->GetAttr("shape_inference_graph", &graph));
       if (graph->func().name().empty()) {
         const AttrValue* shapes;
-        TF_RETURN_IF_ERROR(c->attrs().Find("shapes", &shapes));
+        TF_RETURN_IF_ERROR(c->GetAttr("shapes", &shapes));
         if (shapes->list().shape_size() != c->num_outputs()) {
           return errors::InvalidArgument(
               "_XlaHostCompute has ", c->num_outputs(),
@@ -77,7 +81,7 @@ REGISTER_OP("XlaHostCompute")
               c->MakeShapeFromShapeProto(shapes->list().shape(i), &handle));
           c->set_output(i, handle);
         }
-        return Status::OK();
+        return OkStatus();
       } else {
         // There is a shape inference graph so the output shapes are not
         // statically known.
@@ -102,7 +106,7 @@ REGISTER_OP("XlaRecvFromHost")
     .SetIsStateful()
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       const AttrValue* shape_attr;
-      TF_RETURN_IF_ERROR(c->attrs().Find("shape", &shape_attr));
+      TF_RETURN_IF_ERROR(c->GetAttr("shape", &shape_attr));
       if (!shape_attr->has_shape()) {
         return errors::InvalidArgument(
             "XlaRecvFromHost op does not have valid \"Toutput\" attr.");
@@ -111,7 +115,7 @@ REGISTER_OP("XlaRecvFromHost")
       TF_RETURN_IF_ERROR(
           c->MakeShapeFromShapeProto(shape_attr->shape(), &handle));
       c->set_output(0, handle);
-      return Status::OK();
+      return OkStatus();
     });
 
 }  // namespace tensorflow

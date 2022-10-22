@@ -28,8 +28,8 @@ namespace {
 TEST(TensorHandle_ShapeTest, AsyncShape) {
   Tensor t(DT_UINT16, TensorShape({2, 2}));
   EXPECT_TRUE(t.shape().IsSameSize(TensorShape({2, 2})));
-  for (int64 a = 0; a < t.shape().dim_size(0); a++) {
-    for (int64 b = 0; b < t.shape().dim_size(1); b++) {
+  for (int64_t a = 0; a < t.shape().dim_size(0); a++) {
+    for (int64_t b = 0; b < t.shape().dim_size(1); b++) {
       t.matrix<uint16>()(a, b) = uint16(a * b);
     }
   }
@@ -57,7 +57,7 @@ TEST(TensorHandle_ShapeTest, AsyncShape) {
   EXPECT_TRUE(async_th->NumDims(&num_dims).ok());
   EXPECT_EQ(num_dims, 2);
 
-  int64 num_elements = -1;
+  int64_t num_elements = -1;
   EXPECT_TRUE(async_th->NumElements(&num_elements).ok());
   EXPECT_EQ(num_elements, 4);
 
@@ -72,7 +72,7 @@ static Device* CreateDevice(const char* type, const char* name,
    public:
     explicit FakeDevice(const DeviceAttributes& attr, bool is_local)
         : Device(nullptr, attr), is_local_(is_local) {}
-    Status Sync() override { return Status::OK(); }
+    Status Sync() override { return OkStatus(); }
     Allocator* GetAllocator(AllocatorAttributes) override { return nullptr; }
     bool IsLocal() const override { return is_local_; }
 
@@ -82,7 +82,7 @@ static Device* CreateDevice(const char* type, const char* name,
   DeviceAttributes attr;
   attr.set_name(name);
   attr.set_device_type(type);
-  int64 incarnation = random::New64();
+  int64_t incarnation = random::New64();
   while (incarnation == 0) {
     incarnation = random::New64();
   }

@@ -32,6 +32,10 @@ namespace gpu {
 
 struct GPUImage2DDescriptor {
   DataType data_type;
+  bool normalized = false;   // used with INT data types, if normalized, we read
+                             // in kernel float data.
+  DataType normalized_type;  // can be FLOAT32 or FLOAT16, using with normalized
+                             // = true
   AccessType access_type;
 };
 
@@ -98,6 +102,68 @@ struct GPUResources {
     }
     return names;
   }
+
+  int GetReadImagesCount() const {
+    int counter = 0;
+    for (const auto& t : images2d) {
+      if (t.second.access_type == tflite::gpu::AccessType::READ) {
+        counter++;
+      }
+    }
+    for (const auto& t : image2d_arrays) {
+      if (t.second.access_type == tflite::gpu::AccessType::READ) {
+        counter++;
+      }
+    }
+    for (const auto& t : images3d) {
+      if (t.second.access_type == tflite::gpu::AccessType::READ) {
+        counter++;
+      }
+    }
+    for (const auto& t : image_buffers) {
+      if (t.second.access_type == tflite::gpu::AccessType::READ) {
+        counter++;
+      }
+    }
+    return counter;
+  }
+
+  int GetWriteImagesCount() const {
+    int counter = 0;
+    for (const auto& t : images2d) {
+      if (t.second.access_type == tflite::gpu::AccessType::WRITE) {
+        counter++;
+      }
+    }
+    for (const auto& t : image2d_arrays) {
+      if (t.second.access_type == tflite::gpu::AccessType::WRITE) {
+        counter++;
+      }
+    }
+    for (const auto& t : images3d) {
+      if (t.second.access_type == tflite::gpu::AccessType::WRITE) {
+        counter++;
+      }
+    }
+    for (const auto& t : image_buffers) {
+      if (t.second.access_type == tflite::gpu::AccessType::WRITE) {
+        counter++;
+      }
+    }
+    return counter;
+  }
+};
+
+struct GenericGPUResourcesWithValue {
+  std::vector<std::pair<std::string, int>> ints;
+  std::vector<std::pair<std::string, float>> floats;
+
+  void AddFloat(const std::string& name, float value) {
+    floats.push_back({name, value});
+  }
+  void AddInt(const std::string& name, int value) {
+    ints.push_back({name, value});
+  }
 };
 
 class GPUObjectDescriptor {
@@ -113,8 +179,11 @@ class GPUObjectDescriptor {
     state_vars_[key] = value;
   }
 
-  virtual std::string PerformConstExpr(const std::string& const_expr) const {
-    return "";
+  virtual absl::Status PerformConstExpr(const tflite::gpu::GpuInfo& gpu_info,
+                                        const std::string& const_expr,
+                                        std::string* result) const {
+    return absl::UnimplementedError(
+        "No implementation of perform const expression");
   }
 
   virtual absl::Status PerformSelector(
@@ -122,12 +191,17 @@ class GPUObjectDescriptor {
       const std::vector<std::string>& args,
       const std::vector<std::string>& template_args,
       std::string* result) const {
-    *result = "";
-    return absl::OkStatus();
+    return absl::UnimplementedError("No implementation of perform selector");
   }
-  virtual GPUResources GetGPUResources() const { return GPUResources(); }
+  virtual GPUResources GetGPUResources(const GpuInfo& gpu_info) const {
+    return GPUResources();
+  }
 
   virtual void Release() {}
+
+  // For internal use, will work correct only for const objects and before
+  // Release() call.
+  virtual uint64_t GetSizeInBytes() const { return 0; }
 
   void SetAccess(AccessType access_type) { access_type_ = access_type; }
   AccessType GetAccess() const { return access_type_; }

@@ -19,9 +19,9 @@ limitations under the License.
 #define TENSORFLOW_COMPILER_XRT_XRT_TPU_DEVICE_H_
 
 #include "tensorflow/compiler/xla/client/local_client.h"
+#include "tensorflow/compiler/xla/stream_executor/tpu/tpu_node_context.h"
 #include "tensorflow/core/framework/op_kernel.h"
 #include "tensorflow/core/framework/resource_mgr.h"
-#include "tensorflow/stream_executor/tpu/tpu_node_context.h"
 
 namespace tensorflow {
 
@@ -43,6 +43,9 @@ class XRTTpuDeviceAccessor {
     // protected by this ScopedRef.
     xla::Backend* backend() { return node_context_->backend(); }
     int device_ordinal() { return ordinal_; }
+    se::DeviceMemoryAllocator* allocator() {
+      return backend()->memory_allocator();
+    }
 
    private:
     // XRTTpuDeviceAccessor::InitScopedRef is the only way to initialize

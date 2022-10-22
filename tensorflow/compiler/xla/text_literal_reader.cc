@@ -16,11 +16,11 @@ limitations under the License.
 #include "tensorflow/compiler/xla/text_literal_reader.h"
 
 #include <limits>
+#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
 
-#include "absl/memory/memory.h"
 #include "absl/strings/match.h"
 #include "absl/strings/numbers.h"
 #include "absl/strings/str_split.h"
@@ -35,17 +35,15 @@ limitations under the License.
 #include "tensorflow/compiler/xla/xla_data.pb.h"
 #include "tensorflow/core/lib/io/buffered_inputstream.h"
 #include "tensorflow/core/lib/io/random_inputstream.h"
-#include "tensorflow/core/platform/protobuf.h"
-#include "tensorflow/core/platform/types.h"
+#include "tensorflow/tsl/platform/protobuf.h"
 
 namespace xla {
 
 StatusOr<Literal> TextLiteralReader::ReadPath(absl::string_view path) {
   CHECK(!absl::EndsWith(path, ".gz"))
       << "TextLiteralReader no longer supports reading .gz files";
-  std::unique_ptr<tensorflow::RandomAccessFile> file;
-  Status s =
-      tensorflow::Env::Default()->NewRandomAccessFile(std::string(path), &file);
+  std::unique_ptr<tsl::RandomAccessFile> file;
+  Status s = tsl::Env::Default()->NewRandomAccessFile(std::string(path), &file);
   if (!s.ok()) {
     return s;
   }
@@ -54,13 +52,13 @@ StatusOr<Literal> TextLiteralReader::ReadPath(absl::string_view path) {
   return reader.ReadAllLines();
 }
 
-TextLiteralReader::TextLiteralReader(tensorflow::RandomAccessFile* file)
+TextLiteralReader::TextLiteralReader(tsl::RandomAccessFile* file)
     : file_(file) {}
 
 StatusOr<Literal> TextLiteralReader::ReadAllLines() {
   tensorflow::io::RandomAccessInputStream stream(file_.get());
   tensorflow::io::BufferedInputStream buf(&stream, 65536);
-  string shape_string;
+  std::string shape_string;
   Status s = buf.ReadLine(&shape_string);
   if (!s.ok()) {
     return s;
@@ -79,8 +77,8 @@ StatusOr<Literal> TextLiteralReader::ReadAllLines() {
   result.PopulateWithValue<float>(fill);
   std::vector<absl::string_view> pieces;
   std::vector<absl::string_view> coordinates;
-  std::vector<int64> coordinate_values;
-  string line;
+  std::vector<int64_t> coordinate_values;
+  std::string line;
   while (buf.ReadLine(&line).ok()) {
     pieces = absl::StrSplit(line, ':');
     absl::string_view coordinates_string =
@@ -102,10 +100,10 @@ StatusOr<Literal> TextLiteralReader::ReadAllLines() {
     coordinates = absl::StrSplit(coordinates_string, ',');
     coordinate_values.clear();
     for (absl::string_view piece : coordinates) {
-      int64 coordinate_value;
+      int64_t coordinate_value;
       if (!absl::SimpleAtoi(piece, &coordinate_value)) {
         return InvalidArgument(
-            "could not parse coordinate member as int64: \"%s\"",
+            "could not parse coordinate member as int64_t: \"%s\"",
             std::string(piece));
       }
       coordinate_values.push_back(coordinate_value);

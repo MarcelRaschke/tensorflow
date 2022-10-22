@@ -16,7 +16,6 @@ limitations under the License.
 #include <memory>
 #include <utility>
 
-#include "absl/memory/memory.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
@@ -26,7 +25,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/literal_test_util.h"
 #include "tensorflow/compiler/xla/tests/test_macros.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/platform/test.h"
+#include "tensorflow/tsl/platform/test.h"
 
 namespace xla {
 namespace {
@@ -173,7 +172,7 @@ TEST_F(BroadcastTest, Broadcast_R1_2_To_R4_2x2x3x3) {
 TEST_F(BroadcastTest, Broadcast_R1_1025_To_R4_3x3x3x1025) {
   auto builder = HloComputation::Builder(TestName());
   std::vector<float> input_data(1025);
-  int64 r1_size = input_data.size();
+  int64_t r1_size = input_data.size();
   std::iota(input_data.begin(), input_data.end(), 0.0f);
   auto input = builder.AddInstruction(
       HloInstruction::CreateConstant(LiteralUtil::CreateR1<float>(input_data)));
@@ -189,8 +188,8 @@ TEST_F(BroadcastTest, Broadcast_R1_1025_To_R4_3x3x3x1025) {
 
   Array4D<float> expected(3, 3, 3, 1025);
   Array2D<float> yx(3, r1_size);
-  for (int64 y = 0; y < 3; ++y) {
-    for (int64 x = 0; x < r1_size; ++x) {
+  for (int64_t y = 0; y < 3; ++y) {
+    for (int64_t x = 0; x < r1_size; ++x) {
       yx(y, x) = input_data[x];
     }
   }

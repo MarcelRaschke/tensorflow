@@ -16,6 +16,7 @@ limitations under the License.
 #include "tensorflow/compiler/xla/array2d.h"
 
 #include <initializer_list>
+#include <string>
 
 #include "tensorflow/compiler/xla/test.h"
 
@@ -42,8 +43,8 @@ TEST(Array2dTest, FillCtor) {
   EXPECT_EQ(fullof7.n1(), 2);
   EXPECT_EQ(fullof7.n2(), 3);
 
-  for (int64 n1 = 0; n1 < fullof7.n1(); ++n1) {
-    for (int64 n2 = 0; n2 < fullof7.n2(); ++n2) {
+  for (int64_t n1 = 0; n1 < fullof7.n1(); ++n1) {
+    for (int64_t n2 = 0; n2 < fullof7.n2(); ++n2) {
       EXPECT_EQ(fullof7(n1, n2), 7);
     }
   }
@@ -111,15 +112,15 @@ TEST(Array2dTest, IndexingReadWriteBool) {
 
 TEST(Array2dTest, Fill) {
   Array2D<int> fullof7(2, 3, 7);
-  for (int64 n1 = 0; n1 < fullof7.n1(); ++n1) {
-    for (int64 n2 = 0; n2 < fullof7.n2(); ++n2) {
+  for (int64_t n1 = 0; n1 < fullof7.n1(); ++n1) {
+    for (int64_t n2 = 0; n2 < fullof7.n2(); ++n2) {
       EXPECT_EQ(fullof7(n1, n2), 7);
     }
   }
 
   fullof7.Fill(11);
-  for (int64 n1 = 0; n1 < fullof7.n1(); ++n1) {
-    for (int64 n2 = 0; n2 < fullof7.n2(); ++n2) {
+  for (int64_t n1 = 0; n1 < fullof7.n1(); ++n1) {
+    for (int64_t n2 = 0; n2 < fullof7.n2(); ++n2) {
       EXPECT_EQ(fullof7(n1, n2), 11);
     }
   }
@@ -147,7 +148,7 @@ TEST(Array2dTest, Linspace) {
 
 TEST(Array2dTest, Stringification) {
   auto arr = MakeLinspaceArray2D(1.0, 3.5, 3, 2);
-  const string expected = R"([[1, 1.5],
+  const std::string expected = R"([[1, 1.5],
  [2, 2.5],
  [3, 3.5]])";
   EXPECT_EQ(expected, arr->ToString());

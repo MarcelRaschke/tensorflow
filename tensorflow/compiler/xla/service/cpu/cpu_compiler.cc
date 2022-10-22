@@ -18,18 +18,23 @@ limitations under the License.
 #include <stddef.h>
 #include <string.h>
 
+#include <functional>
 #include <map>
 #include <memory>
+#include <stack>
 #include <string>
-#include <unordered_map>
+#include <tuple>
 #include <utility>
 #include <vector>
 
 // IWYU pragma: no_include "llvm/Config/Disassemblers.def.inc"
 // IWYU pragma: no_include "llvm/Config/Targets.def.inc"
+
 #include "absl/base/call_once.h"
-#include "absl/memory/memory.h"
+#include "absl/container/flat_hash_map.h"
 #include "absl/strings/str_cat.h"
+#include "llvm/ADT/ArrayRef.h"
+#include "llvm/ADT/STLExtras.h"
 #include "llvm/ADT/StringRef.h"
 #include "llvm/ADT/Triple.h"
 #include "llvm/IR/Function.h"
@@ -37,31 +42,79 @@ limitations under the License.
 #include "llvm/IR/Mangler.h"
 #include "llvm/IR/Module.h"
 #include "llvm/IR/Verifier.h"
+#include "llvm/MC/TargetRegistry.h"
 #include "llvm/Object/ObjectFile.h"
+#include "llvm/Support/CodeGen.h"
 #include "llvm/Support/CommandLine.h"
 #include "llvm/Support/Error.h"
-#include "llvm/Support/TargetRegistry.h"
 #include "llvm/Support/TargetSelect.h"
 #include "llvm/Target/TargetMachine.h"
 #include "llvm/Target/TargetOptions.h"
+#include "mlir/Conversion/AffineToStandard/AffineToStandard.h"  // from @llvm-project
+#include "mlir/Conversion/ArithmeticToLLVM/ArithmeticToLLVM.h"  // from @llvm-project
+#include "mlir/Conversion/BufferizationToMemRef/BufferizationToMemRef.h"  // from @llvm-project
+#include "mlir/Conversion/ComplexToStandard/ComplexToStandard.h"  // from @llvm-project
+#include "mlir/Conversion/FuncToLLVM/ConvertFuncToLLVMPass.h"  // from @llvm-project
+#include "mlir/Conversion/MathToLLVM/MathToLLVM.h"  // from @llvm-project
+#include "mlir/Conversion/MemRefToLLVM/MemRefToLLVM.h"  // from @llvm-project
+#include "mlir/Conversion/ReconcileUnrealizedCasts/ReconcileUnrealizedCasts.h"  // from @llvm-project
+#include "mlir/Conversion/SCFToControlFlow/SCFToControlFlow.h"  // from @llvm-project
+#include "mlir/Conversion/ShapeToStandard/ShapeToStandard.h"  // from @llvm-project
+#include "mlir/Conversion/TensorToLinalg/TensorToLinalgPass.h"  // from @llvm-project
+#include "mlir/Conversion/VectorToSCF/VectorToSCF.h"  // from @llvm-project
 #include "mlir/Dialect/Affine/IR/AffineOps.h"  // from @llvm-project
+#include "mlir/Dialect/Arithmetic/IR/Arithmetic.h"  // from @llvm-project
+#include "mlir/Dialect/Arithmetic/Transforms/Passes.h"  // from @llvm-project
+#include "mlir/Dialect/Bufferization/Transforms/Bufferize.h"  // from @llvm-project
+#include "mlir/Dialect/Bufferization/Transforms/Passes.h"  // from @llvm-project
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
+#include "mlir/Dialect/Func/Transforms/Passes.h"  // from @llvm-project
 #include "mlir/Dialect/LLVMIR/LLVMDialect.h"  // from @llvm-project
-#include "mlir/Dialect/Linalg/IR/LinalgTypes.h"  // from @llvm-project
-#include "mlir/Dialect/SCF/SCF.h"  // from @llvm-project
-#include "mlir/Dialect/StandardOps/IR/Ops.h"  // from @llvm-project
-#include "mlir/Dialect/Vector/VectorOps.h"  // from @llvm-project
-#include "mlir/InitAllDialects.h"  // from @llvm-project
+#include "mlir/Dialect/LLVMIR/LLVMTypes.h"  // from @llvm-project
+#include "mlir/Dialect/Linalg/IR/Linalg.h"  // from @llvm-project
+#include "mlir/Dialect/Linalg/Passes.h"  // from @llvm-project
+#include "mlir/Dialect/MemRef/Transforms/Passes.h"  // from @llvm-project
+#include "mlir/Dialect/SCF/IR/SCF.h"  // from @llvm-project
+#include "mlir/Dialect/Shape/Transforms/Passes.h"  // from @llvm-project
+#include "mlir/Dialect/Tensor/IR/Tensor.h"  // from @llvm-project
+#include "mlir/Dialect/Vector/IR/VectorOps.h"  // from @llvm-project
+#include "mlir/IR/Builders.h"  // from @llvm-project
+#include "mlir/IR/BuiltinAttributes.h"  // from @llvm-project
+#include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
+#include "mlir/IR/ImplicitLocOpBuilder.h"  // from @llvm-project
+#include "mlir/Pass/PassManager.h"  // from @llvm-project
+#include "mlir/Target/LLVMIR/Dialect/LLVMIR/LLVMToLLVMIRTranslation.h"  // from @llvm-project
+#include "mlir/Target/LLVMIR/Export.h"  // from @llvm-project
+#include "mlir/Target/LLVMIR/LLVMTranslationInterface.h"  // from @llvm-project
+#include "mlir/Transforms/Passes.h"  // from @llvm-project
+#include "tensorflow/compiler/mlir/xla/hlo_to_mlir_hlo.h"
+#include "tensorflow/compiler/mlir/xla/hlo_utils.h"
+#include "tensorflow/compiler/mlir/xla/ir/xla_framework.h"
+#include "tensorflow/compiler/mlir/xla/transforms/xla_passes.h"
 #include "tensorflow/compiler/xla/cpu_function_runtime.h"
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/map_util.h"
+#include "tensorflow/compiler/xla/mlir/transforms/cpu/passes.h"
+#include "tensorflow/compiler/xla/mlir/transforms/runtime/calling_convention.h"
+#include "tensorflow/compiler/xla/mlir/transforms/runtime/compilation_pipeline_cpu.h"
+#include "tensorflow/compiler/xla/mlir_hlo/include/mlir-hlo/Dialect/gml_st/transforms/passes.h"
+#include "tensorflow/compiler/xla/mlir_hlo/include/mlir-hlo/Dialect/mhlo/IR/hlo_ops.h"
+#include "tensorflow/compiler/xla/mlir_hlo/include/mlir-hlo/Dialect/mhlo/transforms/passes.h"
+#include "tensorflow/compiler/xla/mlir_hlo/include/mlir-hlo/Transforms/passes.h"
 #include "tensorflow/compiler/xla/protobuf_util.h"
+#include "tensorflow/compiler/xla/runtime/executable.h"
+#include "tensorflow/compiler/xla/runtime/jit_executable.h"
 #include "tensorflow/compiler/xla/service/algebraic_simplifier.h"
 #include "tensorflow/compiler/xla/service/all_gather_decomposer.h"
 #include "tensorflow/compiler/xla/service/all_to_all_decomposer.h"
 #include "tensorflow/compiler/xla/service/batch_dot_simplification.h"
 #include "tensorflow/compiler/xla/service/batchnorm_expander.h"
+#include "tensorflow/compiler/xla/service/bfloat16_normalization.h"
+#include "tensorflow/compiler/xla/service/bitcast_dtypes_expander.h"
+#include "tensorflow/compiler/xla/service/broadcast_canonicalizer.h"
 #include "tensorflow/compiler/xla/service/buffer_assignment.h"
 #include "tensorflow/compiler/xla/service/call_inliner.h"
+#include "tensorflow/compiler/xla/service/change_op_data_type.h"
 #include "tensorflow/compiler/xla/service/cholesky_expander.h"
 #include "tensorflow/compiler/xla/service/comparison_expander.h"
 #include "tensorflow/compiler/xla/service/conditional_canonicalizer.h"
@@ -76,7 +129,9 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/cpu/cpu_instruction_fusion.h"
 #include "tensorflow/compiler/xla/service/cpu/cpu_layout_assignment.h"
 #include "tensorflow/compiler/xla/service/cpu/cpu_options.h"
+#include "tensorflow/compiler/xla/service/cpu/cpu_shape_verifier.h"
 #include "tensorflow/compiler/xla/service/cpu/dot_op_emitter.h"
+#include "tensorflow/compiler/xla/service/cpu/hlo_xla_runtime_pipeline.h"
 #include "tensorflow/compiler/xla/service/cpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/cpu/ir_emitter.h"
 #include "tensorflow/compiler/xla/service/cpu/parallel_task_assignment.h"
@@ -84,19 +139,22 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/dfs_hlo_visitor_with_default.h"
 #include "tensorflow/compiler/xla/service/dot_decomposer.h"
 #include "tensorflow/compiler/xla/service/dump.h"
+#include "tensorflow/compiler/xla/service/dynamic_dimension_simplifier.h"
 #include "tensorflow/compiler/xla/service/dynamic_index_splitter.h"
 #include "tensorflow/compiler/xla/service/dynamic_padder.h"
 #include "tensorflow/compiler/xla/service/eigh_expander.h"
 #include "tensorflow/compiler/xla/service/flatten_call_graph.h"
 #include "tensorflow/compiler/xla/service/gather_expander.h"
 #include "tensorflow/compiler/xla/service/hlo.pb.h"
+#include "tensorflow/compiler/xla/service/hlo_casting_utils.h"
 #include "tensorflow/compiler/xla/service/hlo_computation.h"
 #include "tensorflow/compiler/xla/service/hlo_constant_folding.h"
 #include "tensorflow/compiler/xla/service/hlo_cse.h"
 #include "tensorflow/compiler/xla/service/hlo_dce.h"
-#include "tensorflow/compiler/xla/service/hlo_element_type_converter.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
+#include "tensorflow/compiler/xla/service/hlo_instructions.h"
 #include "tensorflow/compiler/xla/service/hlo_memory_scheduler.h"
+#include "tensorflow/compiler/xla/service/hlo_module.h"
 #include "tensorflow/compiler/xla/service/hlo_opcode.h"
 #include "tensorflow/compiler/xla/service/hlo_ordering.h"
 #include "tensorflow/compiler/xla/service/hlo_pass_fix.h"
@@ -106,18 +164,28 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_verifier.h"
 #include "tensorflow/compiler/xla/service/indexed_array_analysis.h"
 #include "tensorflow/compiler/xla/service/llvm_compiler.h"
+#include "tensorflow/compiler/xla/service/llvm_ir/llvm_command_line_options.h"
 #include "tensorflow/compiler/xla/service/llvm_ir/llvm_util.h"
 #include "tensorflow/compiler/xla/service/logistic_expander.h"
 #include "tensorflow/compiler/xla/service/map_inliner.h"
 #include "tensorflow/compiler/xla/service/operand_upcaster.h"
+#include "tensorflow/compiler/xla/service/optimization_barrier_expander.h"
 #include "tensorflow/compiler/xla/service/qr_expander.h"
+#include "tensorflow/compiler/xla/service/reduce_decomposer.h"
+#include "tensorflow/compiler/xla/service/reduce_scatter_decomposer.h"
+#include "tensorflow/compiler/xla/service/reshape_decomposer.h"
 #include "tensorflow/compiler/xla/service/reshape_mover.h"
+#include "tensorflow/compiler/xla/service/result_caster.h"
 #include "tensorflow/compiler/xla/service/rng_bit_generator_expander.h"
 #include "tensorflow/compiler/xla/service/rng_expander.h"
 #include "tensorflow/compiler/xla/service/scatter_expander.h"
+#include "tensorflow/compiler/xla/service/select_and_scatter_expander.h"
+#include "tensorflow/compiler/xla/service/sharding_propagation.h"
+#include "tensorflow/compiler/xla/service/sharding_remover.h"
 #include "tensorflow/compiler/xla/service/slice_sinker.h"
 #include "tensorflow/compiler/xla/service/slow_operation_alarm.h"
 #include "tensorflow/compiler/xla/service/sort_simplifier.h"
+#include "tensorflow/compiler/xla/service/spmd/stateful_rng_spmd_partitioner.h"
 #include "tensorflow/compiler/xla/service/topk_rewriter.h"
 #include "tensorflow/compiler/xla/service/transpose_folding.h"
 #include "tensorflow/compiler/xla/service/tree_reduction_rewriter.h"
@@ -129,10 +197,13 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/zero_sized_hlo_elimination.h"
 #include "tensorflow/compiler/xla/status_macros.h"
 #include "tensorflow/compiler/xla/statusor.h"
+#include "tensorflow/compiler/xla/stream_executor/host/host_platform_id.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/platform/dynamic_annotations.h"
+#include "tensorflow/core/protobuf/error_codes.pb.h"
+#include "tensorflow/tsl/platform/errors.h"
+#include "tensorflow/tsl/platform/status.h"
 
 namespace {
 
@@ -142,20 +213,75 @@ namespace {
 // Hopefully this will all go away at some point in favor of a better
 // integration.
 void LoadMLIRDialects(mlir::MLIRContext& context) {
-  context.loadDialect<mlir::linalg::LinalgDialect, mlir::scf::SCFDialect,
-                      mlir::vector::VectorDialect, mlir::StandardOpsDialect,
-                      mlir::AffineDialect>();
+  context.loadDialect<mlir::arith::ArithmeticDialect,
+                      mlir::linalg::LinalgDialect, mlir::scf::SCFDialect,
+                      mlir::vector::VectorDialect, mlir::func::FuncDialect,
+                      mlir::AffineDialect, mlir::tensor::TensorDialect,
+                      mlir::xla_framework::XLAFrameworkDialect>();
+  mlir::registerLLVMDialectTranslation(context);
 }
 
 }  // namespace
 
 namespace xla {
+
+namespace {
+
+bool UseMlirHloLowering(bool use_mlir, HloModule* module) {
+  // TODO(tpopp): The prototype currently does not properly handle constant
+  // buffers that are handled by the runtime's buffer assignmen.
+  return use_mlir &&
+         module->entry_computation()->root_instruction()->opcode() !=
+             HloOpcode::kConstant;
+}
+
+// For each computation in the module, determines whether that computation
+// calls a custom-call function, either directly or indirectly (e.g. because it
+// calls another computation that does).
+absl::flat_hash_map<const HloComputation*, bool>
+ModuleComputationsTransitivelyContainCustomCall(const HloModule& module) {
+  absl::flat_hash_map<const HloComputation*, bool> custom_call_map;
+  std::unique_ptr<CallGraph> call_graph = CallGraph::Build(&module);
+
+  // Can never fail because we always return an OK status from the visitor.
+  TF_CHECK_OK(call_graph->VisitNodes([&custom_call_map](
+                                         const CallGraphNode& node) {
+    const HloComputation* computation = node.computation();
+
+    for (const HloInstruction* instruction : computation->instructions()) {
+      // The computation contains a custom-call instruction directly.
+      if (DynCast<HloCustomCallInstruction>(instruction)) {
+        custom_call_map[computation] = true;
+        return OkStatus();
+      }
+      // The computation calls something that contains a custom-call
+      // instruction (directly or indirectly). This lookup relies on the call
+      // graph traversing callees before callers, so that the map is always
+      // populated for all callees at this point.
+      for (const HloComputation* callee : instruction->called_computations()) {
+        bool callee_contains_custom_call = FindOrDie(custom_call_map, callee);
+        if (callee_contains_custom_call) {
+          custom_call_map[computation] = true;
+          return OkStatus();
+        }
+      }
+    }
+
+    custom_call_map[computation] = false;
+    return OkStatus();
+  }));
+
+  return custom_call_map;
+}
+
+}  // namespace
+
 namespace cpu {
 using BufferInfo = cpu_function_runtime::BufferInfo;
 
 CpuAotCompilationOptions::CpuAotCompilationOptions(
-    string triple, string cpu_name, string features, string entry_point_name,
-    RelocationModel relocation_model)
+    std::string triple, std::string cpu_name, std::string features,
+    std::string entry_point_name, RelocationModel relocation_model)
     : triple_(std::move(triple)),
       cpu_name_(std::move(cpu_name)),
       features_(std::move(features)),
@@ -170,7 +296,7 @@ se::Platform::Id CpuAotCompilationOptions::PlatformId() const {
 
 CpuAotCompilationResult::CpuAotCompilationResult(
     ObjectFileData object_file_data, std::vector<BufferInfo> buffer_infos,
-    int64 result_buffer_index,
+    int64_t result_buffer_index,
     std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data)
     : object_file_data_(std::move(object_file_data)),
       buffer_infos_(std::move(buffer_infos)),
@@ -221,12 +347,12 @@ absl::once_flag llvm_command_line_options_initialized;
 // recorded.
 class CollectProfileCandidates : public DfsHloVisitorWithDefault {
  public:
-  static StatusOr<std::unordered_map<const HloInstruction*, int64>>
+  static StatusOr<absl::flat_hash_map<const HloInstruction*, int64_t>>
   GetCandidatesForComputation(
       const HloComputation& computation,
-      const std::unordered_map<const HloInstruction*, int64>&
+      const absl::flat_hash_map<const HloInstruction*, int64_t>&
           assigned_indices) {
-    std::unordered_map<const HloInstruction*, int64> hlo_to_profile_idx;
+    absl::flat_hash_map<const HloInstruction*, int64_t> hlo_to_profile_idx;
     CollectProfileCandidates profile_candidates_for_computation(
         &hlo_to_profile_idx, assigned_indices);
     TF_RETURN_IF_ERROR(computation.Accept(&profile_candidates_for_computation));
@@ -235,15 +361,16 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
 
  private:
   CollectProfileCandidates(
-      std::unordered_map<const HloInstruction*, int64>* hlo_to_profile_idx,
-      const std::unordered_map<const HloInstruction*, int64>& assigned_indices)
+      absl::flat_hash_map<const HloInstruction*, int64_t>* hlo_to_profile_idx,
+      const absl::flat_hash_map<const HloInstruction*, int64_t>&
+          assigned_indices)
       : hlo_to_profile_idx_(hlo_to_profile_idx),
         assigned_indices_(assigned_indices) {}
 
   Status DefaultAction(HloInstruction* hlo_instruction) override {
     hlo_to_profile_idx_->insert(
         {hlo_instruction, FindOrDie(assigned_indices_, hlo_instruction)});
-    return Status::OK();
+    return OkStatus();
   }
 
   Status HandleCall(HloInstruction* call) override {
@@ -251,13 +378,29 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
     CollectProfileCandidates candidates_for_call(hlo_to_profile_idx_,
                                                  assigned_indices_);
     TF_RETURN_IF_ERROR(call->to_apply()->Accept(&candidates_for_call));
-    return Status::OK();
+    return OkStatus();
+  }
+  // Recurse into "conditional" so we can profile inside of it.
+  Status HandleConditional(HloInstruction* conditional) override {
+    TF_RETURN_IF_ERROR(DefaultAction(conditional));
+
+    CollectProfileCandidates candidates_for_true(hlo_to_profile_idx_,
+                                                 assigned_indices_);
+    TF_RETURN_IF_ERROR(
+        conditional->true_computation()->Accept(&candidates_for_true));
+
+    CollectProfileCandidates candidates_for_false(hlo_to_profile_idx_,
+                                                  assigned_indices_);
+    TF_RETURN_IF_ERROR(
+        conditional->false_computation()->Accept(&candidates_for_false));
+
+    return OkStatus();
   }
 
   // Skip constants, there is nothing to profile.
-  Status HandleConstant(HloInstruction*) override { return Status::OK(); }
+  Status HandleConstant(HloInstruction*) override { return OkStatus(); }
   // Skip parameters, they are a simple load.
-  Status HandleParameter(HloInstruction*) override { return Status::OK(); }
+  Status HandleParameter(HloInstruction*) override { return OkStatus(); }
   // It is important to recurse for "while" or else we risk overly coarse
   // profiling information.
   Status HandleWhile(HloInstruction* xla_while) override {
@@ -272,23 +415,61 @@ class CollectProfileCandidates : public DfsHloVisitorWithDefault {
                                                  assigned_indices_);
     TF_RETURN_IF_ERROR(xla_while->while_body()->Accept(&candidates_for_body));
 
-    return Status::OK();
+    return OkStatus();
   }
 
-  std::unordered_map<const HloInstruction*, int64>* hlo_to_profile_idx_;
-  const std::unordered_map<const HloInstruction*, int64>& assigned_indices_;
+  absl::flat_hash_map<const HloInstruction*, int64_t>* hlo_to_profile_idx_;
+  const absl::flat_hash_map<const HloInstruction*, int64_t>& assigned_indices_;
 };
+
+// Adds the HloVerifier for CPU to the given pipeline.
+void AddHloVerifier(HloPassPipeline* pipeline, HloVerifierOpts&& opts = {},
+                    bool debug_only = false) {
+  std::unique_ptr<TargetVerifierMetadata> verifier_metadata =
+      std::make_unique<CpuVerifierMetadata>(std::move(opts));
+  if (debug_only) {
+    pipeline->AddInvariantCheckerDebug<HloVerifier>(
+        std::move(verifier_metadata), "hlo verifier (debug)");
+  } else {
+    pipeline->AddInvariantChecker<HloVerifier>(std::move(verifier_metadata),
+                                               "hlo verifier");
+  }
+}
 
 }  // namespace
 
 Status CpuCompiler::RunHloPassesThroughLayoutAssn(
     HloModule* module, bool /*is_aot_compile*/,
-    LLVMTargetMachineFeatures* target_machine_features) {
+    LLVMTargetMachineFeatures* target_machine_features, bool is_mlir_compile) {
+  if (module->config().use_spmd_partitioning()) {
+    HloPassPipeline spmd_pipeline("spmd-partitioner");
+    const int64_t num_partitions = module->config().num_partitions();
+    if (num_partitions > 1) {
+      // Run some IR cleanup passes before running the SPMD partitioning
+      // passes.
+      AddHloVerifier(&spmd_pipeline);
+      spmd_pipeline.AddPass<CallInliner>();
+      spmd_pipeline.AddPass<ZeroSizedHloElimination>();
+      spmd_pipeline.AddPass<ConditionalCanonicalizer>();
+
+      spmd_pipeline.AddPass<ShardingPropagation>(
+          /*is_spmd=*/true, /*propagate_metadata=*/false,
+          module->config().allow_spmd_sharding_propagation_to_output());
+      spmd_pipeline.AddPass<spmd::StatefulRngSpmdPartitioner>(
+          num_partitions, module->config().replica_count());
+    } else {
+      // Remove redundant sharding ops when partition_count == 1.
+      spmd_pipeline.AddPass<ShardingRemover>();
+      spmd_pipeline.AddPass<HloDCE>();
+    }
+    TF_RETURN_IF_ERROR(spmd_pipeline.Run(module).status());
+  }
+
   HloPassPipeline pipeline("HLO passes through layout assignment");
-  pipeline.AddInvariantChecker<HloVerifier>(/*layout_sensitive=*/false,
-                                            /*allow_mixed_precision=*/false);
+  AddHloVerifier(&pipeline);
 
   pipeline.AddPass<OperandUpcaster>();
+  pipeline.AddPass<ResultCaster>();
 
   // Expand random number generation.
   pipeline.AddPass<RngExpander>();
@@ -310,6 +491,7 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<TriangularSolveExpander>();
   pipeline.AddPass<AllGatherDecomposer>();
   pipeline.AddPass<AllToAllDecomposer>();
+  pipeline.AddPass<ReduceScatterDecomposer>();
 
   // Inline computations with a single call site.
   pipeline.AddPass<CallInliner>(/*single_call_site=*/true);
@@ -318,7 +500,8 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   // Convert BF16 operations to F32 operations so that the CPU backend can
   // support BF16 operations without directly implementing a BF16 lowering for
   // most ops.
-  pipeline.AddPass<HloElementTypeConverter>(BF16, F32);
+  BFloat16Support bf16;
+  pipeline.AddPass<BFloat16Normalization>(&bf16);
   // After canonicalization, there may be more batch dots that can be
   // simplified.
   pipeline.AddPass<BatchDotSimplification>();
@@ -327,10 +510,19 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
     return false;
   };
   pipeline.AddPass<ConvolutionGroupConverter>(
-      cost_model,
+      /*should_expand=*/[](HloInstruction* conv) { return true; }, cost_model,
       /*convert_batch_groups_only=*/true);
+  auto feature_group_should_expand = [](HloInstruction* conv) {
+    switch (conv->shape().element_type()) {
+      case F16:
+      case F32:
+        return false;
+      default:
+        return true;
+    }
+  };
   pipeline.AddPass<ConvolutionGroupConverter>(
-      cost_model,
+      feature_group_should_expand, cost_model,
       /*convert_batch_groups_only=*/false);
   pipeline.AddPass<BatchNormExpander>(
       /*rewrite_training_op=*/true,
@@ -339,100 +531,161 @@ Status CpuCompiler::RunHloPassesThroughLayoutAssn(
   pipeline.AddPass<LogisticExpander>(
       /*expansion_type=*/LogisticExpansionType::kExp);
   pipeline.AddPass<ConditionalCanonicalizer>();
-  pipeline.AddPass<DynamicPadder>();
+  pipeline.AddPass<DynamicDimensionSimplifier>();
+  auto dynamic_padder_options = DynamicPadderOptions();
+  dynamic_padder_options.shape_check_mode =
+      DynamicDimensionInference::ShapeCheckMode::kCompileTime;
+  pipeline.AddPass<DynamicPadder>(dynamic_padder_options);
+  pipeline.AddPass<SelectAndScatterExpander>();
   pipeline.AddPass<ScatterExpander>(ScatterExpander::kEliminateAllScatters);
   pipeline.AddPass<ConvCanonicalization>(target_machine_features);
-  {
-    auto& pass =
-        pipeline.AddPass<HloPassFix<HloPassPipeline>>("simplification");
-    pass.AddInvariantCheckerDebug<HloVerifier>(/*layout_sensitive=*/false,
-                                               /*allow_mixed_precision=*/false);
 
-    pass.AddPass<TreeReductionRewriter>();
+  // Run fp16 dots/convs in fp32 and then downcast the result to fp16.
+  // Justification:
+  //
+  //   - This is significantly faster on our CPUs today than true fp16.
+  //   - It's numerically more accurate.  (Granted, this is not always
+  //     desirable, thus the ability to disable this functionality.)
+  //   - It matches more closely the GPU's behavior on fp16 dot/conv, where
+  //     accumulation happens in f32.
+  if (!module->config().debug_options().xla_cpu_strict_dot_conv_math()) {
+    pipeline.AddPass<ChangeOpDataType>(
+        F16, F32, [](const HloInstruction* instr) {
+          return instr->opcode() == HloOpcode::kDot ||
+                 instr->opcode() == HloOpcode::kConvolution;
+        });
+  }
+
+  // Run the following passes to a fixed point.
+  [&pipeline =
+       pipeline.AddPass<HloPassFix<HloPassPipeline>>("simplification")] {
+    AddHloVerifier(&pipeline, HloVerifierOpts{}, /*debug_only=*/true);
+
     AlgebraicSimplifierOptions options;
     options.set_enable_dot_strength_reduction(false);
-    pass.AddPass<AlgebraicSimplifier>(options);
-    pass.AddPass<SortSimplifier>();
-    pass.AddPass<HloDCE>();
-    pass.AddPass<GatherExpander>(GatherExpander::kEliminateSimpleGathers);
+    // TODO(b/209827141): XLA:CPU doesn't propagate NaN through min/max, but
+    // other platforms do, so it should be changed.
+    options.set_minmax_propagate_nan(false);
+    pipeline.AddPass<AlgebraicSimplifier>(options);
+    pipeline.AddPass<SortSimplifier>();
+    pipeline.AddPass<HloDCE>();
+    pipeline.AddPass<GatherExpander>(GatherExpander::kEliminateSimpleGathers);
+
+    // Needs to happen after algebraic simplifier.
+    pipeline.AddPass<TreeReductionRewriter>();
 
     // BatchNormExpander can create zero-sized ops, so zero-sized HLO
     // elimination has to come after that pass.
-    pass.AddPass<ZeroSizedHloElimination>();
+    pipeline.AddPass<ZeroSizedHloElimination>();
 
-    pass.AddPass<WhileLoopInvariantCodeMotion>();
-    pass.AddPass<TupleSimplifier>();
-    pass.AddPass<WhileLoopConstantSinking>();
-    pass.AddPass<WhileLoopSimplifier>();
+    pipeline.AddPass<WhileLoopInvariantCodeMotion>();
+    pipeline.AddPass<TupleSimplifier>();
+    pipeline.AddPass<WhileLoopConstantSinking>();
+    pipeline.AddPass<WhileLoopSimplifier>();
 
     // TODO(b/134075051): Re-enable after b/134075051 is fixed.
-    // pass.AddPass<SliceSinker>();
+    // pipeline.AddPass<SliceSinker>();
 
-    pass.AddPass<HloDCE>();
-    pass.AddPass<ReshapeMover>();
-    pass.AddPass<HloConstantFolding>();
-    pass.AddPass<ConditionalSimplifier>();
+    pipeline.AddPass<HloDCE>();
+    pipeline.AddPass<ReshapeMover>();
+    pipeline.AddPass<HloConstantFolding>();
+    pipeline.AddPass<ConditionalSimplifier>();
+  }();
+  pipeline.AddPass<BitcastDtypesExpander>();
+
+  // XLA lowers topk to a libcall while the MLIR based pipeline does not yet
+  // support libcalls. Disable this for now.
+  if (!is_mlir_compile) {
+    pipeline.AddPass<TopkRewriter>([](const HloSortInstruction* sort, int64_t) {
+      return sort->operand(0)->shape().element_type() == F32;
+    });
   }
-  pipeline.AddPass<TopkRewriter>([](const HloSortInstruction* sort, int64) {
-    return sort->operand(0)->shape().element_type() == F32;
-  });
   pipeline.AddPass<IndexedArrayAnalysisPrinterPass>();
   pipeline.AddPass<TransposeFolding>(
-      [&](const HloInstruction& dot,
-          const TransposeFolding::OperandIndices& candidate_operands) {
-        return DotImplementationCanHandleTranspose(dot,
-                                                   *target_machine_features)
-                   ? candidate_operands
-                   : TransposeFolding::OperandIndices{};
+      [&](const HloInstruction& dot, int64_t operand) -> StatusOr<bool> {
+        if (DotImplementationCanHandleTranspose(dot,
+                                                *target_machine_features)) {
+          return TransposeFolding::IsRowColumnTransposeDotOperand(dot, operand);
+        }
+        return false;
       },
       TransposeFolding::NeverFoldTranspose);
   pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/false);
 
+  pipeline.AddPass<OptimizationBarrierExpander>();
+  pipeline.AddPass<TupleSimplifier>();
+
   // Layout assignment uses alias analysis, which requires the call graph to be
   // flattened.
   pipeline.AddPass<FlattenCallGraph>();
-  pipeline.AddPass<CpuLayoutAssignment>(
-      module->mutable_entry_computation_layout(),
-      LayoutAssignment::InstructionCanChangeLayout, target_machine_features);
-
-  pipeline.AddPass<CpuInstructionFusion>();
+  ChannelLayoutConstraints layout_constraints;
+  // The MLIR pipeline always uses default layouts.
+  if (!is_mlir_compile) {
+    pipeline.AddPass<CpuLayoutAssignment>(
+        module->mutable_entry_computation_layout(), target_machine_features,
+        &layout_constraints);
+  }
 
   return pipeline.Run(module).status();
 }
 
 Status CpuCompiler::RunHloPassesAfterLayoutAssn(
     HloModule* module, bool is_aot_compile,
-    LLVMTargetMachineFeatures* target_machine_features) {
-  HloPassPipeline pipeline("HLO passes after layout assignment");
-  // After layout assignment, use a layout-sensitive verifier.
+    LLVMTargetMachineFeatures* target_machine_features, bool is_mlir_compile) {
+  {
+    HloPassPipeline pipeline("hlo normalization");
+    pipeline.AddPass<ReshapeDecomposer>();
+    pipeline.AddPass<ReduceDecomposer>();
+    pipeline.AddPass<BroadcastCanonicalizer>();
+    TF_RETURN_IF_ERROR(pipeline.Run(module).status());
+  }
 
-  pipeline.AddPass<HloPassPipeline>("after layout assignment")
-      .AddInvariantCheckerDebug<HloVerifier>(
-          /*layout_sensitive=*/true,
-          /*allow_mixed_precision=*/false);
+  HloPassPipeline pipeline("HLO passes after layout assignment");
+
+  // CopyInsertion is still needed by BufferAssignment. MLIR passes will handle
+  // everything else done by XLA, but CopyInsertion is needed to interface with
+  // the existing runtime.
+  if (is_mlir_compile) {
+    pipeline.AddPass<CopyInsertion>();
+    return pipeline.Run(module).status();
+  }
+
+  // After layout assignment, use a layout-sensitive verifier.
+  pipeline.AddPass<HloPassPipeline>("after layout assignment");
+  AddHloVerifier(&pipeline, HloVerifierOpts{}.MakeLayoutSensitive(),
+                 /*debug_only=*/true);
+
+  pipeline.AddPass<ReshapeDecomposer>();
+
+  // Add a fusion pass now that layout assignment is done.
+  pipeline.AddPass<CpuInstructionFusion>();
 
   // The LayoutAssignment pass may leave behind kCopy instructions which are
   // duplicate or NOPs, so remove them with algebraic simplification and CSE.
-  {
-    auto& pass = pipeline.AddPass<HloPassFix<HloPassPipeline>>(
-        "simplification after layout assignment");
-    pass.AddInvariantCheckerDebug<HloVerifier>(
-        /*layout_sensitive=*/true,
-        /*allow_mixed_precision=*/false,
-        LayoutAssignment::InstructionCanChangeLayout);
+  // Run this to a fixed point.
+  [&pipeline = pipeline.AddPass<HloPassFix<HloPassPipeline>>(
+       "simplification after layout assignment")] {
+    AddHloVerifier(
+        &pipeline,
+        HloVerifierOpts{}.MakeLayoutSensitive().WithInstructionCanChangeLayout(
+            LayoutAssignment::InstructionCanChangeLayout),
+        /*debug_only=*/true);
     AlgebraicSimplifierOptions options;
     options.set_is_layout_sensitive(true);
     options.set_enable_dot_strength_reduction(false);
-    pass.AddPass<HloPassFix<AlgebraicSimplifier>>(options);
-    pass.AddPass<HloDCE>();
-    pass.AddPass<HloCSE>(/*is_layout_sensitive=*/true);
-  }
+    // TODO(b/209827141): XLA:CPU doesn't propagate NaN through min/max, but
+    // other platforms do, so it should be changed.
+    options.set_minmax_propagate_nan(false);
+    pipeline.AddPass<AlgebraicSimplifier>(options);
+    pipeline.AddPass<HloDCE>();
+    pipeline.AddPass<HloCSE>(/*is_layout_sensitive=*/true);
+  }();
 
   // Outline ops in the entry computation into calls to subcomputations.
   const int max_parallelism =
       module->config().intra_op_parallelism_threads() > 0
           ? module->config().intra_op_parallelism_threads()
-          : tensorflow::port::NumSchedulableCPUs();
+          : tsl::port::NumSchedulableCPUs();
   if (!is_aot_compile) {
     // Run ParallelTaskAssigner to assign parallel tasks to HLOs in module.
     // Note this is not run for AOT because it would bring in thread pool
@@ -455,19 +708,22 @@ Status CpuCompiler::RunHloPassesAfterLayoutAssn(
 }
 
 Status CpuCompiler::RunHloPasses(HloModule* module, bool is_aot_compile,
-                                 llvm::TargetMachine* target_machine) {
+                                 llvm::TargetMachine* target_machine,
+                                 bool is_mlir_compile) {
   LLVMTargetMachineFeatures target_machine_features(target_machine);
-  TF_RETURN_IF_ERROR(RunHloPassesThroughLayoutAssn(module, is_aot_compile,
-                                                   &target_machine_features));
-  return RunHloPassesAfterLayoutAssn(module, is_aot_compile,
-                                     &target_machine_features);
+  TF_RETURN_IF_ERROR(RunHloPassesThroughLayoutAssn(
+      module, is_aot_compile, &target_machine_features, is_mlir_compile));
+
+  return RunHloPassesAfterLayoutAssn(
+      module, is_aot_compile, &target_machine_features,
+      UseMlirHloLowering(is_mlir_compile, module));
 }
 
 namespace {
 
 // Align buffers to 16-byte boundaries.
-int64 memory_alignment(LogicalBuffer::Color) {
-  return cpu_function_runtime::kMinAlign;
+int64_t memory_alignment(LogicalBuffer::Color) {
+  return cpu_function_runtime::MinAlign();
 }
 
 llvm::TargetOptions CompilerTargetOptions(
@@ -533,18 +789,18 @@ Status VerifyLlvmModule(const llvm::Module& llvm_module) {
       << err_stream.str()
       << "\nThis probably indicates a bug in the HLO -> LLVM IR lowering. "
          "Rerun with --xla_dump_to to get the IR. ";
-  return Status::OK();
+  return OkStatus();
 }
 
 Status CreateHloProfilingArtifacts(
     const HloModule& module,
-    std::unordered_map<const HloInstruction*, int64>*
+    absl::flat_hash_map<const HloInstruction*, int64_t>*
         instruction_to_profile_idx,
-    std::unordered_map<const HloComputation*, int64>*
+    absl::flat_hash_map<const HloComputation*, int64_t>*
         computation_to_profile_idx,
     std::unique_ptr<HloProfileIndexMap>* hlo_profile_index_map,
     std::unique_ptr<HloProfilePrinterData>* hlo_profile_printer_data) {
-  *hlo_profile_index_map = absl::make_unique<HloProfileIndexMap>(module);
+  *hlo_profile_index_map = std::make_unique<HloProfileIndexMap>(module);
   const HloComputation& entry_computation = *module.entry_computation();
 
   TF_ASSIGN_OR_RETURN(
@@ -556,7 +812,7 @@ Status CreateHloProfilingArtifacts(
   auto shape_size_bytes = [](const Shape& shape) {
     // On the cpu, opaques are pointers.
     if (shape.IsOpaque()) {
-      return static_cast<int64>(sizeof(void*));
+      return static_cast<int64_t>(sizeof(void*));
     }
     return ShapeUtil::ByteSizeOf(shape, sizeof(void*));
   };
@@ -568,7 +824,7 @@ Status CreateHloProfilingArtifacts(
   *computation_to_profile_idx =
       (*hlo_profile_index_map)->computation_to_profile_idx();
 
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -581,39 +837,33 @@ StatusOr<std::unique_ptr<HloModule>> CpuCompiler::RunHloPasses(
           CompilerTargetOptions(module->config()),
           CodeGenOptLevel(module->config()));
 
-  TF_RETURN_IF_ERROR(RunHloPasses(module.get(), /*is_aot_compile=*/false,
-                                  jit_target_machine.get()));
+  TF_RETURN_IF_ERROR(RunHloPasses(
+      module.get(), /*is_aot_compile=*/false, jit_target_machine.get(),
+      /*is_mlir_compile=*/
+      module->config().debug_options().xla_cpu_enable_mlir_lowering() ||
+          module->config().debug_options().xla_cpu_use_xla_runtime()));
   return std::move(module);
 }
 
-StatusOr<
-    std::tuple<std::unique_ptr<HloModule>, std::unique_ptr<BufferAssignment>>>
-CpuCompiler::RunHloPassesAndBufferAssignement(std::unique_ptr<HloModule> module,
-                                              se::StreamExecutor* executor,
-                                              bool optimize,
-                                              const CompileOptions& options) {
-  if (optimize) {
-    TF_ASSIGN_OR_RETURN(module,
-                        RunHloPasses(std::move(module), executor, options));
-  }
-
+StatusOr<std::unique_ptr<BufferAssignment>> CpuCompiler::AssignBuffers(
+    const HloModule* module) {
   // Select an order for emitting the HLO instructions for each computation.
   // Using this sequence enables tighter buffer liveness analysis and reduced
   // memory usage (as compared to using DependencyHloOrdering).
   TF_ASSIGN_OR_RETURN(HloSchedule schedule,
-                      ScheduleModule(module.get(), BufferSizeBytesFunction(),
+                      ScheduleModule(module, BufferSizeBytesFunction(),
                                      ComputationSchedulerToModuleScheduler(
                                          DFSMemoryScheduler)));
 
   // Run buffer allocation on the HLO graph.
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<BufferAssignment> assignment,
-      BufferAssigner::Run(module.get(),
-                          absl::make_unique<SequentialHloOrdering>(schedule),
+      BufferAssigner::Run(module,
+                          std::make_unique<SequentialHloOrdering>(schedule),
                           BufferSizeBytesFunction(), memory_alignment,
                           /*allocate_buffers_for_constants=*/true));
 
-  return std::make_tuple(std::move(module), std::move(assignment));
+  return std::move(assignment);
 }
 
 namespace {
@@ -651,22 +901,258 @@ struct OrcJITPostCompilationHook {
   const HloModule* module;
 };
 
+void InitializeLLVMCommandLineOptions(const HloModuleConfig& config) {
+  llvm_ir::InitializeLLVMCommandLineOptions(
+      config.debug_options().xla_backend_extra_options());
+}
+
+Status LowerMLIRModule(mlir::ModuleOp mlir_module,
+                       mlir::MLIRContext& mlir_context) {
+  LoadMLIRDialects(mlir_context);
+  mlir::PassManager pm(&mlir_context);
+  if (VLOG_IS_ON(5)) {
+    mlir_context.disableMultithreading();
+    pm.enableIRPrinting();
+  }
+  // Resolve all shape constraints (e.g. broadcast constraints that can be
+  // proved statically and changed to const witness) early to allow more
+  // efficient broadcast operations moving.
+  // Move up broadcasting operations to allow for more fusion opportunities.
+  pm.addPass(mlir::createInlinerPass());
+  pm.addPass(mlir::mhlo::createExpandHloTuplesPass("main"));
+  // TODO(b/233771980): Remove once custom_call doesn't use tuples.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::mhlo::createFlattenTuplePass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createLegalizeGeneralDotPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createBroadcastPropagationPass());
+  pm.addPass(mlir::createCSEPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+
+  // Transform HLO operations to Linalg.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::mhlo::createLegalizeSortPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createLegalizeControlFlowPass());
+  pm.addPass(::mlir::mhlo::createLegalizeToArithmeticPass());
+  // TODO(kramerb): Give THLO lowerings priority over linalg when it's ready for
+  // concat, reduce and friends.
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createLegalizeHloToLinalgPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::mhlo::createLegalizeMHLOToTHLOPass());
+
+  // Lower index cast on tensors to tensor.generate.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createLowerIndexCastPass());
+
+  pm.addPass(mlir::mhlo::createConvertToSignlessPass());
+
+  // Tile THLO ops.
+  pm.addNestedPass<mlir::func::FuncOp>(createTileThloForCpuPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createComposeSetOpsPass());
+
+  // Lower shape dialect to standard to enable linalg canonicalizations (e.g.
+  // use linalg inputs instead of outputs for memref.dim operations).
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createShapeSimplification());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createShapeToShapeLowering());
+  pm.addPass(mlir::createConvertShapeToStandardPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createConvertShapeConstraintsPass());
+
+  // Fuse Linalg on tensors operations.
+  pm.addPass(mlir::createCSEPass());
+  pm.addPass(mlir::memref::createResolveShapedTypeResultDimsPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createLinalgElementwiseOpFusionPass());
+  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+  pm.addPass(mlir::createConvertTensorToLinalgPass());
+
+  // Detensorize SCF iter args.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createDetensorizeScfOpsPass());
+  // mhlo ops on unit tensors generate trivial linalg.generics, which
+  // one-shot-bufferize generates unnecessary allocs for. The detensorize pass
+  // replaces these linalg.generics with scalar ops.
+  auto detensorize = mlir::createLinalgDetensorizePass();
+  if (detensorize->initializeOptions("aggressive-mode=true").failed()) {
+    return tsl::errors::Internal("Failed to set up detensorize pass.");
+  }
+  pm.addNestedPass<mlir::func::FuncOp>(std::move(detensorize));
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createScalarizationPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createLinalgInitTensorToAllocTensorPass());
+
+  // Always run canonicalizer (which does dead code removal) before
+  // bufferizing anything.
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::hlo::createOneShotBufferizePass());
+
+  // Handle framework specific requirements for buffers and then insert
+  // deallocations for temporary buffers.
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createConvertLinalgToLoopsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::gml_st::createGmlStToScfPass());
+  pm.addPass(mlir::createCSEPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+  pm.addPass(mlir::bufferization::createBufferResultsToOutParamsPass());
+  pm.addPass(mlir::mhlo::CreateOutlineWithXLAFrameworkPass());
+  pm.addPass(mlir::createInlinerPass());
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::bufferization::createBufferDeallocationPass());
+
+  pm.addPass(mlir::createBufferizationToMemRefPass());
+
+  // Specilize linalg.matmul to linalg.dot, linalg.matvec or linalg.vecmat,
+  // and immediately canonicalize to clean up not taken branches.
+  // pm.addNestedPass<mlir::func::FuncOp>(CreateLinalgMatmulSpecializationPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+
+  // Tile and vectorize linalg operation using Linalg Codegen Strategy.
+  // pm.addNestedPass<mlir::func::FuncOp>(CreateCodegenStrategyForMatMulPass());
+
+  // TODO(tpopp): Move hits to mlir::hlo::createGenericHostToLLVMPass?
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createConvertComplexToStandardPass());
+
+  pm.addPass(mlir::createCSEPass());
+  pm.addPass(mlir::createCanonicalizerPass());
+
+  mlir::VectorTransferToSCFOptions vec_to_scf_options;
+  vec_to_scf_options.unroll = true;
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::createConvertVectorToSCFPass(vec_to_scf_options));
+  pm.addNestedPass<mlir::func::FuncOp>(
+      mlir::arith::createArithmeticExpandOpsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::memref::createExpandOpsPass());
+  pm.addNestedPass<mlir::func::FuncOp>(mlir::createLowerAffinePass());
+  pm.addPass(mlir::mhlo::CreateLegalizeXLAFrameworkToLLVMPass());
+  pm.addPass(mlir::hlo::createGenericHostToLLVMPass());
+  pm.addPass(mlir::createReconcileUnrealizedCastsPass());
+  if (pm.run(mlir_module).failed()) {
+    mlir_module->dump();
+    return tsl::errors::Internal("Failed to compile through MLIR pipeline");
+  }
+
+  return OkStatus();
+}
+
+StatusOr<mlir::OwningOpRef<mlir::ModuleOp>> createMLIRModule(
+    HloModule* module, mlir::MLIRContext& mlir_context,
+    BufferAssignment* assignment) {
+  LoadMLIRDialects(mlir_context);
+  mlir::OpBuilder builder(&mlir_context);
+  auto mlir_module = builder.create<mlir::ModuleOp>(builder.getUnknownLoc());
+  TF_RETURN_IF_ERROR(ConvertHloToMlirHlo(mlir_module, module));
+
+  // Add buffer mappings. The first attribute is the index of the slice, the
+  // second is a boolean attribute on whether the allocation is writeable.
+  llvm::SmallVector<std::pair<mlir::Attribute, mlir::Attribute>>
+      operand_mapping;
+  for (auto i : module->entry_computation()->parameter_instructions()) {
+    auto slice = assignment->GetUniqueTopLevelSlice(i);
+    operand_mapping.emplace_back(
+        builder.getI32IntegerAttr(static_cast<int32_t>(slice->index())),
+        builder.getBoolAttr(!slice->allocation()->is_readonly()));
+  }
+
+  auto root_instr = module->entry_computation()->root_instruction();
+  auto output_allocation = assignment->GetUniqueTopLevelOutputSlice();
+
+  // Gather mappings to each element in the tuple if necessary
+  llvm::SmallVector<mlir::Attribute> result_inner_mapping;
+  if (output_allocation->allocation()->is_tuple()) {
+    for (auto i : llvm::seq<int>(0, root_instr->shape().tuple_shapes_size())) {
+      result_inner_mapping.push_back(mlir::IntegerAttr::get(
+          mlir::IntegerType::get(&mlir_context, 64),
+          assignment->GetUniqueSlice(root_instr, {i})->index()));
+    }
+  }
+
+  auto result_mapping = builder.getI32IntegerAttr(
+      static_cast<int32_t>(output_allocation->index()));
+  mlir_module->walk([&](mlir::func::FuncOp f) {
+    if (f.getSymName() == "main") {
+      for (auto& p : llvm::enumerate(operand_mapping)) {
+        f.setArgAttr(p.index(), "xla_framework.input_mapping", p.value().first);
+        // Mark argument as (non-)writeable for bufferization. This ensures that
+        // entry parameters are not overwritten.
+        f.setArgAttr(p.index(), "bufferization.writable", p.value().second);
+      }
+      f->setAttr("xla_framework.result_mapping", result_mapping);
+    }
+
+    if (output_allocation->allocation()->is_tuple()) {
+      f->setAttr("xla_framework.result_inner_mapping",
+                 mlir::ArrayAttr::get(f.getContext(), result_inner_mapping));
+    }
+  });
+  return {mlir_module};
+}
+
+struct ComputationToEmit {
+  HloComputation* computation;
+
+  // Are we emitting this computation with fast-math reassociation enabled?
+  // We enable reassociation for reductions because it has a significant
+  // performance impact.
+  bool allow_reassociation;
+
+  bool operator==(const ComputationToEmit& other) const {
+    return computation == other.computation &&
+           allow_reassociation == other.allow_reassociation;
+  }
+
+  template <typename H>
+  friend H AbslHashValue(H h, const ComputationToEmit& c) {
+    return H::combine(std::move(h), c.computation, c.allow_reassociation);
+  }
+};
+
+std::vector<ComputationToEmit> SubcomputationEmissionOrder(
+    HloComputation* root) {
+  absl::flat_hash_set<ComputationToEmit> visited;
+  std::vector<ComputationToEmit> postorder;
+
+  // agenda of (node, leave) pairs.
+  std::stack<std::pair<ComputationToEmit, bool>> agenda;
+  agenda.emplace(ComputationToEmit{root, false}, false);
+  while (!agenda.empty()) {
+    ComputationToEmit c;
+    bool leave;
+    std::tie(c, leave) = agenda.top();
+    agenda.pop();
+
+    if (leave) {
+      postorder.push_back(c);
+      continue;
+    }
+
+    if (visited.insert(c).second) {
+      agenda.emplace(c, true);
+      for (auto* instruction : c.computation->instructions()) {
+        bool allow_reassociation =
+            instruction->opcode() == HloOpcode::kAllReduce ||
+            instruction->opcode() == HloOpcode::kReduce ||
+            instruction->opcode() == HloOpcode::kReduceWindow;
+        for (auto it = instruction->called_computations().rbegin();
+             it != instruction->called_computations().rend(); ++it) {
+          HloComputation* called_computation = *it;
+          ComputationToEmit callee{
+              called_computation, c.allow_reassociation || allow_reassociation};
+          if (!visited.contains(callee)) {
+            agenda.emplace(callee, false);
+          }
+        }
+      }
+    }
+  }
+  DCHECK(!postorder.empty() && postorder.back().computation == root);
+  postorder.pop_back();
+  return postorder;
+}
+
 }  // namespace
 
-StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
-    std::unique_ptr<HloModule> module, se::StreamExecutor* stream_exec,
-    const CompileOptions& options) {
-  VLOG(1) << "Compiling: " << module->name();
-  XLA_SCOPED_LOGGING_TIMER(
-      absl::StrFormat("Compiling [%s] for CPU using JIT", module->name()));
-  std::string slow_compilation_msg =
-      absl::StrCat("Compiling module ", module->name());
-  auto slow_compile_alarm = SlowCompilationAlarm(slow_compilation_msg);
-
-  TF_RET_CHECK(stream_exec != nullptr);
-  absl::call_once(llvm_command_line_options_initialized,
-                  &llvm_ir::InitializeLLVMCommandLineOptions, module->config());
-
+StatusOr<std::unique_ptr<CpuExecutable>>
+CpuCompiler::CompileLegacyCpuExecutable(std::unique_ptr<HloModule> module) {
   ModuleHook pre_optimization_ir_hook;
   ModuleHook post_optimization_ir_hook;
   std::tie(pre_optimization_ir_hook, post_optimization_ir_hook) =
@@ -678,7 +1164,7 @@ StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
   LoadMLIRDialects(mlir_context);
   auto llvm_context = std::make_unique<llvm::LLVMContext>();
   auto llvm_module =
-      absl::make_unique<llvm::Module>("__compute_module", *llvm_context);
+      std::make_unique<llvm::Module>("__compute_module", *llvm_context);
 
   auto jit = SimpleOrcJIT::Create(
       CompilerTargetOptions(module->config()),
@@ -696,8 +1182,10 @@ StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
   llvm_module->setTargetTriple((*jit)->target_triple().getTriple());
 
   HloComputation* entry_computation = module->entry_computation();
-  std::unordered_map<const HloInstruction*, int64> instruction_to_profile_idx;
-  std::unordered_map<const HloComputation*, int64> computation_to_profile_idx;
+  absl::flat_hash_map<const HloInstruction*, int64_t>
+      instruction_to_profile_idx;
+  absl::flat_hash_map<const HloComputation*, int64_t>
+      computation_to_profile_idx;
   std::unique_ptr<HloProfileIndexMap> hlo_profile_index_map;
   std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data;
   if (module->config().hlo_profiling_enabled()) {
@@ -705,8 +1193,6 @@ StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
         *module, &instruction_to_profile_idx, &computation_to_profile_idx,
         &hlo_profile_index_map, &hlo_profile_printer_data));
   }
-
-  std::unique_ptr<Executable> cpu_executable;
 
   // Cache these flags here since we'll want to access them after the module's
   // ownership is std::moved.
@@ -725,60 +1211,90 @@ StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
   TF_ASSIGN_OR_RETURN(
       std::unique_ptr<BufferAssignment> assignment,
       BufferAssigner::Run(module.get(),
-                          absl::make_unique<SequentialHloOrdering>(schedule),
+                          std::make_unique<SequentialHloOrdering>(schedule),
                           BufferSizeBytesFunction(), memory_alignment,
                           /*allocate_buffers_for_constants=*/true));
-  DumpHloModuleIfEnabled(*module, *assignment, "after_optimizations");
+  DumpHloModuleIfEnabled(*module, *assignment, "cpu_after_optimizations");
 
   // Each computation is a single function.  Emit all embedded computations
   // before the entry computation. The order of computations returned from
   // GetEmbeddedComputations guarantees that a called computation occurs
   // before a caller computation.
 
-  LLVMTargetMachineFeatures target_machine_features((*jit)->target_machine());
-  IrEmitter ir_emitter(&mlir_context, *module, *assignment, llvm_module.get(),
-                       std::move(instruction_to_profile_idx),
-                       std::move(computation_to_profile_idx),
-                       &target_machine_features,
-#ifdef MEMORY_SANITIZER
-                       /*emit_code_for_msan=*/true
-#else
-                       /*emit_code_for_msan=*/false
-#endif
-  );
+  std::string function_name;
+  if (UseMlirHloLowering(
+          module->config().debug_options().xla_cpu_enable_mlir_lowering(),
+          module.get())) {
+    TF_ASSIGN_OR_RETURN(
+        auto mlir_module,
+        createMLIRModule(module.get(), mlir_context, assignment.get()));
+    TF_RETURN_IF_ERROR(LowerMLIRModule(*mlir_module, mlir_context));
 
-  TF_RETURN_IF_ERROR(ir_emitter.EmitConstantGlobals());
+    function_name = entry_computation->name();
+    // TODO(kramerb): Don't rely on the exact function name.
+    llvm::cast<mlir::LLVM::LLVMFuncOp>(
+        mlir_module->lookupSymbol("main_xla_framework"))
+        .setName(function_name);
 
-  for (auto embedded_computation :
-       entry_computation->MakeEmbeddedComputationsList()) {
-    if (embedded_computation->IsFusionComputation()) {
-      continue;
+    llvm_module = mlir::translateModuleToLLVMIR(*mlir_module, *llvm_context);
+    if (!llvm_module) {
+      return InternalError("Translation to LLVM IR failed");
     }
-    TF_RETURN_IF_ERROR(
-        ir_emitter
-            .EmitComputation(
-                embedded_computation, embedded_computation->name(),
-                /*is_top_level_computation=*/false,
-                schedule.sequence(embedded_computation).instructions())
-            .status());
+    llvm_module->setDataLayout((*jit)->data_layout());
+    llvm_module->setTargetTriple((*jit)->target_triple().getTriple());
+  } else {
+    LLVMTargetMachineFeatures target_machine_features((*jit)->target_machine());
+    IrEmitter ir_emitter(
+        &mlir_context, *module, *assignment, llvm_module.get(),
+        std::move(instruction_to_profile_idx),
+        std::move(computation_to_profile_idx),
+        ModuleComputationsTransitivelyContainCustomCall(*module),
+        &target_machine_features,
+#ifdef MEMORY_SANITIZER
+        /*emit_code_for_msan=*/true
+#else
+        /*emit_code_for_msan=*/false
+#endif
+    );
+
+    TF_RETURN_IF_ERROR(ir_emitter.EmitConstantGlobals());
+
+    for (ComputationToEmit subcomputation :
+         SubcomputationEmissionOrder(entry_computation)) {
+      if (subcomputation.computation->IsFusionComputation()) {
+        continue;
+      }
+      TF_RETURN_IF_ERROR(
+          ir_emitter
+              .EmitComputation(
+                  subcomputation.computation,
+                  subcomputation.computation->name(),
+                  /*is_top_level_computation=*/false,
+                  schedule.sequence(subcomputation.computation).instructions(),
+                  subcomputation.allow_reassociation)
+              .status());
+    }
+    std::string function_name_prefix = entry_computation->name().empty()
+                                           ? "__compute"
+                                           : entry_computation->name();
+    TF_ASSIGN_OR_RETURN(llvm::Function * entry_function,
+                        ir_emitter.EmitComputation(
+                            entry_computation, function_name_prefix,
+                            /*is_top_level_computation=*/true,
+                            schedule.sequence(entry_computation).instructions(),
+                            /*allow_reassociation=*/false));
+
+    function_name = [&]() {
+      llvm::SmallVector<char, 40> function_name_vector;
+      llvm::Mangler::getNameWithPrefix(function_name_vector,
+                                       entry_function->getName(),
+                                       (*jit)->data_layout());
+      return std::string(function_name_vector.begin(),
+                         function_name_vector.end());
+    }();
   }
-  string function_name_prefix = entry_computation->name().empty()
-                                    ? "__compute"
-                                    : entry_computation->name();
-  TF_ASSIGN_OR_RETURN(llvm::Function * entry_function,
-                      ir_emitter.EmitComputation(
-                          entry_computation, function_name_prefix,
-                          /*is_top_level_computation=*/true,
-                          schedule.sequence(entry_computation).instructions()));
 
-  string function_name = [&]() {
-    llvm::SmallVector<char, 40> function_name_vector;
-    llvm::Mangler::getNameWithPrefix(
-        function_name_vector, entry_function->getName(), (*jit)->data_layout());
-    return string(function_name_vector.begin(), function_name_vector.end());
-  }();
-
-  string ir_module_string;
+  std::string ir_module_string;
   if (embed_ir_in_executable) {
     ir_module_string = llvm_ir::DumpModuleToString(*llvm_module);
   }
@@ -789,17 +1305,143 @@ StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
   llvm::orc::ThreadSafeModule thread_safe_module(std::move(llvm_module),
                                                  std::move(llvm_context));
   cantFail((*jit)->AddModule(std::move(thread_safe_module)));
-  cpu_executable.reset(new CpuExecutable(
+
+  auto cpu_executable = std::make_unique<CpuExecutable>(
       std::move(*jit), std::move(assignment), std::move(module), function_name,
-      std::move(hlo_profile_printer_data), std::move(hlo_profile_index_map)));
+      std::move(hlo_profile_printer_data), std::move(hlo_profile_index_map));
 
   if (embed_ir_in_executable) {
-    static_cast<CpuExecutable&>(*cpu_executable)
-        .set_ir_module_string(ir_module_string);
+    cpu_executable->set_ir_module_string(ir_module_string);
   }
 
+  // Dump computation proto state and buffer assignment for
+  // GetCompiledMemoryStats results.
+  auto hlo_proto = std::make_unique<HloProto>();
+  *hlo_proto->mutable_hlo_module() = cpu_executable->module().ToProto();
+  *hlo_proto->mutable_buffer_assignment() =
+      cpu_executable->buffer_assignment().ToProto();
+  cpu_executable->set_hlo_proto(std::move(hlo_proto));
+
+  return cpu_executable;
+}
+
+namespace {
+
+namespace runtime = ::xla::runtime;
+
+StatusOr<std::unique_ptr<XlaRuntimeCpuExecutable>> GetXlaRuntimeCpuExecutable(
+    mlir::ModuleOp mlir_module, absl::string_view entry_point) {
+  runtime::CpuPipelineOptions copts;
+
+  runtime::JitExecutable::Options opts;
+  opts.specialization = runtime::JitExecutable::Specialization::kDisabled;
+  opts.compiler.register_dialects = [](mlir::DialectRegistry& registry) {
+    registry.insert<mlir::mhlo::MhloDialect>();
+    runtime::RegisterDefaultXlaCpuRuntimeDialects(registry);
+    RegisterHloXlaRuntimePipelineDialects(registry);
+  };
+  opts.compiler.create_compilation_pipeline = [copts](mlir::PassManager& pm) {
+    CreateDefaultHloXlaRuntimePipeline(pm);
+    pm.addPass(mlir::bufferization::createBufferResultsToOutParamsPass());
+    pm.addNestedPass<mlir::func::FuncOp>(
+        mlir::bufferization::createBufferDeallocationPass());
+    runtime::CreateDefaultXlaCpuRuntimeCompilationPipeline(pm, copts);
+  };
+  opts.compiler.calling_convention = runtime::ResultsToOutsCallingConvention(
+      mlir::bufferization::BufferizeTypeConverter());
+
+  std::string serialized_mlir;
+  llvm::raw_string_ostream os(serialized_mlir);
+  mlir_module.print(os);
+  absl::StatusOr<runtime::JitExecutable> jit_executable =
+      runtime::JitExecutable::Instantiate(serialized_mlir, entry_point, opts);
+  if (!jit_executable.ok()) {
+    return InternalError("Failed to compile XLA Runtime program: %s",
+                         jit_executable.status().message());
+  }
+  return std::make_unique<XlaRuntimeCpuExecutable>(
+      std::make_unique<runtime::JitExecutable>(std::move(*jit_executable)));
+}
+}  // namespace
+
+StatusOr<std::unique_ptr<CpuExecutable>>
+CpuCompiler::CompileXlaRuntimeCpuExecutable(
+    std::unique_ptr<HloModule> hlo_module) {
+  // Select an order for emitting the HLO instructions for each
+  // computation. Using this sequence enables tighter buffer liveness analysis
+  // and reduced memory usage (as compared to using DependencyHloOrdering).
+  TF_ASSIGN_OR_RETURN(
+      HloSchedule schedule,
+      ScheduleModule(
+          hlo_module.get(), BufferSizeBytesFunction(),
+          ComputationSchedulerToModuleScheduler(DFSMemoryScheduler)));
+
+  // Run buffer allocation on the HLO graph.
+  TF_ASSIGN_OR_RETURN(
+      std::unique_ptr<BufferAssignment> assignment,
+      BufferAssigner::Run(hlo_module.get(),
+                          std::make_unique<SequentialHloOrdering>(schedule),
+                          BufferSizeBytesFunction(), memory_alignment,
+                          /*allocate_buffers_for_constants=*/true));
+  VLOG(1) << "Buffer Assignment Stats for " << hlo_module->name() << "\n"
+          << assignment->GetStats().ToString();
+  DumpHloModuleIfEnabled(*hlo_module, *assignment, "cpu_after_optimizations");
+
+  // TODO(ecg): these are just being collected here to be passed to
+  // CpuExecutable's constructor; we should actually do something with them.
+  absl::flat_hash_map<const HloInstruction*, int64_t>
+      instruction_to_profile_idx;
+  absl::flat_hash_map<const HloComputation*, int64_t>
+      computation_to_profile_idx;
+  std::unique_ptr<HloProfileIndexMap> hlo_profile_index_map;
+  std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data;
+  if (hlo_module->config().hlo_profiling_enabled()) {
+    TF_RETURN_IF_ERROR(CreateHloProfilingArtifacts(
+        *hlo_module, &instruction_to_profile_idx, &computation_to_profile_idx,
+        &hlo_profile_index_map, &hlo_profile_printer_data));
+  }
+
+  mlir::MLIRContext mlir_context;
+  TF_ASSIGN_OR_RETURN(
+      auto mlir_module,
+      createMLIRModule(hlo_module.get(), mlir_context, assignment.get()));
+
+  TF_ASSIGN_OR_RETURN(auto xla_runtime_executable,
+                      GetXlaRuntimeCpuExecutable(*mlir_module, "main"));
+
+  return std::make_unique<CpuExecutable>(
+      std::move(hlo_module), std::move(hlo_profile_printer_data),
+      std::move(hlo_profile_index_map), std::move(assignment),
+      std::move(xla_runtime_executable));
+}
+
+StatusOr<std::unique_ptr<Executable>> CpuCompiler::RunBackend(
+    std::unique_ptr<HloModule> module,
+    [[maybe_unused]] se::StreamExecutor* stream_exec,
+    [[maybe_unused]] const CompileOptions& options) {
+  VLOG(1) << "Compiling: " << module->name();
+  XLA_SCOPED_LOGGING_TIMER(
+      absl::StrFormat("Compiling [%s] for CPU using JIT", module->name()));
+  std::string slow_compilation_msg =
+      absl::StrCat("Compiling module ", module->name());
+  auto slow_compile_alarm = SlowCompilationAlarm(slow_compilation_msg);
+
+  absl::call_once(llvm_command_line_options_initialized,
+                  &InitializeLLVMCommandLineOptions, module->config());
+
+  std::unique_ptr<CpuExecutable> cpu_executable;
+  if (module->config().debug_options().xla_cpu_use_xla_runtime()) {
+    TF_ASSIGN_OR_RETURN(cpu_executable,
+                        CompileXlaRuntimeCpuExecutable(std::move(module)));
+  } else {
+    TF_ASSIGN_OR_RETURN(cpu_executable,
+                        CompileLegacyCpuExecutable(std::move(module)));
+  }
+
+  cpu_executable->set_debug_info(
+      cpu_executable->buffer_assignment().GetStats().ToString());
   VLOG(1) << "Compilation finished";
-  return std::move(cpu_executable);
+  return std::unique_ptr<Executable>(std::move(cpu_executable));
 }
 
 StatusOr<std::vector<std::unique_ptr<AotCompilationResult>>>
@@ -810,8 +1452,7 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
       module_group->ConsumeModules();
 
   absl::call_once(llvm_command_line_options_initialized,
-                  &llvm_ir::InitializeLLVMCommandLineOptions,
-                  modules[0]->config());
+                  &InitializeLLVMCommandLineOptions, modules[0]->config());
 
   // We can pass just one llvm::TargetOptions when we compile the LLVM module,
   // so we bail if the configs have conflicting flags. At the moment, the only
@@ -829,7 +1470,7 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
     const auto& field_name = fn_and_name.second;
     bool first_module_val =
         (modules[0]->config().debug_options().*field_method_ptr)();
-    for (int64 i = 0; i < modules.size(); ++i) {
+    for (int64_t i = 0; i < modules.size(); ++i) {
       bool cur_module_val =
           (modules[i]->config().debug_options().*field_method_ptr)();
       if (first_module_val != cur_module_val) {
@@ -895,15 +1536,7 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
   mlir::MLIRContext mlir_context;
   LoadMLIRDialects(mlir_context);
   llvm::LLVMContext llvm_context;
-  llvm::Module llvm_module("__compute_module", llvm_context);
-  llvm_module.setDataLayout(target_machine->createDataLayout());
-  llvm_module.setTargetTriple(triple.getTriple());
-  if (pic_level != llvm::PICLevel::NotPIC) {
-    llvm_module.setPICLevel(pic_level);
-  }
-  if (pie_level != llvm::PIELevel::Default) {
-    llvm_module.setPIELevel(pie_level);
-  }
+  std::unique_ptr<llvm::Module> llvm_module;
 
   std::vector<std::unique_ptr<AotCompilationResult>> results;
   for (size_t i = 0; i < modules.size(); ++i) {
@@ -911,7 +1544,8 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
     VLOG(1) << "Compiling ahead-of-time: " << module->name();
 
     TF_RETURN_IF_ERROR(
-        RunHloPasses(module, /*is_aot_compile=*/true, target_machine.get()));
+        RunHloPasses(module, /*is_aot_compile=*/true, target_machine.get(),
+                     /*is_mlir_compile=*/options.use_mlir_hlo_lowering()));
 
     TF_ASSIGN_OR_RETURN(HloSchedule schedule,
                         ScheduleModule(module, BufferSizeBytesFunction()));
@@ -921,7 +1555,7 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
     TF_ASSIGN_OR_RETURN(
         std::unique_ptr<BufferAssignment> assignment,
         BufferAssigner::Run(module,
-                            absl::make_unique<SequentialHloOrdering>(schedule),
+                            std::make_unique<SequentialHloOrdering>(schedule),
                             BufferSizeBytesFunction(), memory_alignment,
                             /*allocate_buffers_for_constants=*/true));
     // BufferAssignment::ToString() includes a header, so no need for us to
@@ -930,10 +1564,12 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
       DumpToFileInDirOrStdout(*module, "", "buffer_assignment",
                               assignment->ToString());
     }
-    DumpHloModuleIfEnabled(*module, *assignment, "after_optimizations");
+    DumpHloModuleIfEnabled(*module, *assignment, "cpu_after_optimizations");
 
-    std::unordered_map<const HloInstruction*, int64> instruction_to_profile_idx;
-    std::unordered_map<const HloComputation*, int64> computation_to_profile_idx;
+    absl::flat_hash_map<const HloInstruction*, int64_t>
+        instruction_to_profile_idx;
+    absl::flat_hash_map<const HloComputation*, int64_t>
+        computation_to_profile_idx;
     std::unique_ptr<HloProfileIndexMap> hlo_profile_index_map;
     std::unique_ptr<HloProfilePrinterData> hlo_profile_printer_data;
 
@@ -944,37 +1580,78 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
     }
 
     LLVMTargetMachineFeatures target_machine_features(target_machine.get());
-    IrEmitter ir_emitter(&mlir_context, *module, *assignment, &llvm_module,
-                         std::move(instruction_to_profile_idx),
-                         std::move(computation_to_profile_idx),
-                         &target_machine_features,
-                         // TODO(b/66051036): Run full msan for AOT.
-                         /*emit_code_for_msan=*/false);
-
-    TF_RETURN_IF_ERROR(ir_emitter.EmitConstantGlobals());
-
+    std::vector<BufferInfo> buffer_infos =
+        CreateBufferInfosFromBufferAssignment(*assignment);
     HloComputation* computation = module->entry_computation();
-    for (auto embedded_computation :
-         computation->MakeEmbeddedComputationsList()) {
-      if (embedded_computation->IsFusionComputation()) {
-        continue;
-      }
-      TF_RETURN_IF_ERROR(
-          ir_emitter
-              .EmitComputation(
-                  embedded_computation, embedded_computation->name(),
-                  /*is_top_level_computation=*/false,
-                  schedule.sequence(embedded_computation).instructions())
-              .status());
-    }
-    const string& entry_point_name = options.entry_point_name();
-    TF_ASSIGN_OR_RETURN(llvm::Function * entry_function,
-                        ir_emitter.EmitComputation(
-                            computation, entry_point_name,
-                            /*is_top_level_computation=*/true,
-                            schedule.sequence(computation).instructions()));
 
-    CHECK(entry_function->getName() == entry_point_name);
+    if (UseMlirHloLowering(options.use_mlir_hlo_lowering(), module)) {
+      TF_ASSIGN_OR_RETURN(
+          auto mlir_module,
+          createMLIRModule(module, mlir_context, assignment.get()));
+      TF_RETURN_IF_ERROR(LowerMLIRModule(*mlir_module, mlir_context));
+
+      llvm::cast<mlir::LLVM::LLVMFuncOp>(
+          mlir_module->lookupSymbol("main_xla_framework"))
+          .setName(options.entry_point_name());
+
+      llvm_module = mlir::translateModuleToLLVMIR(*mlir_module, llvm_context);
+      // Set missing information
+      llvm_module->setDataLayout(target_machine->createDataLayout());
+      llvm_module->setTargetTriple(triple.getTriple());
+      if (pic_level != llvm::PICLevel::NotPIC) {
+        llvm_module->setPICLevel(pic_level);
+      }
+      if (pie_level != llvm::PIELevel::Default) {
+        llvm_module->setPIELevel(pie_level);
+      }
+    } else {
+      // Set required information before emitting IR
+      llvm_module =
+          std::make_unique<llvm::Module>("__compute_module", llvm_context);
+      llvm_module->setDataLayout(target_machine->createDataLayout());
+      llvm_module->setTargetTriple(triple.getTriple());
+      if (pic_level != llvm::PICLevel::NotPIC) {
+        llvm_module->setPICLevel(pic_level);
+      }
+      if (pie_level != llvm::PIELevel::Default) {
+        llvm_module->setPIELevel(pie_level);
+      }
+      IrEmitter ir_emitter(
+          &mlir_context, *module, *assignment, llvm_module.get(),
+          std::move(instruction_to_profile_idx),
+          std::move(computation_to_profile_idx),
+          ModuleComputationsTransitivelyContainCustomCall(*module),
+          &target_machine_features,
+          // TODO(b/66051036): Run full msan for AOT.
+          /*emit_code_for_msan=*/false);
+
+      TF_RETURN_IF_ERROR(ir_emitter.EmitConstantGlobals());
+
+      for (ComputationToEmit subcomputation :
+           SubcomputationEmissionOrder(computation)) {
+        if (subcomputation.computation->IsFusionComputation()) {
+          continue;
+        }
+        TF_RETURN_IF_ERROR(
+            ir_emitter
+                .EmitComputation(subcomputation.computation,
+                                 subcomputation.computation->name(),
+                                 /*is_top_level_computation=*/false,
+                                 schedule.sequence(subcomputation.computation)
+                                     .instructions(),
+                                 subcomputation.allow_reassociation)
+                .status());
+      }
+      const std::string& entry_point_name = options.entry_point_name();
+      TF_ASSIGN_OR_RETURN(llvm::Function * entry_function,
+                          ir_emitter.EmitComputation(
+                              computation, entry_point_name,
+                              /*is_top_level_computation=*/true,
+                              schedule.sequence(computation).instructions(),
+                              /*allow_reassociation=*/false));
+
+      CHECK(entry_function->getName() == entry_point_name);
+    }
 
     ModuleHook pre_optimization_ir_hook;
     ModuleHook post_optimization_ir_hook;
@@ -982,12 +1659,12 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
         GetIRModuleHooks(*module, user_pre_optimization_hook_,
                          user_post_optimization_hook_);
 
-    // Run the LLVM verifier over the unoptimized LLVM IR.  If it fails, run the
-    // pre-optimization IR dump hook before returning.
+    // Run the LLVM verifier over the unoptimized LLVM IR.  If it fails, run
+    // the pre-optimization IR dump hook before returning.
     {
-      Status verify_status = VerifyLlvmModule(llvm_module);
+      Status verify_status = VerifyLlvmModule(*llvm_module);
       if (!verify_status.ok() && pre_optimization_ir_hook) {
-        pre_optimization_ir_hook(llvm_module);
+        pre_optimization_ir_hook(*llvm_module);
       }
       TF_RETURN_IF_ERROR(verify_status);
     }
@@ -1006,19 +1683,18 @@ CpuCompiler::CompileAheadOfTime(std::unique_ptr<HloModuleGroup> module_group,
         options::OptimizeForSizeRequested(module->config()),
         module->config().debug_options().xla_llvm_disable_expensive_passes(),
         llvm_ir::GetCpuFastMathFlags(module->config()),
-        pre_optimization_ir_hook, post_optimization_ir_hook, post_codegen_hook);
+        pre_optimization_ir_hook, post_optimization_ir_hook, post_codegen_hook,
+        aot_options.sanitize_dataflow(),
+        aot_options.sanitize_abilists_dataflow());
     std::unique_ptr<llvm::MemoryBuffer> object_file =
-        cantFail(compiler_functor(llvm_module));
+        cantFail(compiler_functor(*llvm_module));
     ObjectFileData object_file_data(object_file->getBufferStart(),
                                     object_file->getBufferEnd());
-
-    std::vector<BufferInfo> buffer_infos =
-        CreateBufferInfosFromBufferAssignment(*assignment);
 
     TF_ASSIGN_OR_RETURN(const BufferAllocation::Slice result_slice,
                         assignment->GetUniqueTopLevelOutputSlice());
 
-    results.emplace_back(absl::make_unique<CpuAotCompilationResult>(
+    results.emplace_back(std::make_unique<CpuAotCompilationResult>(
         std::move(object_file_data), std::move(buffer_infos),
         result_slice.index(), std::move(hlo_profile_printer_data)));
   }
@@ -1041,7 +1717,7 @@ HloCostAnalysis::ShapeSizeFunction CpuCompiler::ShapeSizeBytesFunction() const {
 static bool InitModule() {
   xla::Compiler::RegisterCompilerFactory(
       stream_executor::host::kHostPlatformId,
-      []() { return absl::make_unique<xla::cpu::CpuCompiler>(); });
+      []() { return std::make_unique<xla::cpu::CpuCompiler>(); });
   return true;
 }
 static bool module_initialized = InitModule();

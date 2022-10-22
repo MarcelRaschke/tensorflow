@@ -46,7 +46,7 @@ class TestEnv {
     devices.push_back(
         DeviceFactory::NewDevice("CPU", {}, "/job:a/replica:0/task:0"));
     cpu_device_ = devices.back().get();
-    device_mgr_ = absl::make_unique<StaticDeviceMgr>(std::move(devices));
+    device_mgr_ = std::make_unique<StaticDeviceMgr>(std::move(devices));
     OptimizerOptions opts;
     pflr_ = tensorflow::MakeUnique<ProcessFunctionLibraryRuntime>(
         device_mgr_.get(), Env::Default(), /*config=*/nullptr,
@@ -139,8 +139,8 @@ void BM_KernelAndDeviceRun(::testing::benchmark::State& state) {
   TF_CHECK_OK(k.Init({}, ndef, nullptr));
   const EagerKernelArgs args(std::move(inputs));
   for (auto s : state) {
-    TF_CHECK_OK(
-        k.Run(nullptr, args, &outputs, nullptr, absl::nullopt, absl::nullopt));
+    TF_CHECK_OK(k.Run(nullptr, args, &outputs, nullptr, absl::nullopt,
+                      absl::nullopt, nullptr));
   }
 }
 BENCHMARK(BM_KernelAndDeviceRun);

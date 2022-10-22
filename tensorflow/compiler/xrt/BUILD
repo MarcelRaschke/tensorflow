@@ -11,13 +11,17 @@ load(
     "//tensorflow/core/platform:build_config.bzl",
     "tf_proto_library",
 )
+load(
+    "@local_config_cuda//cuda:build_defs.bzl",
+    "if_cuda",
+)
 
 package(
     default_visibility = [
         "//learning/brain:__subpackages__",
         "//tensorflow/compiler/xrt:__subpackages__",
     ],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 tf_proto_library(
@@ -45,10 +49,10 @@ cc_library(
     deps = [
         "//tensorflow/compiler/jit:xla_device",
         "//tensorflow/compiler/xla/client:local_client",
+        "//tensorflow/compiler/xla/stream_executor/tpu:tpu_node_context",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core/tpu:tpu_configuration",
-        "//tensorflow/stream_executor/tpu:tpu_node_context",
     ],
 )
 
@@ -71,6 +75,7 @@ cc_library(
         "xrt_state.h",
         "xrt_util.h",
     ],
+    copts = if_cuda(["-DGOOGLE_CUDA=1"]),
     visibility = ["//visibility:public"],
     deps = [
         ":xrt_proto_cc",
@@ -89,14 +94,18 @@ cc_library(
         "//tensorflow/compiler/xla/service:executable",
         "//tensorflow/compiler/xla/service:hlo",
         "//tensorflow/compiler/xla/service:shaped_buffer",
+        "//tensorflow/compiler/xla/stream_executor",
+        "//tensorflow/compiler/xla/stream_executor:device_memory_allocator",
+        "//tensorflow/compiler/xla/stream_executor:tf_allocator_adapter",
         "//tensorflow/core:core_cpu_internal",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:lib_internal",
+        "//tensorflow/core/common_runtime/gpu:gpu_runtime",
         "//tensorflow/core/platform:regexp",
         "//tensorflow/core/profiler/lib:traceme",
-        "//tensorflow/stream_executor",
-        "//tensorflow/stream_executor:device_memory_allocator",
+        "@com_google_absl//absl/container:flat_hash_map",
+        "@com_google_absl//absl/container:node_hash_map",
         "@com_google_absl//absl/memory",
         "@com_google_absl//absl/synchronization",
     ],
@@ -109,7 +118,7 @@ tf_gen_op_libs(
         "xrt_execute_op",
     ],
     deps = [
-        "//tensorflow/compiler/jit:flags",
+        "//tensorflow/compiler/jit:common",
         "//tensorflow/core:lib",
     ],
 )

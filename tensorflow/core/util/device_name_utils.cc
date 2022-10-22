@@ -228,12 +228,12 @@ Status DeviceNameUtils::CanonicalizeDeviceName(StringPiece fullname,
   if (ParseLocalName(fullname, &parsed_name)) {
     CompleteName(parsed_basename, &parsed_name);
     *canonical_name = ParsedNameToString(parsed_name);
-    return Status::OK();
+    return OkStatus();
   }
   if (ParseFullName(fullname, &parsed_name)) {
     CompleteName(parsed_basename, &parsed_name);
     *canonical_name = ParsedNameToString(parsed_name);
-    return Status::OK();
+    return OkStatus();
   }
   return errors::InvalidArgument("Could not parse ", fullname,
                                  " into a device "
@@ -396,7 +396,7 @@ Status MergeDevNamesImpl(DeviceNameUtils::ParsedName* target,
       } else {
         target->has_id = false;
         target->has_type = false;
-        return Status::OK();
+        return OkStatus();
       }
     } else {
       target->has_type = other.has_type;
@@ -415,7 +415,7 @@ Status MergeDevNamesImpl(DeviceNameUtils::ParsedName* target,
         target->id = other.id;
       } else {
         target->has_id = false;
-        return Status::OK();
+        return OkStatus();
       }
     } else {
       target->has_id = other.has_id;
@@ -423,7 +423,7 @@ Status MergeDevNamesImpl(DeviceNameUtils::ParsedName* target,
     }
   }
 
-  return Status::OK();
+  return OkStatus();
 }
 
 }  // namespace
@@ -441,6 +441,35 @@ Status DeviceNameUtils::MergeOverrideDevNames(ParsedName* target,
                                               const ParsedName& other) {
   return MergeDevNamesImpl(target, other, /*allow_soft_placement=*/true,
                            /*override_conflicts=*/true);
+}
+
+/* static */
+void DeviceNameUtils::MergeUnsetDevNames(ParsedName* target,
+                                         const ParsedName& other) {
+  if (other.has_job && !target->has_job) {
+    target->has_job = other.has_job;
+    target->job = other.job;
+  }
+
+  if (other.has_replica && !target->has_replica) {
+    target->has_replica = other.has_replica;
+    target->replica = other.replica;
+  }
+
+  if (other.has_task && !target->has_task) {
+    target->has_task = other.has_task;
+    target->task = other.task;
+  }
+
+  if (other.has_type && !target->has_type) {
+    target->has_type = other.has_type;
+    target->type = other.type;
+  }
+
+  if (other.has_id && !target->has_id) {
+    target->has_id = other.has_id;
+    target->id = other.id;
+  }
 }
 
 /* static */
@@ -589,7 +618,7 @@ std::vector<string> DeviceNameUtils::GetLocalNamesForDeviceMappings(
   device.id = 0;
   device.has_id = true;
   *host_device_name = DeviceNameUtils::ParsedNameToString(device);
-  return Status::OK();
+  return OkStatus();
 }
 
 std::ostream& operator<<(std::ostream& os,

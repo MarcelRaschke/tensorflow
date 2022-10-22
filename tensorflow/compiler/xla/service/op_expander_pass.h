@@ -27,7 +27,15 @@ namespace xla {
 // does not support into other HLO instructions.
 class OpExpanderPass : public HloModulePass {
  public:
-  StatusOr<bool> Run(HloModule* module) override;
+  using HloPassInterface::Run;
+  StatusOr<bool> Run(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads) override;
+
+  // extra_filter: Optional extra filtering criteria for matching instructions,
+  // used in conjunction with InstructionMatchesPattern.
+  explicit OpExpanderPass(HloPredicate extra_filter = nullptr)
+      : extra_filter_(std::move(extra_filter)) {}
 
  protected:
   // Returns `true` if `instruction` should be expanded by this pass.
@@ -38,6 +46,8 @@ class OpExpanderPass : public HloModulePass {
   // modified).
   virtual StatusOr<HloInstruction*> ExpandInstruction(
       HloInstruction* instruction) = 0;
+
+  HloPredicate extra_filter_;
 };
 
 }  // namespace xla

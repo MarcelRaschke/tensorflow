@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for the input_lib library which tests iterator type specs."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 
 from absl.testing import parameterized
@@ -470,10 +466,10 @@ class DistributedDatasetTypeSpecTest(test.TestCase, parameterized.TestCase):
           ],
           enable_get_next_as_optional=[True, False],
           experimental_place_dataset_on_device=[True, False],
-          experimental_prefetch_to_device=[True, False]))
+          experimental_fetch_to_device=[True, False]))
   def testTypeSpecComponents(self, distribution, enable_get_next_as_optional,
                              experimental_place_dataset_on_device,
-                             experimental_prefetch_to_device):
+                             experimental_fetch_to_device):
     dataset = dataset_ops.DatasetV2.range(10).batch(2)
     distribution.extended.experimental_enable_get_next_as_optional = (
         enable_get_next_as_optional)
@@ -481,7 +477,7 @@ class DistributedDatasetTypeSpecTest(test.TestCase, parameterized.TestCase):
     options = distribute_lib.InputOptions(
         experimental_place_dataset_on_device=
         experimental_place_dataset_on_device,
-        experimental_prefetch_to_device=experimental_prefetch_to_device)
+        experimental_fetch_to_device=experimental_fetch_to_device)
 
     dist_dataset = distribution.experimental_distribute_dataset(
         dataset, options)
@@ -519,15 +515,15 @@ class DistributedDatasetsFromFunctionSpecTest(test.TestCase,
           ],
           enable_get_next_as_optional=[True, False],
           experimental_place_dataset_on_device=[True, False],
-          experimental_prefetch_to_device=[True, False],
+          experimental_fetch_to_device=[True, False],
       ))
   def testDistributedDatasetsFromFunctionSpec(
       self, distribution, enable_get_next_as_optional,
-      experimental_place_dataset_on_device, experimental_prefetch_to_device):
+      experimental_place_dataset_on_device, experimental_fetch_to_device):
 
-    if experimental_place_dataset_on_device and experimental_prefetch_to_device:
+    if experimental_place_dataset_on_device and experimental_fetch_to_device:
       self.skipTest("Setting experimental_place_dataset_on_device and "
-                    "experimental_prefetch_to_device to `True` is not "
+                    "experimental_fetch_to_device to `True` is not "
                     "allowed when using "
                     "distribute_lib.InputReplicationMode.PER_REPLICA.")
 
@@ -547,7 +543,7 @@ class DistributedDatasetsFromFunctionSpecTest(test.TestCase,
     options = distribute_lib.InputOptions(
         experimental_place_dataset_on_device=
         experimental_place_dataset_on_device,
-        experimental_prefetch_to_device=experimental_prefetch_to_device,
+        experimental_fetch_to_device=experimental_fetch_to_device,
         experimental_replication_mode=(
             distribute_lib.InputReplicationMode.PER_REPLICA))
 

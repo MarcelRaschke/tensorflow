@@ -44,7 +44,7 @@ typedef Eigen::GpuDevice GPUDevice;
   FN(arg0, int8);                \
   FN(arg0, int16);               \
   FN(arg0, int32);               \
-  FN(arg0, int64);               \
+  FN(arg0, int64_t);             \
   FN(arg0, Eigen::half);         \
   FN(arg0, float);               \
   FN(arg0, double);              \
@@ -124,7 +124,7 @@ CpuCastOp::CpuCastOp(OpKernelConstruction* ctx) : CastOpBase(ctx) {
 Status CpuCastOp::Prepare() {
   if (external_src_dtype_ == external_dst_dtype_) {
     work_ = nullptr;  // Identity
-    return Status::OK();
+    return OkStatus();
   }
   if (src_dtype_ == DT_BOOL) {
     work_ = GetCpuCastFromBool(dst_dtype_);
@@ -163,7 +163,7 @@ Status CpuCastOp::Prepare() {
   // vectorized versions (not the least based on F16C for Haswell
   // or newer).
 
-  return work_ == nullptr ? Unimplemented() : Status::OK();
+  return work_ == nullptr ? Unimplemented() : OkStatus();
 }
 
 #if (defined(GOOGLE_CUDA) && GOOGLE_CUDA) || \
@@ -178,7 +178,7 @@ class GpuCastOp : public CastOpBase {
   Status Prepare() {
     if (external_src_dtype_ == external_dst_dtype_) {
       work_ = nullptr;  // Identity
-      return Status::OK();
+      return OkStatus();
     }
     if (src_dtype_ == DT_BOOL) {
       work_ = GetGpuCastFromBool(dst_dtype_);
@@ -212,7 +212,7 @@ class GpuCastOp : public CastOpBase {
       work_ = GetGpuCastFromBfloat(dst_dtype_);
     }
 
-    return work_ == nullptr ? Unimplemented() : Status::OK();
+    return work_ == nullptr ? Unimplemented() : OkStatus();
   }
 };
 #endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
@@ -230,45 +230,23 @@ REGISTER_KERNEL_BUILDER(Name("Cast").Device(DEVICE_CPU), CpuCastOp);
                               .Device(DEVICE_GPU),             \
                           GpuCastOp)
 
-#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED) || \
-    !defined(MLIR_GENERATED_EXPERIMENTAL_KERNELS_ENABLED)
+#if !defined(MLIR_GENERATED_GPU_KERNELS_ENABLED)
 CURRY_TYPES2(REGISTER_CAST_GPU, bool);
 CURRY_TYPES2(REGISTER_CAST_GPU, int8);
 CURRY_TYPES2(REGISTER_CAST_GPU, int16);
 CURRY_TYPES2(REGISTER_CAST_GPU, int32);
 CURRY_TYPES2(REGISTER_CAST_GPU, int64);
-CURRY_TYPES2(REGISTER_CAST_GPU, Eigen::half);
-CURRY_TYPES2(REGISTER_CAST_GPU, float);
-CURRY_TYPES2(REGISTER_CAST_GPU, double);
-#else
-
-#define CURRY_SUBSET_OF_TYPES(FN, arg0) \
-  FN(arg0, uint8);                      \
-  FN(arg0, uint16);                     \
-  FN(arg0, uint32);                     \
-  FN(arg0, uint64);                     \
-  FN(arg0, std::complex<float>);        \
-  FN(arg0, std::complex<double>)
-
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, bool);
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, int8);
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, int16);
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, int32);
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, int64);
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, Eigen::half);
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, float);
-CURRY_SUBSET_OF_TYPES(REGISTER_CAST_GPU, double);
-
-#undef CURRY_SUBSET_OF_TYPES
-
-#endif
-
 CURRY_TYPES2(REGISTER_CAST_GPU, uint8);
 CURRY_TYPES2(REGISTER_CAST_GPU, uint16);
 CURRY_TYPES2(REGISTER_CAST_GPU, uint32);
 CURRY_TYPES2(REGISTER_CAST_GPU, uint64);
+CURRY_TYPES2(REGISTER_CAST_GPU, Eigen::half);
+CURRY_TYPES2(REGISTER_CAST_GPU, float);
+CURRY_TYPES2(REGISTER_CAST_GPU, double);
 CURRY_TYPES2(REGISTER_CAST_GPU, std::complex<float>);
 CURRY_TYPES2(REGISTER_CAST_GPU, std::complex<double>);
+#endif
+
 REGISTER_CAST_GPU(float, bfloat16);
 REGISTER_CAST_GPU(bfloat16, float);
 

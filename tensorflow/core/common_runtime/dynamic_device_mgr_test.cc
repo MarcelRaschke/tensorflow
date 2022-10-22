@@ -35,7 +35,7 @@ static Device* CreateDevice(const char* type, const char* name,
   class FakeDevice : public Device {
    public:
     explicit FakeDevice(const DeviceAttributes& attr) : Device(nullptr, attr) {}
-    Status Sync() override { return Status::OK(); }
+    Status Sync() override { return OkStatus(); }
     Allocator* GetAllocator(AllocatorAttributes) override { return nullptr; }
   };
 
@@ -81,7 +81,7 @@ TEST(DynamicDeviceMgrTest, RemoveDeviceFromMgr) {
   std::unique_ptr<Device> d0(CreateDevice("CPU", "/device:CPU:0"));
   std::unique_ptr<Device> d1(CreateDevice("CPU", "/device:CPU:1"));
   Device* d1_ptr = d1.get();
-  const int64 d1_incarnation = d1->attributes().incarnation();
+  const int64_t d1_incarnation = d1->attributes().incarnation();
 
   auto dm = MakeUnique<DynamicDeviceMgr>();
   std::vector<std::unique_ptr<Device>> devices;

@@ -28,14 +28,17 @@ class MemorySpacePropagation : public HloModulePass {
  public:
   ~MemorySpacePropagation() override = default;
   absl::string_view name() const override { return "memory-space-propagation"; }
-  StatusOr<bool> Run(HloModule* module) override;
+  using HloPassInterface::Run;
+  StatusOr<bool> Run(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
  private:
   // Given the shape index (operand or output) and its corresponding instruction
   // in the fused computation (parameter or root), propagates the memory space
   // in the callee side. Returns true if the module is modified.
   bool Propagate(ShapeIndexView index, const HloInstruction* callee_instruction,
-                 int64 memory_space) const;
+                 int64_t memory_space) const;
 
   std::unique_ptr<HloDataflowAnalysis> dataflow_analysis_;
 };

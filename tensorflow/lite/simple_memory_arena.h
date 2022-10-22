@@ -19,6 +19,7 @@ limitations under the License.
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 
 #include "tensorflow/lite/c/common.h"
@@ -61,12 +62,18 @@ struct ArenaAllocWithUsageInterval {
 // zero-sized allocations are explicitly allowed, and will resolve to null.
 class SimpleMemoryArena {
  public:
-  explicit SimpleMemoryArena(size_t arena_alignment)
-      : committed_(false),
+  explicit SimpleMemoryArena(size_t arena_alignment, int subgraph_index = 0)
+      : subgraph_index_(subgraph_index),
+        committed_(false),
         arena_alignment_(arena_alignment),
         high_water_mark_(0),
         underlying_buffer_size_(0),
-        ordered_allocs_() {}
+        ordered_allocs_(),
+        allocs_erased_(false) {}
+
+  // Erases all allocs which have been marked for deletion. This must be called
+  // after Deallocate.
+  void ResolveDeallocations();
 
   // Schedule memory allocation for a tensor with a given size, assuming that it
   // needs to be allocated before the execution of first_node, and deallocated
@@ -75,8 +82,17 @@ class SimpleMemoryArena {
                         int32_t tensor, int32_t first_node, int32_t last_node,
                         ArenaAllocWithUsageInterval* new_alloc);
 
+  // Marks `alloc` for deletion by setting tensor to -1. After one or
+  // more calls to this function, `ResolveDeallocations` must be called to
+  // delete all allocs which have been marked, otherwise the arena memory cannot
+  // be re-used, increasing overall memory usage.
   TfLiteStatus Deallocate(TfLiteContext* context,
-                          const ArenaAllocWithUsageInterval& alloc);
+                          ArenaAllocWithUsageInterval& alloc);
+
+  // Deletes all allocs which are allocated by nodes after `node`.
+  // This is equivalent, but much more efficient than calling Deallocate for
+  // each alloc individually.
+  void DeallocateAfter(int32_t node);
 
   inline size_t RequiredBufferSize() {
     // Add in a small amount of padding to reduce the chance of resize events
@@ -85,7 +101,7 @@ class SimpleMemoryArena {
     return arena_alignment_ + high_water_mark_ + padding;
   }
 
-  TfLiteStatus Commit(TfLiteContext* context);
+  TfLiteStatus Commit(TfLiteContext* context, bool* arena_reallocated);
 
   TfLiteStatus ResolveAlloc(TfLiteContext* context,
                             const ArenaAllocWithUsageInterval& alloc,
@@ -101,11 +117,31 @@ class SimpleMemoryArena {
   // again until Commit() is called & tensor allocations are resolved.
   TfLiteStatus ReleaseBuffer();
 
-  size_t GetBufferSize() { return underlying_buffer_size_; }
+  size_t GetBufferSize() const { return underlying_buffer_size_; }
 
   std::intptr_t BasePointer() const {
     return reinterpret_cast<std::intptr_t>(underlying_buffer_aligned_ptr_);
   }
+
+  // Dumps the memory allocation information of this memory arena (which could
+  // be differentiated from others by the `name`) against the specified op node
+  // execution plan (i.e. `execution_plan`) for the purpose of debugging.
+  // Note: in order to have minimal binary increase caused by this debug info
+  // dump implementation for the TfLite library, and allow users to plug-in
+  // their own memory planner debugger, we have utilized weak symbols to meet
+  // these two requirementsements. By default, there is no debugging info
+  // dumped. To override this, provide a strong defintion of
+  // tflite::DumpArenaInfo(...) whose weak defintion is in
+  // simple_memory_arena.cc. TfLite provides a sample one as
+  // "lite:simple_memory_arena_debug_dump". When this dep is added to the
+  // program, calling this function will output information of this memory arena
+  // about tenosrs and ops, such as memory arena utilization rate, live tensors
+  // at each op etc.
+  void DumpDebugInfo(const std::string& name,
+                     const std::vector<int>& execution_plan) const;
+
+ protected:
+  int subgraph_index_;
 
  private:
   bool committed_;
@@ -115,6 +151,7 @@ class SimpleMemoryArena {
   size_t underlying_buffer_size_;
   char* underlying_buffer_aligned_ptr_;
   std::vector<ArenaAllocWithUsageInterval> ordered_allocs_;
+  bool allocs_erased_;
 };
 
 }  // namespace tflite

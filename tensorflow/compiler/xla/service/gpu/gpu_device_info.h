@@ -16,18 +16,14 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_GPU_GPU_DEVICE_INFO_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_GPU_GPU_DEVICE_INFO_H_
 
+#include "tensorflow/compiler/xla/stream_executor/stream_executor.h"
+
 namespace xla {
 namespace gpu {
 
 // THe information contained in these structures is also contained in
 // se::DeviceDescription, but separating these out lets us write code that does
 // not depend on stream executor.
-
-struct CudaComputeCapability {
-  int cc_major;
-  int cc_minor;
-};
-
 struct GpuDeviceInfo {
   int threads_per_block_limit;
   int threads_per_warp;
@@ -38,6 +34,9 @@ struct GpuDeviceInfo {
   int block_dim_limit_y;
   int block_dim_limit_z;
 };
+
+GpuDeviceInfo GetGpuDeviceInfo(stream_executor::StreamExecutor* stream_exec);
+
 }  // namespace gpu
 }  // namespace xla
 

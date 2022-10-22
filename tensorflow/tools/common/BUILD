@@ -1,11 +1,14 @@
 # Description:
 #   Common functionality for TensorFlow tooling
 
-load("//tensorflow:tensorflow.bzl", "py_test")
+load("//tensorflow:tensorflow.bzl", "VERSION_MAJOR", "py_test")
 
 package(
-    default_visibility = ["//tensorflow:__subpackages__"],
-    licenses = ["notice"],  # Apache 2.0
+    default_visibility = [
+        "//tensorflow:__subpackages__",
+        "//third_party/py/keras/api:__subpackages__",
+    ],
+    licenses = ["notice"],
 )
 
 py_library(
@@ -21,6 +24,11 @@ py_library(
 py_test(
     name = "public_api_test",
     srcs = ["public_api_test.py"],
+    data = select({
+        "//tensorflow:macos": ["//tensorflow:libtensorflow_framework.dylib"],
+        "//tensorflow:windows": [],
+        "//conditions:default": ["//tensorflow:libtensorflow_framework.so.%s" % VERSION_MAJOR],
+    }),
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [
@@ -42,6 +50,11 @@ py_library(
 py_test(
     name = "traverse_test",
     srcs = ["traverse_test.py"],
+    data = select({
+        "//tensorflow:macos": ["//tensorflow:libtensorflow_framework.dylib"],
+        "//tensorflow:windows": [],
+        "//conditions:default": ["//tensorflow:libtensorflow_framework.so.%s" % VERSION_MAJOR],
+    }),
     python_version = "PY3",
     srcs_version = "PY3",
     deps = [

@@ -88,7 +88,8 @@ struct HistogramFixedWidthFunctor<GPUDevice, T, Tout> {
     Tensor temp_storage;
     TF_RETURN_IF_ERROR(context->allocate_temp(
         DataTypeToEnum<int8>::value,
-        TensorShape({static_cast<int64>(temp_storage_bytes)}), &temp_storage));
+        TensorShape({static_cast<int64_t>(temp_storage_bytes)}),
+        &temp_storage));
 
     void* d_temp_storage = temp_storage.flat<int8>().data();
 
@@ -108,7 +109,7 @@ struct HistogramFixedWidthFunctor<GPUDevice, T, Tout> {
           "Could not launch HistogramRange: ", GpuGetErrorString(err), ".");
     }
 
-    return Status::OK();
+    return OkStatus();
   }
 };
 

@@ -15,10 +15,6 @@
 
 """Tests for special math operations."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import os
 
 from absl import flags
@@ -26,7 +22,6 @@ from absl.testing import parameterized
 
 import numpy as np
 import scipy.special as sps
-import six
 
 from tensorflow.compiler.tests import xla_test
 from tensorflow.python.eager import def_function
@@ -81,10 +76,7 @@ class Log1pTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(Log1pTest, self).setUp()
 
@@ -151,10 +143,7 @@ class ZetaTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(ZetaTest, self).setUp()
 
@@ -184,12 +173,33 @@ class ZetaTest(xla_test.XLATestCase, parameterized.TestCase):
 
     with self.session() as sess:
       with self.test_scope():
-        y = _zeta([1., 1.1], [-1.1, -1.])
+        y = _zeta([1.1, 1.2, 2.1, 2.2, 3.1], [-2.0, -1.1, -1.0, -0.5, -0.1])
       actual = sess.run(y)
+    # For q <= 0, x must be an integer.
+    self.assertTrue(np.all(np.isnan(actual)))
 
-    # When q is negative, zeta is not defined
-    # if q is an integer or x is not an integer.
+    with self.session() as sess:
+      with self.test_scope():
+        y = _zeta([2.0, 4.0, 6.0], [0.0, -1.0, -2.0])
+      actual = sess.run(y)
+    # For integer q <= 0, zeta has poles with a defined limit of +inf where x is
+    # an even integer.
     self.assertTrue(np.all(np.isinf(actual)))
+
+    with self.session() as sess:
+      with self.test_scope():
+        y = _zeta([3.0, 5.0, 7.0], [0.0, -1.0, -2.0])
+      actual = sess.run(y)
+    # For non-positive integer q, zeta has poles with an undefined limit where x
+    # is an odd integer.
+    self.assertTrue(np.all(np.isnan(actual)))
+
+    with self.session() as sess:
+      with self.test_scope():
+        y = _zeta([1.1, 2.2, 3.3], [-1.1, -1.0, 0.0])
+      actual = sess.run(y)
+    # For non-positive q, zeta is not defined if x is not an integer.
+    self.assertTrue(np.all(np.isnan(actual)))
 
   @parameterized.parameters((np.float32, 1e-2, 1e-11),
                             (np.float64, 1e-4, 1e-30))
@@ -260,10 +270,7 @@ class PolygammaTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(PolygammaTest, self).setUp()
 
@@ -344,10 +351,7 @@ class IgammaTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(IgammaTest, self).setUp()
 
@@ -529,10 +533,7 @@ class IgammacTest(xla_test.XLATestCase, parameterized.TestCase):
   def setUp(self):
     if flags.FLAGS.vary_seed:
       entropy = os.urandom(64)
-      if six.PY2:
-        answer = int(entropy.encode('hex'), 16)
-      else:
-        answer = int.from_bytes(entropy, 'big')
+      answer = int.from_bytes(entropy, 'big')
       np.random.seed(answer % (2**32 - 1))
     super(IgammacTest, self).setUp()
 

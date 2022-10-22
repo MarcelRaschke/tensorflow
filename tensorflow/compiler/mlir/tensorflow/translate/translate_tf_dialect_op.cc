@@ -15,16 +15,17 @@ limitations under the License.
 
 #include "llvm/ADT/STLExtras.h"
 #include "llvm/Support/ToolOutputFile.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/Location.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
-#include "mlir/Translation.h"  // from @llvm-project
+#include "mlir/Tools/mlir-translate/Translation.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/tensorflow/dialect_registration.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/export_tf_dialect_op.h"
 
 namespace mlir {
 static mlir::Operation* ExtractOnlyOp(mlir::ModuleOp module) {
-  mlir::FuncOp fn = module.lookupSymbol<mlir::FuncOp>("main");
+  mlir::func::FuncOp fn = module.lookupSymbol<mlir::func::FuncOp>("main");
   if (!fn) return nullptr;
 
   if (!llvm::hasSingleElement(fn)) return nullptr;
@@ -60,7 +61,7 @@ static LogicalResult MlirToTfNodeDef(ModuleOp module,
     return failure();
   }
 
-  output << node_def_or.ValueOrDie()->DebugString();
+  output << node_def_or.value()->DebugString();
   return success();
 }
 

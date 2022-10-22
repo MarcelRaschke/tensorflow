@@ -36,14 +36,14 @@ TEST_F(HloExecutionProfileTest, Basic) {
     add = f32[30,30]{1,0} add(lhs, rhs)
     ROOT dot = f32[30,30]{1,0} dot(lhs, add), lhs_contracting_dims={1}, rhs_contracting_dims={0}
   })")
-                        .ValueOrDie();
+                        .value();
   const HloInstruction* dot_instruction =
       hlo_module->entry_computation()->root_instruction();
   const HloInstruction* add_instruction = dot_instruction->operand(1);
   Shape shape = ShapeUtil::MakeShape(F32, {30, 30});
 
   auto shape_size_function = [&](const Shape& shape) {
-    const int64 pointer_size = 8;
+    const int64_t pointer_size = 8;
     if (shape.IsOpaque()) {
       return pointer_size;
     }
@@ -58,8 +58,8 @@ TEST_F(HloExecutionProfileTest, Basic) {
   HloExecutionProfile execution_profile(profile_printer.get(),
                                         &profile_index_map);
 
-  const int64 add_cycles = 1000;
-  const int64 dot_cycles = 4000;
+  const int64_t add_cycles = 1000;
+  const int64_t dot_cycles = 4000;
 
   execution_profile.SetCyclesTakenBy(add_instruction, add_cycles);
   execution_profile.SetCyclesTakenBy(dot_instruction, dot_cycles);

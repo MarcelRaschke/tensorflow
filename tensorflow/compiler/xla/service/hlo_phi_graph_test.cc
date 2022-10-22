@@ -16,14 +16,14 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/hlo_phi_graph.h"
 
 #include "tensorflow/compiler/xla/literal_util.h"
-#include "tensorflow/core/platform/test.h"
+#include "tensorflow/tsl/platform/test.h"
 
 namespace xla {
 namespace {
 class PhiGraphTest : public ::testing::Test {
  protected:
   HloValue NewHloValue(bool is_phi) {
-    static int64 id = 0;
+    static int64_t id = 0;
     return HloValue(id++, dummy_inst_.get(), {}, is_phi);
   }
 

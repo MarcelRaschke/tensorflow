@@ -16,16 +16,16 @@ limitations under the License.
 #include "tensorflow/compiler/xla/service/collective_ops_utils.h"
 
 #include <iterator>
+#include <optional>
 #include <sstream>
 #include <string>
 
 #include "absl/algorithm/container.h"
-#include "absl/types/optional.h"
 #include "tensorflow/compiler/xla/service/computation_placer.h"
 #include "tensorflow/compiler/xla/service/global_device_id.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/lib/core/status_test_util.h"
-#include "tensorflow/core/platform/test.h"
+#include "tensorflow/tsl/lib/core/status_test_util.h"
+#include "tensorflow/tsl/platform/test.h"
 
 namespace xla {
 namespace {
@@ -34,7 +34,7 @@ TEST(CollectiveOpsUtilsTest, GetParticipatingIDs_NoReplicaGroups) {
   std::vector<int> actual = GetParticipatingIDs(
                                 /*current_id=*/0, /*total_participant_count=*/3,
                                 /*groups=*/{})
-                                .ConsumeValueOrDie();
+                                .value();
   std::vector<int> expected = {0, 1, 2};
   EXPECT_EQ(actual, expected);
 }
@@ -50,9 +50,9 @@ TEST(CollectiveOpsUtilsTest, GetParticipatingIDs_ReplicaGroups) {
 
   std::vector<int> actual =
       GetParticipatingIDs(
-          /*current_id=*/1, /*total_participant_count=*/absl::nullopt,
+          /*current_id=*/1, /*total_participant_count=*/std::nullopt,
           replica_groups)
-          .ConsumeValueOrDie();
+          .value();
   std::vector<int> expected = {1, 5};
   EXPECT_EQ(actual, expected);
 }
@@ -63,8 +63,8 @@ TEST(CollectiveOpsUtilsTest, GetParticipatingIDs_ReplicaGroups) {
 namespace GetCollectiveOpGroupModeTest {
 struct TestCase {
   bool has_channel_id;
-  absl::optional<bool> use_global_device_ids;
-  absl::optional<xla::CollectiveOpGroupMode> expected;
+  std::optional<bool> use_global_device_ids;
+  std::optional<xla::CollectiveOpGroupMode> expected;
 
   std::string ToString() const {
     std::ostringstream s;
@@ -81,10 +81,10 @@ std::vector<TestCase> GetTestCases() {
   const std::vector<TestCase> test_cases = {
       // clang-format off
       // has_channel_id, use_global_device_ids, expected mode
-      {false, absl::nullopt, CollectiveOpGroupMode::kCrossReplica},
+      {false, std::nullopt, CollectiveOpGroupMode::kCrossReplica},
       {false, false,         CollectiveOpGroupMode::kCrossReplica},
-      {false, true,          absl::nullopt},
-      {true,  absl::nullopt, CollectiveOpGroupMode::kCrossPartition},
+      {false, true,          std::nullopt},
+      {true,  std::nullopt, CollectiveOpGroupMode::kCrossPartition},
       {true,  false,         CollectiveOpGroupMode::kCrossReplicaAndPartition},
       {true,  true,          CollectiveOpGroupMode::kFlattenedID},
       // clang-format on
@@ -120,7 +120,7 @@ struct TestCase {
   xla::Array2D<int> device_assignment;
   std::vector<std::vector<int>> replica_groups;
   bool has_channel_id;
-  absl::optional<bool> use_global_device_ids;
+  std::optional<bool> use_global_device_ids;
 
   // For a given test case, its useful to test multiple 'current_id' inputs.
   struct CurrentIdAndOutput {
@@ -128,6 +128,8 @@ struct TestCase {
     std::vector<int> expected_output;
   };
   std::vector<CurrentIdAndOutput> subtests;
+
+  std::vector<std::vector<int>> participating_device_groups;
   bool expected_failure;
 
   std::string ToString() const;
@@ -171,6 +173,7 @@ std::vector<TestCase> GetTestCases() {
         {33, {33, 44, 55}},
         {44, {33, 44, 55}},
       },
+      {{33, 44, 55}},          // participating device groups
       false                    // expected_failure
     },
 
@@ -187,6 +190,7 @@ std::vector<TestCase> GetTestCases() {
         {34, {34, 45, 56}},
         {45, {34, 45, 56}},
       },
+      {{33, 44, 55}, {34, 45, 56}},    // participating device groups
       false                            // expected_failure
     },
 
@@ -202,6 +206,7 @@ std::vector<TestCase> GetTestCases() {
         // 44 is r1, so it should give {r1, r2}.
         {44, {44, 55}},
       },
+      {{ 33 }, {44, 55}},    // participating device groups
       false                  // expected_failure
     },
 
@@ -219,6 +224,7 @@ std::vector<TestCase> GetTestCases() {
         // 45 is r1p1, so should get r1p1 and r2p1.
         {45, {45, 56}},
       },
+      {{33}, {34}, {44, 55}, {45, 56}},  // participating device groups
       false                              // expected_failure
     },
   };
@@ -232,7 +238,7 @@ std::vector<TestCase> GetTestCases() {
       },
       {{0, 1}, {2, 3}},          // replica groups
       true,                      // has_channel_id
-      absl::nullopt,             // use_global_device_ids
+      std::nullopt,             // use_global_device_ids
       {                          // subtests
         // 33 is r0p0, p0 group has p0, p1 so we get r0p0 and r0p1.
         {33, {33, 34}},
@@ -242,7 +248,9 @@ std::vector<TestCase> GetTestCases() {
         {47, {46, 47}},
         {58, {57, 58}},
       },
-      false                        // expected_failure
+      {{33, 34}, {44, 45}, {55, 56},
+       {35, 36}, {46, 47}, {57, 58}},  // participating device groups
+      false                            // expected_failure
     }
   };
 
@@ -258,10 +266,10 @@ std::vector<TestCase> GetTestCases() {
         {33, {33, 34}},
         // 34 is r0p1, so should get r0 from all partitions.
         {34, {33, 34}},
-        // 45 is r1p1, so should get r1, r2
+        // 45 is r1p1, so should get r1, r2 from all partitions.
         {45, {44, 45, 55, 56}},
-                                 // from all partitons.
       },
+      {{33, 34}, {44, 45, 55, 56}},   // participating device groups
       false
     },
 
@@ -276,6 +284,7 @@ std::vector<TestCase> GetTestCases() {
         {34, {33, 34, 44, 45, 55, 56}},
         {56, {33, 34, 44, 45, 55, 56}},
       },
+      {{33, 34, 44, 45, 55, 56}},        // participating device groups
       false                              // expected_failure
     },
   };
@@ -303,6 +312,7 @@ std::vector<TestCase> GetTestCases() {
         {55, {45, 55, 56}},
         {56, {45, 55, 56}},
       },
+      {{33}, {34, 44}, {45, 55, 56}},  // participating device groups
       false                            // expected_failure
     },
     {
@@ -313,6 +323,7 @@ std::vector<TestCase> GetTestCases() {
       {           // subtests
         {33, {33}},
       },
+      {{33}},      // participating device groups
       true         // expected_failure
     },
   };
@@ -327,6 +338,7 @@ std::vector<TestCase> GetTestCases() {
       {                     // subtests
         {33, {}},
       },
+      {{33, 44, 55}},       // participating device groups
       true                  // expected_failure
     },
   };
@@ -337,7 +349,7 @@ std::vector<TestCase> GetTestCases() {
   // When use_global_device_ids is not present and channel_id is not present,
   // that implies cross replica mode as well.
   for (TestCase tc : cross_replica_test_cases) {
-    tc.use_global_device_ids = absl::nullopt;
+    tc.use_global_device_ids = std::nullopt;
     test_cases.push_back(tc);
   }
 
@@ -381,15 +393,16 @@ TEST_P(GetParticipatingDevicesTest, Test) {
                       return group;
                     });
 
+  StatusOr<CollectiveOpGroupMode> group_mode =
+      GetCollectiveOpGroupMode(tc.has_channel_id, tc.use_global_device_ids);
+
+  if (!group_mode.ok()) {
+    EXPECT_TRUE(tc.expected_failure);
+    return;
+  }
+
   // Execute each sub-test.
   for (const TestCase::CurrentIdAndOutput &subtest : tc.subtests) {
-    StatusOr<CollectiveOpGroupMode> group_mode =
-        GetCollectiveOpGroupMode(tc.has_channel_id, tc.use_global_device_ids);
-    if (!group_mode.ok()) {
-      EXPECT_TRUE(tc.expected_failure);
-      continue;
-    }
-
     StatusOr<std::vector<GlobalDeviceId>> actual =
         GetParticipatingDevices(GlobalDeviceId(subtest.current_id),
                                 device_assignment, replica_groups, *group_mode);
@@ -403,6 +416,30 @@ TEST_P(GetParticipatingDevicesTest, Test) {
                       [](int id) { return GlobalDeviceId(id); });
     EXPECT_EQ(*actual, expected);
   }
+
+  StatusOr<std::vector<std::vector<GlobalDeviceId>>> actual_device_groups =
+      GetParticipatingDevicesGroups(device_assignment, replica_groups,
+                                    *group_mode);
+
+  if (!actual_device_groups.ok()) {
+    EXPECT_TRUE(tc.expected_failure);
+    return;
+  }
+
+  std::vector<std::vector<GlobalDeviceId>> expect_device_groups;
+  expect_device_groups.reserve(tc.participating_device_groups.size());
+
+  for (auto subgroup : tc.participating_device_groups) {
+    std::vector<GlobalDeviceId> subgroup_device_ids;
+    subgroup_device_ids.reserve(subgroup.size());
+    absl::c_transform(subgroup, std::back_inserter(subgroup_device_ids),
+                      [](int id) { return GlobalDeviceId(id); });
+
+    expect_device_groups.push_back(subgroup_device_ids);
+  }
+
+  EXPECT_THAT(*actual_device_groups,
+              testing::UnorderedElementsAreArray(expect_device_groups));
 }
 
 INSTANTIATE_TEST_SUITE_P(GetParticipatingDevices, GetParticipatingDevicesTest,

@@ -43,7 +43,7 @@ Status GetStackShape(xla::XlaBuilder* builder, XlaResource* resource,
   if (!shape_or_status.ok()) {
     return shape_or_status.status();
   }
-  xla::Shape shape = shape_or_status.ValueOrDie();
+  xla::Shape shape = shape_or_status.value();
   TF_RET_CHECK(shape.IsTuple());
   return XLAShapeToTensorShape(xla::ShapeUtil::GetTupleElementShape(shape, 0),
                                stack_shape);
@@ -85,7 +85,7 @@ Status MaybeInitializeStack(xla::XlaBuilder* builder, XlaResource* resource,
           actual_shape.DebugString());
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 class StackOp : public XlaOpKernel {
@@ -96,7 +96,7 @@ class StackOp : public XlaOpKernel {
   }
 
   void Compile(XlaOpKernelContext* ctx) override {
-    int64 max_size;
+    int64_t max_size;
     OP_REQUIRES_OK(ctx, ctx->ConstantInputAsIntScalar(0, &max_size));
     OP_REQUIRES(
         ctx, max_size >= 0,
@@ -213,7 +213,8 @@ class StackPopOp : public XlaOpKernel {
     xla::XlaOp read = xla::DynamicSlice(ta, start_indices, slice_shape);
 
     // Remove the leading '1' dimension.
-    std::vector<int64> value_shape(slice_shape.begin() + 1, slice_shape.end());
+    std::vector<int64_t> value_shape(slice_shape.begin() + 1,
+                                     slice_shape.end());
     ctx->SetOutput(0, xla::Reshape(read, value_shape));
   }
 

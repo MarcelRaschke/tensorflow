@@ -45,6 +45,7 @@ limitations under the License.
 
 #include <stdio.h>
 
+#include <algorithm>
 #include <memory>
 #include <string>
 #include <utility>
@@ -61,8 +62,6 @@ limitations under the License.
 #include "tensorflow/compiler/xla/debug_options_flags.h"
 #include "tensorflow/compiler/xla/execution_options_util.h"
 #include "tensorflow/compiler/xla/literal.h"
-#include "tensorflow/compiler/xla/service/gpu/infeed_manager.h"
-#include "tensorflow/compiler/xla/service/gpu/outfeed_manager.h"
 #include "tensorflow/compiler/xla/service/hlo.pb.h"
 #include "tensorflow/compiler/xla/service/hlo_parser.h"
 #include "tensorflow/compiler/xla/shape_util.h"
@@ -71,13 +70,13 @@ limitations under the License.
 #include "tensorflow/compiler/xla/tests/test_utils.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/lib/core/threadpool.h"
 #include "tensorflow/core/lib/io/record_reader.h"
-#include "tensorflow/core/platform/cpu_info.h"
-#include "tensorflow/core/platform/env.h"
-#include "tensorflow/core/platform/init_main.h"
-#include "tensorflow/core/platform/logging.h"
 #include "tensorflow/core/util/command_line_flags.h"
+#include "tensorflow/tsl/platform/cpu_info.h"
+#include "tensorflow/tsl/platform/env.h"
+#include "tensorflow/tsl/platform/init_main.h"
+#include "tensorflow/tsl/platform/logging.h"
+#include "tensorflow/tsl/platform/threadpool.h"
 
 namespace xla {
 namespace tools {
@@ -90,8 +89,8 @@ struct Options {
 
   bool NeedsRealData() const { return !use_fake_data && !compile_only; }
 
-  string fake_infeed_shape;
-  string fake_outfeed_shape;
+  std::string fake_infeed_shape;
+  std::string fake_outfeed_shape;
 
   // generate_fake_infeed == true is a safe default: If the model has 0 or 1
   // infeeds, then it will work like normal.  If the model has more than one
@@ -112,16 +111,27 @@ struct Options {
 };
 
 StatusOr<std::unique_ptr<LocalExecutable>> CompileExecutable(
-    const HloSnapshot& module, LocalClient* client) {
+    const HloSnapshot& module, LocalClient* client, const Options& opts) {
   XlaComputation computation(module.hlo().hlo_module());
   std::vector<Shape> argument_layouts;
   argument_layouts.reserve(
       computation.proto().host_program_shape().parameters_size());
   std::vector<const Shape*> argument_layout_ptrs;
-  for (const ShapeProto& param :
-       computation.proto().host_program_shape().parameters()) {
-    argument_layouts.push_back(Shape(param));
-    argument_layout_ptrs.push_back(&argument_layouts.back());
+  if (opts.use_fake_data) {
+    for (const ShapeProto& param :
+         computation.proto().host_program_shape().parameters()) {
+      argument_layouts.push_back(Shape(param));
+      argument_layout_ptrs.push_back(&argument_layouts.back());
+    }
+  } else {
+    for (const auto& proto : module.arguments()) {
+      if (!proto.has_shape()) {
+        return InvalidArgument("LiteralProto has no shape");
+      }
+      Shape shape(proto.shape());
+      argument_layouts.push_back(shape);
+      argument_layout_ptrs.push_back(&argument_layouts.back());
+    }
   }
   ExecutableBuildOptions exec_build_options;
   *exec_build_options.mutable_debug_options() = GetDebugOptionsFromFlags();
@@ -132,9 +142,8 @@ StatusOr<std::unique_ptr<LocalExecutable>> CompileExecutable(
   return std::move(executables[0]);
 }
 
-absl::optional<Shape> GetXfeedShape(bool is_infeed,
-                                    const HloModuleProto& module,
-                                    const Options& opts) {
+std::optional<Shape> GetXfeedShape(bool is_infeed, const HloModuleProto& module,
+                                   const Options& opts) {
   std::vector<HloInstructionProto> xfeed_instrs;
   for (const auto& comp : module.computations()) {
     for (const auto& instruction : comp.instructions()) {
@@ -153,7 +162,7 @@ absl::optional<Shape> GetXfeedShape(bool is_infeed,
     }
   };
 
-  auto find_instruction_from_id_or_die = [&](int64 id) {
+  auto find_instruction_from_id_or_die = [&](int64_t id) {
     for (const auto& comp : module.computations()) {
       for (const auto& instruction : comp.instructions()) {
         if (instruction.id() == id) {
@@ -164,14 +173,14 @@ absl::optional<Shape> GetXfeedShape(bool is_infeed,
     LOG(FATAL) << "No instruction with id " << id;
   };
 
-  absl::optional<Shape> xfeed_shape;
-  string xfeed_name = is_infeed ? "infeed" : "outfeed";
-  string fake_xfeed_shape =
+  std::optional<Shape> xfeed_shape;
+  std::string xfeed_name = is_infeed ? "infeed" : "outfeed";
+  std::string fake_xfeed_shape =
       is_infeed ? opts.fake_infeed_shape : opts.fake_outfeed_shape;
   bool generate_fake_xfeed =
       is_infeed ? opts.generate_fake_infeed : opts.generate_fake_outfeed;
   if (!fake_xfeed_shape.empty()) {
-    xfeed_shape = std::move(ParseShape(fake_xfeed_shape)).ValueOrDie();
+    xfeed_shape = std::move(ParseShape(fake_xfeed_shape)).value();
   } else if (generate_fake_xfeed) {
     QCHECK_LT(xfeed_instrs.size(), 2)
         << "--generate_fake_" << xfeed_name
@@ -246,8 +255,8 @@ StatusOr<Literal> ReplayComputation(const HloSnapshot& module,
         MakeFakeArgumentsOrDie(computation, client, &debug_opts);
     for (const auto& data : global_data_arguments) {
       argument_ptrs.push_back(
-          client->GlobalDataToShapedBuffer(data->handle(), /*device_ordinal=*/0)
-              .ValueOrDie());
+          client->GlobalDataToShapedBuffer(data->handle(), /*replica_number=*/0)
+              .value());
     }
   } else {  // use recorded data if available
     for (const auto& proto : module.arguments()) {
@@ -262,38 +271,14 @@ StatusOr<Literal> ReplayComputation(const HloSnapshot& module,
     }
   }
 
-  if (absl::optional<Shape> infeed_shape = GetXfeedShape(
+  std::shared_ptr<Literal> infeed_data;
+  if (std::optional<Shape> infeed_shape = GetXfeedShape(
           /*is_infeed=*/true, computation.proto(), opts)) {
-    auto infeed_data = std::make_shared<Literal>(
-        std::move(MakeFakeLiteral(*infeed_shape)).ValueOrDie());
-    xla::gpu::GetOrCreateInfeedManager()
-        ->RegisterBeforeGetNextDestinationCallback([infeed_data, client] {
-          TF_CHECK_OK(client->TransferToInfeed(*infeed_data));
-        });
+    infeed_data = std::make_shared<Literal>(
+        std::move(MakeFakeLiteral(*infeed_shape)).value());
   }
-
-  absl::optional<tensorflow::thread::ThreadPool> outfeed_thread_pool;
-  if (absl::optional<Shape> outfeed_shape = GetXfeedShape(
-          /*is_infeed=*/false, computation.proto(), opts)) {
-    // For each an outfeed that runs, enqueue a task that will consume it.  We
-    // need a thread pool because the act of running an outfeed blocks on there
-    // being a destination available, and the act of making a destination
-    // available blocks on there being outfeed data available.
-    outfeed_thread_pool.emplace(tensorflow::Env::Default(), "infeed",
-                                /*num_threads=*/1);
-    auto consume_outfeed = [client, outfeed_shape] {
-      Literal outfeed(*outfeed_shape);
-      TF_CHECK_OK(
-          client->TransferFromOutfeedLocal(/*device_ordinal=*/0, &outfeed));
-      VLOG(1) << "Received outfeed data of shape "
-              << ShapeUtil::HumanStringWithLayout(*outfeed_shape);
-    };
-    xla::gpu::GetOrCreateOutfeedManager()
-        ->RegisterBeforeGetNextDestinationCallback(
-            [consume_outfeed, &outfeed_thread_pool] {
-              outfeed_thread_pool->Schedule(consume_outfeed);
-            });
-  }
+  std::optional<Shape> outfeed_shape =
+      GetXfeedShape(/*is_infeed=*/false, computation.proto(), opts);
 
   // Do not attempt to run the executable if num_runs is less than 1.
   if (opts.num_runs < 1) {
@@ -304,9 +289,11 @@ StatusOr<Literal> ReplayComputation(const HloSnapshot& module,
   // execution.
   const bool xla_hlo_profile = GetDebugOptionsFromFlags().xla_hlo_profile();
   se::StreamExecutorMemoryAllocator allocator(
-      client->platform(),
-      {client->platform()->ExecutorForDevice(0).ValueOrDie()});
-  absl::optional<ScopedShapedBuffer> final_result;
+      client->platform(), {client->platform()->ExecutorForDevice(0).value()});
+  std::optional<ScopedShapedBuffer> final_result;
+
+  double total_run_time = 0;
+  LOG(ERROR) << "Running " << opts.num_runs << " number of times\n";
   for (int i = 0; i < opts.num_runs; ++i) {
     // If xla_hlo_profile is enabled, print a noisy message before the last run,
     // making it easier to separate this profile from the others in the logspam.
@@ -315,10 +302,10 @@ StatusOr<Literal> ReplayComputation(const HloSnapshot& module,
       LOG(INFO) << "\n\n***** Final run below ******";
     }
     int thread_pool_size = opts.intra_op_thread_pool_size < 0
-                               ? tensorflow::port::MaxParallelism()
+                               ? tsl::port::MaxParallelism()
                                : opts.intra_op_thread_pool_size;
-    tensorflow::thread::ThreadPool pool(tensorflow::Env::Default(), "XLAEigen",
-                                        thread_pool_size);
+    tsl::thread::ThreadPool pool(tsl::Env::Default(), "XLAEigen",
+                                 thread_pool_size);
     Eigen::ThreadPoolDevice thread_pool(pool.AsEigenThreadPool(),
                                         pool.NumThreads());
 
@@ -328,11 +315,29 @@ StatusOr<Literal> ReplayComputation(const HloSnapshot& module,
     run_options.set_allocator(&allocator);
     run_options.set_intra_op_thread_pool(&thread_pool);
 
+    if (infeed_data) {
+      TF_CHECK_OK(client->TransferToInfeed(*infeed_data));
+    }
+    std::unique_ptr<tsl::Thread> outfeed_drain_thread;
+    if (outfeed_shape) {
+      // TransferFromOutfeedLocal blocks till the outfeed is available, so do
+      // it asynchronously separate thread.
+      outfeed_drain_thread.reset(tsl::Env::Default()->StartThread(
+          tsl::ThreadOptions(), "outfeed_drain_thread", [&] {
+            Literal outfeed(*outfeed_shape);
+            TF_CHECK_OK(client->TransferFromOutfeedLocal(/*device_ordinal=*/0,
+                                                         &outfeed));
+            VLOG(1) << "Received outfeed data of shape "
+                    << ShapeUtil::HumanStringWithLayout(*outfeed_shape);
+          }));
+    }
+
     TF_ASSIGN_OR_RETURN(ScopedShapedBuffer result,
                         executable->Run(argument_ptrs, run_options));
-    LOG(INFO) << "Done executing in "
-              << static_cast<double>(profile.compute_time_ns()) / 1e9
+    double run_time = static_cast<double>(profile.compute_time_ns()) / 1e9;
+    LOG(INFO) << "Done executing in " << run_time
               << "s: " << module.hlo().hlo_module().name();
+    total_run_time += run_time;
 
     // Save the result if this is for the final iteration.  Otherwise discard
     // the result before rerunning the computation, so as to free up the
@@ -341,6 +346,7 @@ StatusOr<Literal> ReplayComputation(const HloSnapshot& module,
       final_result = std::move(result);
     }
   }
+  LOG(INFO) << "Total execution time " << total_run_time << "s";
 
   TF_ASSIGN_OR_RETURN(Literal result_literal,
                       client->ShapedBufferToLiteral(*final_result));
@@ -349,17 +355,17 @@ StatusOr<Literal> ReplayComputation(const HloSnapshot& module,
 
 StatusOr<std::vector<HloSnapshot>> ParseRecordIoFile(absl::string_view filename,
                                                      const Options& opts) {
-  tensorflow::Env* env = tensorflow::Env::Default();
+  tsl::Env* env = tsl::Env::Default();
 
-  std::unique_ptr<tensorflow::RandomAccessFile> file;
+  std::unique_ptr<tsl::RandomAccessFile> file;
   TF_RETURN_IF_ERROR(env->NewRandomAccessFile(
-      string(filename.begin(), filename.end()), &file));
+      std::string(filename.begin(), filename.end()), &file));
   tensorflow::io::RecordReader reader(
       file.get(),
       tensorflow::io::RecordReaderOptions::CreateRecordReaderOptions("ZLIB"));
 
   std::vector<HloSnapshot> snapshots;
-  uint64 offset = 0;
+  uint64_t offset = 0;
   tensorflow::tstring record;
   while (reader.ReadRecord(&offset, &record).ok()) {
     HloSnapshot snapshot;
@@ -378,14 +384,14 @@ StatusOr<std::vector<HloSnapshot>> ParseRecordIoFile(absl::string_view filename,
   return snapshots;
 }
 
-StatusOr<HloSnapshot> ParseSingleHloFile(const string& filename,
-                                         const Options& opts) {
-  tensorflow::Env* env = tensorflow::Env::Default();
+StatusOr<std::vector<HloSnapshot>> ParseSingleHloFile(
+    const std::string& filename, const Options& opts) {
+  tsl::Env* env = tsl::Env::Default();
 
   HloSnapshot snapshot;
-  auto s = tensorflow::ReadBinaryProto(env, filename, &snapshot);
+  auto s = tsl::ReadBinaryProto(env, filename, &snapshot);
   if (s.ok()) {
-    return snapshot;
+    return std::vector<HloSnapshot>{std::move(snapshot)};
   }
   if (s.code() == tensorflow::error::NOT_FOUND) {
     return s;
@@ -396,37 +402,51 @@ StatusOr<HloSnapshot> ParseSingleHloFile(const string& filename,
   fprintf(stderr, "%s: is not HloSnapshot. Trying HloProto.\n",
           filename.c_str());
 
-  if (tensorflow::ReadBinaryProto(env, filename, snapshot.mutable_hlo()).ok()) {
-    return snapshot;
+  if (tsl::ReadBinaryProto(env, filename, snapshot.mutable_hlo()).ok()) {
+    return std::vector<HloSnapshot>{std::move(snapshot)};
   }
   fprintf(stderr, "%s: is not HloProto. Trying HLO text.\n", filename.c_str());
-  string contents;
-  TF_RETURN_IF_ERROR(tensorflow::ReadFileToString(env, filename, &contents));
+  std::string contents;
+  TF_RETURN_IF_ERROR(tsl::ReadFileToString(env, filename, &contents));
   HloModuleConfig config;
   config.set_debug_options(GetDebugOptionsFromFlags());
-  StatusOr<std::unique_ptr<HloModule>> module =
-      ParseAndReturnUnverifiedModule(contents, config);
-  if (module.ok()) {
-    *snapshot.mutable_hlo()->mutable_hlo_module() =
-        module.ValueOrDie()->ToProto();
-    return snapshot;
-  } else {
-    LOG(ERROR) << module.status();
+  std::vector<std::string> hlo_module_texts =
+      absl::StrSplit(contents, "// -----");
+  std::vector<HloSnapshot> snapshots;
+  int start_line = 0;
+  for (const std::string& hlo_module_text : hlo_module_texts) {
+    StatusOr<std::unique_ptr<HloModule>> module =
+        ParseAndReturnUnverifiedModule(hlo_module_text, config);
+    if (module.ok()) {
+      HloSnapshot snapshot;
+      *snapshot.mutable_hlo()->mutable_hlo_module() = module.value()->ToProto();
+      snapshots.push_back(snapshot);
+    } else {
+      LOG(ERROR) << module.status();
+      if (hlo_module_texts.size() > 1) {
+        LOG(ERROR)
+            << "The error below was done on the section starting at line "
+            << start_line;
+      }
+    }
+    start_line += absl::c_count(hlo_module_text, '\n');
+  }
+  if (!snapshots.empty()) {
+    return snapshots;
   }
   fprintf(stderr, "%s: is not HLO text.  Nothing left to try.\n",
           filename.c_str());
   return InvalidArgument("Could not parse %s.", filename);
 }
 
-StatusOr<std::vector<HloSnapshot>> ParseInputFile(const string& filename,
+StatusOr<std::vector<HloSnapshot>> ParseInputFile(const std::string& filename,
                                                   const Options& opts) {
   std::vector<HloSnapshot> snapshots;
   absl::string_view filename_view = filename;
   if (absl::ConsumePrefix(&filename_view, "recordio_hlo_proto:")) {
     return ParseRecordIoFile(filename_view, opts);
   }
-  TF_ASSIGN_OR_RETURN(auto snapshot, ParseSingleHloFile(filename, opts));
-  return std::vector<HloSnapshot>{std::move(snapshot)};
+  return ParseSingleHloFile(filename, opts);
 }
 
 int RealMain(absl::Span<char* const> args, const Options& opts) {
@@ -438,7 +458,7 @@ int RealMain(absl::Span<char* const> args, const Options& opts) {
     StatusOr<std::vector<HloSnapshot>> maybe_snapshot =
         ParseInputFile(arg, opts);
     if (maybe_snapshot.ok()) {
-      auto new_snapshots = std::move(maybe_snapshot).ValueOrDie();
+      auto new_snapshots = std::move(maybe_snapshot).value();
       snapshots.insert(snapshots.end(),
                        std::make_move_iterator(new_snapshots.begin()),
                        std::make_move_iterator(new_snapshots.end()));
@@ -453,21 +473,20 @@ int RealMain(absl::Span<char* const> args, const Options& opts) {
   {
     constexpr size_t kThreadLimits = 100;
     // ThreadPool CHECK-fails if we give it 0 threads.
-    tensorflow::thread::ThreadPool thread_pool(
-        tensorflow::Env::Default(), tensorflow::ThreadOptions(),
-        "compile_modules",
+    tsl::thread::ThreadPool thread_pool(
+        tsl::Env::Default(), tsl::ThreadOptions(), "compile_modules",
         std::min<size_t>(std::max(kThreadLimits, snapshots.size()), 1),
         /*low_latency_hint=*/false);
     executables.resize(snapshots.size());
-    for (int64 i = 0; i < snapshots.size(); ++i) {
-      thread_pool.Schedule([&snapshots, &executables, client, i] {
-        executables[i] = CompileExecutable(snapshots[i], client);
+    for (int64_t i = 0; i < snapshots.size(); ++i) {
+      thread_pool.Schedule([&snapshots, &executables, client, i, &opts] {
+        executables[i] = CompileExecutable(snapshots[i], client, opts);
       });
     }
   }
   LOG(INFO) << "Done compiling; now running the modules.";
 
-  for (int64 i = 0; i < executables.size(); ++i) {
+  for (int64_t i = 0; i < executables.size(); ++i) {
     if (!executables[i].ok()) {
       LOG(ERROR) << "Compilation failed: " << executables[i].status() << ": "
                  << snapshots[i].ShortDebugString();
@@ -479,7 +498,7 @@ int RealMain(absl::Span<char* const> args, const Options& opts) {
       continue;
     }
 
-    LocalExecutable* executable = executables[i].ValueOrDie().get();
+    LocalExecutable* executable = executables[i].value().get();
     LOG(ERROR) << "Running iteration " << i;
     StatusOr<Literal> result_status =
         ReplayComputation(snapshots[i], executable, client, opts);
@@ -492,15 +511,14 @@ int RealMain(absl::Span<char* const> args, const Options& opts) {
     }
 
     if (opts.print_result) {
-      Literal result = std::move(result_status).ValueOrDie();
+      Literal result = std::move(result_status).value();
       fprintf(stdout, "%s: %s :: %s:%s\n", args[i],
               executable->executable()->module().name().c_str(),
               ShapeUtil::HumanString(result.shape()).c_str(),
               result.ToString().c_str());
       auto& snapshot = snapshots[i];
       if (snapshot.has_result()) {
-        Literal literal =
-            Literal::CreateFromProto(snapshot.result()).ConsumeValueOrDie();
+        Literal literal = Literal::CreateFromProto(snapshot.result()).value();
         fprintf(
             stdout, "was %s:%s\n",
             ShapeUtil::HumanString(Shape(snapshot.result().shape())).c_str(),
@@ -519,7 +537,7 @@ int RealMain(absl::Span<char* const> args, const Options& opts) {
 
 int main(int argc, char** argv) {
   xla::tools::Options opts;
-  const std::vector<tensorflow::Flag> flag_list = {
+  std::vector<tensorflow::Flag> flag_list = {
       tensorflow::Flag("use_fake_data", &opts.use_fake_data,
                        "Replay computation using fake data"),
       tensorflow::Flag("print_result", &opts.print_result,
@@ -544,14 +562,17 @@ int main(int argc, char** argv) {
                        "Whether the input should only be compiled, as opposed "
                        "to compiled and executed."),
   };
-  xla::string usage = tensorflow::Flags::Usage(argv[0], flag_list);
+  xla::AppendDebugOptionsFlags(&flag_list);
+  std::string usage = tensorflow::Flags::Usage(argv[0], flag_list);
   bool parse_ok = tensorflow::Flags::Parse(&argc, argv, flag_list);
-  tensorflow::port::InitMain(argv[0], &argc, &argv);
+  tsl::port::InitMain(argv[0], &argc, &argv);
   if (argc < 2 || !parse_ok) {
     LOG(QFATAL) << usage;
   }
-
   absl::Span<char* const> args(argv, argc);
   args.remove_prefix(1);  // Pop off the binary name, argv[0]
+  if (opts.compile_only) {
+    opts.use_fake_data = true;
+  }
   return xla::tools::RealMain(args, opts);
 }

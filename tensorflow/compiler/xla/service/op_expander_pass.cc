@@ -25,12 +25,18 @@ limitations under the License.
 
 namespace xla {
 
-StatusOr<bool> OpExpanderPass::Run(HloModule* module) {
+StatusOr<bool> OpExpanderPass::Run(
+    HloModule* module,
+    const absl::flat_hash_set<absl::string_view>& execution_threads) {
   std::vector<HloInstruction*> matching_instructions;
-  for (HloComputation* computation : module->MakeNonfusionComputations()) {
-    absl::c_copy_if(
-        computation->instructions(), std::back_inserter(matching_instructions),
-        [&](HloInstruction* inst) { return InstructionMatchesPattern(inst); });
+  for (HloComputation* computation :
+       module->MakeNonfusionComputations(execution_threads)) {
+    absl::c_copy_if(computation->MakeInstructionPostOrder(),
+                    std::back_inserter(matching_instructions),
+                    [&](HloInstruction* inst) {
+                      return InstructionMatchesPattern(inst) &&
+                             (!extra_filter_ || extra_filter_(inst));
+                    });
   }
 
   for (HloInstruction* inst : matching_instructions) {

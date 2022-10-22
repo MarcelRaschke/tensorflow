@@ -15,10 +15,6 @@
 # ==============================================================================
 """Tests for monitored_session."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 import collections
 import glob
 import os
@@ -29,6 +25,7 @@ import traceback
 
 from tensorflow.core.protobuf import config_pb2
 from tensorflow.core.protobuf import debug_pb2
+from tensorflow.python.checkpoint import checkpoint_management
 from tensorflow.python.client import session as session_lib
 from tensorflow.python.distribute import collective_all_reduce_strategy
 from tensorflow.python.distribute import distribute_coordinator
@@ -43,9 +40,10 @@ from tensorflow.python.ops import resource_variable_ops
 from tensorflow.python.ops import state_ops
 from tensorflow.python.ops import variables
 from tensorflow.python.platform import test
+from tensorflow.python.saved_model import builder as saved_model_builder
+from tensorflow.python.saved_model import load as saved_model_load
 from tensorflow.python.summary import summary
 from tensorflow.python.training import basic_session_run_hooks
-from tensorflow.python.training import checkpoint_management
 from tensorflow.python.training import coordinator
 from tensorflow.python.training import monitored_session
 from tensorflow.python.training import saver as saver_lib
@@ -338,6 +336,45 @@ class MonitoredTrainingSessionTest(test.TestCase):
           is_chief=True, checkpoint_dir=logdir) as session:
         self.assertEqual(11, session.run(gstep))
 
+  def test_save_restore_checkpoint_v1_saved_model(self):
+
+    def _write_v1_simple_saved_model(export_dir):
+      # Create v1 Saved Model with single variable `w0` with value 5.0.
+      builder = saved_model_builder.SavedModelBuilder(export_dir)
+      with ops.Graph().as_default():
+        _ = resource_variable_ops.ResourceVariable(5.0)
+        with self.cached_session() as session:
+          session.run(variables.global_variables_initializer())
+          builder.add_meta_graph_and_variables(session, ['foo'])
+      builder.save()
+
+    test_dir = _test_dir(self.get_temp_dir(), 'saved_model')
+    _write_v1_simple_saved_model(test_dir)
+
+    with ops.Graph().as_default():
+      # Load saved model with `load_v1_in_v2`.
+      model = saved_model_load.load(test_dir)
+      w0 = model.variables[0]
+      # Define operation that increments `w0`.
+      w_add = w0.assign_add(1.)
+      gstep = training_util.get_or_create_global_step()
+      new_gstep = state_ops.assign_add(gstep, 1)
+
+      with monitored_session.MonitoredTrainingSession(
+          checkpoint_dir=test_dir) as session:
+        w1 = session.run(w_add)
+        self.assertEqual(w1, 6.)
+        session.run(new_gstep)
+        w2 = session.run(w_add)
+        self.assertEqual(w2, 7.)
+
+      # Stop and resume training.
+      with monitored_session.MonitoredTrainingSession(
+          checkpoint_dir=test_dir) as session:
+        # `w0` saves its value of 7.
+        w3 = session.run(w_add)
+        self.assertEqual(w3, 8.)
+
   def test_summaries_steps(self):
     logdir = _test_dir(self.get_temp_dir(), 'test_summaries_steps')
     with ops.Graph().as_default():
@@ -430,7 +467,7 @@ class MonitoredTrainingSessionTest(test.TestCase):
         self.assertEmpty(glob.glob(os.path.join(logdir, '*.meta')))
 
 
-class MockExtended(object):
+class MockExtended:
 
   def __init__(self, between_graph, should_init, should_checkpoint,
                should_save_summary):
@@ -440,7 +477,7 @@ class MockExtended(object):
     self.should_save_summary = should_save_summary
 
 
-class MockStrategy(object):
+class MockStrategy:
 
   def __init__(self,
                between_graph=False,
@@ -767,7 +804,7 @@ class CoordinatedSessionTest(test.TestCase):
             'Traceback:\n%s' % tb)
 
 
-class AbortAtNSession(object):
+class AbortAtNSession:
   """A mock session that aborts at the N-th run call."""
 
   def __init__(self, sess, n):
@@ -858,7 +895,7 @@ class FailTrainingAfterCoordinatorStopped(StopCoordinatorWithException):
                                        'Session got garbage-collected.')
 
 
-class CountingSessionCreator(object):
+class CountingSessionCreator:
   """A creator that counts the number of created sessions."""
 
   def __init__(self, session):
@@ -880,7 +917,7 @@ class CountingSessionCreator(object):
 class RecoverableSessionTest(test.TestCase):
   """_RecoverableSession tests."""
 
-  class _SessionReturner(object):
+  class _SessionReturner:
 
     def __init__(self, sess):
       self._sess = sess
@@ -910,7 +947,7 @@ class RecoverableSessionTest(test.TestCase):
   def test_recovery(self):
     with self.cached_session() as sess:
 
-      class StackSessionCreator(object):
+      class StackSessionCreator:
 
         def __init__(self, sess):
           self.sessions_to_use = [
@@ -1983,7 +2020,7 @@ class MonitoredSessionTest(test.TestCase):
       c = array_ops.placeholder(dtypes.float32)
       v = array_ops.identity(c)
 
-      class Model(object):
+      class Model:
 
         def step_fn(self, step_context):
           return step_context.run_with_hooks(fetches=v, feed_dict={c: 3.2})
@@ -1995,7 +2032,7 @@ class MonitoredSessionTest(test.TestCase):
   def test_step_fn_belongs_to_a_class_and_has_extra_methods(self):
     with ops.Graph().as_default():
 
-      class Model(object):
+      class Model:
 
         def step_fn(self, step_context, extra_foo):
           del step_context, extra_foo

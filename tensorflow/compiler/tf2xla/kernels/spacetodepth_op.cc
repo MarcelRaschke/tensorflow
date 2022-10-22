@@ -47,7 +47,7 @@ class SpaceToDepthOp : public XlaOpKernel {
       data_format = FORMAT_NCHW;
       auto input_reshaped = NCHW_VECT_CToNCHW(input);
       OP_REQUIRES_OK(ctx, input_reshaped.status());
-      input = input_reshaped.ValueOrDie();
+      input = input_reshaped.value();
     }
 
     OP_REQUIRES(ctx, data_format == FORMAT_NCHW || data_format == FORMAT_NHWC,
@@ -57,8 +57,8 @@ class SpaceToDepthOp : public XlaOpKernel {
     xla::XlaBuilder* builder = input.builder();
     auto input_xla_shape = builder->GetShape(input);
     OP_REQUIRES_OK(ctx, input_xla_shape.status());
-    absl::Span<const int64> input_shape =
-        input_xla_shape.ValueOrDie().dimensions();
+    absl::Span<const int64_t> input_shape =
+        input_xla_shape.value().dimensions();
     int input_rank = input_shape.size();
 
     static const int kRequiredDims = 4;
@@ -69,14 +69,14 @@ class SpaceToDepthOp : public XlaOpKernel {
     int feature_dim = GetTensorFeatureDimIndex(input_rank, data_format);
     int num_spatial_dims = GetTensorSpatialDims(input_rank, data_format);
 
-    std::vector<int64> reshaped_shape;
-    std::vector<int64> transpose_order;
-    std::vector<int64> output_shape;
+    std::vector<int64_t> reshaped_shape;
+    std::vector<int64_t> transpose_order;
+    std::vector<int64_t> output_shape;
     reshaped_shape.reserve(input_rank);
     transpose_order.reserve(input_rank);
     output_shape.reserve(input_rank);
     if (data_format == FORMAT_NHWC) {
-      int64 block_elems = 1;
+      int64_t block_elems = 1;
       for (int i = 0; i < num_spatial_dims; ++i) {
         OP_REQUIRES(ctx, input_shape[1 + i] % block_size_ == 0,
                     errors::InvalidArgument(
@@ -108,7 +108,7 @@ class SpaceToDepthOp : public XlaOpKernel {
       output_shape.push_back(input_shape[feature_dim] * block_elems);
     } else {
       // FORMAT_NCHW
-      int64 block_elems = 1;
+      int64_t block_elems = 1;
       for (int i = 0; i < num_spatial_dims; ++i) {
         OP_REQUIRES(ctx, input_shape[2 + i] % block_size_ == 0,
                     errors::InvalidArgument(
@@ -175,7 +175,7 @@ class SpaceToDepthOp : public XlaOpKernel {
       DCHECK(data_format == FORMAT_NCHW && data_format_ == FORMAT_NCHW_VECT_C);
       auto output_reshaped = NCHWToNCHW_VECT_C(output);
       OP_REQUIRES_OK(ctx, output_reshaped.status());
-      output = output_reshaped.ValueOrDie();
+      output = output_reshaped.value();
     }
 
     ctx->SetOutput(0, output);

@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for TPU Embeddings mid level API utils on TPU."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.core.protobuf.tpu import tpu_embedding_configuration_pb2
@@ -29,7 +25,8 @@ from tensorflow.python.tpu import tpu_embedding_v2_utils
 class TPUEmbeddingOptimizerTest(parameterized.TestCase, test.TestCase):
 
   @parameterized.parameters(tpu_embedding_v2_utils.Adagrad,
-                            tpu_embedding_v2_utils.Adam)
+                            tpu_embedding_v2_utils.Adam,
+                            tpu_embedding_v2_utils.FTRL)
   def test_grad_clip_with_accumulation_off(self, optimizer):
     with self.assertRaisesRegex(ValueError, 'accumulation'):
       optimizer(use_gradient_accumulation=False, clipvalue=0.)
@@ -38,7 +35,8 @@ class TPUEmbeddingOptimizerTest(parameterized.TestCase, test.TestCase):
 
   @parameterized.parameters(tpu_embedding_v2_utils.SGD,
                             tpu_embedding_v2_utils.Adagrad,
-                            tpu_embedding_v2_utils.Adam)
+                            tpu_embedding_v2_utils.Adam,
+                            tpu_embedding_v2_utils.FTRL)
   def test_grad_clip_with_tuple(self, optimizer):
     opt = optimizer(clipvalue=(-1., 1.))
     self.assertEqual(-1., opt.clip_gradient_min)
@@ -46,7 +44,8 @@ class TPUEmbeddingOptimizerTest(parameterized.TestCase, test.TestCase):
 
   @parameterized.parameters(tpu_embedding_v2_utils.SGD,
                             tpu_embedding_v2_utils.Adagrad,
-                            tpu_embedding_v2_utils.Adam)
+                            tpu_embedding_v2_utils.Adam,
+                            tpu_embedding_v2_utils.FTRL)
   def test_grad_clip_with_single_value(self, optimizer):
     opt = optimizer(clipvalue=1.)
     self.assertEqual(-1., opt.clip_gradient_min)
@@ -54,18 +53,32 @@ class TPUEmbeddingOptimizerTest(parameterized.TestCase, test.TestCase):
 
   @parameterized.parameters(tpu_embedding_v2_utils.SGD,
                             tpu_embedding_v2_utils.Adagrad,
-                            tpu_embedding_v2_utils.Adam)
+                            tpu_embedding_v2_utils.Adam,
+                            tpu_embedding_v2_utils.FTRL)
   def test_grad_clip_with_tuple_and_none(self, optimizer):
     opt = optimizer(clipvalue=(None, 1))
     self.assertIsNone(opt.clip_gradient_min)
     self.assertEqual(1., opt.clip_gradient_max)
+
+  @parameterized.parameters(tpu_embedding_v2_utils.SGD,
+                            tpu_embedding_v2_utils.Adagrad,
+                            tpu_embedding_v2_utils.Adam,
+                            tpu_embedding_v2_utils.FTRL)
+  def test_equal_and_hash_function(self, optimizer):
+    opt1 = optimizer(0.1)
+    opt2 = optimizer(0.1)
+    opt3 = optimizer(0.2)
+    self.assertEqual(opt1, opt2)
+    self.assertEqual(hash(opt1), hash(opt2))
+    self.assertNotEqual(opt1, opt3)
+    self.assertNotEqual(hash(opt1), hash(opt3))
 
 
 class ConfigTest(test.TestCase):
 
   def test_table_config_repr(self):
     table = tpu_embedding_v2_utils.TableConfig(
-        vocabulary_size=2, dim=4, initializer=None,
+        vocabulary_size=2, dim=4,
         combiner='sum', name='table')
 
     self.assertEqual(
@@ -85,8 +98,8 @@ class ConfigTest(test.TestCase):
         repr(feature_config),
         'FeatureConfig(table=TableConfig(vocabulary_size=2, dim=4, '
         'initializer=None, optimizer=None, combiner=\'sum\', name=\'table\'), '
-        'max_sequence_length=0, name=\'feature\')'
-    )
+        'max_sequence_length=0, validate_weights_and_indices=True, '
+        'name=\'feature\')')
 
 
 class TPUEmbeddingConfigurationTest(test.TestCase):

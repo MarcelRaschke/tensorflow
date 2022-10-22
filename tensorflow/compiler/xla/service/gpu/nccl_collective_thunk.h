@@ -16,38 +16,21 @@ limitations under the License.
 #ifndef TENSORFLOW_COMPILER_XLA_SERVICE_GPU_NCCL_COLLECTIVE_THUNK_H_
 #define TENSORFLOW_COMPILER_XLA_SERVICE_GPU_NCCL_COLLECTIVE_THUNK_H_
 
+#include <string>
+
 #include "absl/synchronization/mutex.h"
 #include "mlir/IR/Attributes.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "tensorflow/compiler/mlir/xla/attribute_exporter.h"
 #include "tensorflow/compiler/mlir/xla/type_to_shape.h"
 #include "tensorflow/compiler/xla/service/collective_ops_utils.h"
+#include "tensorflow/compiler/xla/service/gpu/ir_emission_utils.h"
 #include "tensorflow/compiler/xla/service/gpu/thunk.h"
 #include "tensorflow/compiler/xla/service/hlo_instruction.h"
 #include "tensorflow/compiler/xla/xla_data.pb.h"
-#include "tensorflow/core/platform/types.h"
-
-// Common place for all collective thunks to source nccl/rccl headers.
-// Also, all the RunNcclCollective() functions for various thunks should
-// use XLA_ENABLE_XCCL to guard use NCCL/RCCL usage (and not use GOOGLE_XCCL).
-#if GOOGLE_XCCL
-#if GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-#define XLA_ENABLE_XCCL 1
-#endif  // GOOGLE_CUDA || TENSORFLOW_USE_ROCM
-#endif  // GOOGLE_XCCL
 
 #if XLA_ENABLE_XCCL
-#if GOOGLE_CUDA
-#include "third_party/nccl/nccl.h"
-#elif TENSORFLOW_USE_ROCM
-#include "rocm/include/rccl/rccl.h"
-#else
-#error "Neither CUDA nor ROCm enabled but NCCL/RCCL enabled"
-#endif
-
-// Also include this file required by all collective thunks.
 #include "tensorflow/compiler/xla/service/gpu/nccl_utils.h"
-
 #endif  // XLA_ENABLE_XCCL
 
 struct ncclComm;
@@ -56,7 +39,7 @@ using ncclComm_t = ncclComm*;
 namespace xla {
 namespace gpu {
 
-struct NcclClique;
+class NcclClique;
 
 struct NcclCollectiveConfig {
   NcclCollectiveConfig();
@@ -65,42 +48,47 @@ struct NcclCollectiveConfig {
 
   NcclCollectiveConfig& operator=(NcclCollectiveConfig&&);
 
-  int64 operand_count;
+  int64_t operand_count;
   std::vector<PrimitiveType> operand_element_type;
   std::vector<ReplicaGroup> replica_groups;
   RendezvousKey::CollectiveOpKind collective_op_kind;
-  int64 op_id;
+  int64_t op_id;
   CollectiveOpGroupMode group_mode;
 
+  template <typename OpT>
+  void SetCollectiveOpKindAndID(OpT op);
   bool IsDegenerate(int64_t replica_count, int64_t partition_count) const;
 };
 
 template <typename OpT>
-NcclCollectiveConfig GetNcclCollectiveConfigForMlir(
-    OpT op, absl::optional<bool> use_global_device_ids) {
-  NcclCollectiveConfig config;
-  config.operand_count = op.operands().size();
-  config.operand_element_type.reserve(config.operand_count);
-  for (int i = 0; i < config.operand_count; i++) {
-    const Shape shape = TypeToShape(op.operands()[i].getType());
-    config.operand_element_type.push_back(shape.element_type());
-  }
-  config.replica_groups =
-      ConvertReplicaGroups(op.replica_groups()).ValueOrDie();
-
-  if (!op.IsCrossReplica()) {
-    config.collective_op_kind = RendezvousKey::kCrossModule;
-    config.op_id = static_cast<int64>(op.channel_id()->handle().getInt());
+void NcclCollectiveConfig::SetCollectiveOpKindAndID(OpT op) {
+  if (op.getChannelId()) {
+    collective_op_kind = RendezvousKey::kCrossModule;
+    op_id = static_cast<int64_t>(op.getChannelId()->getHandle());
   } else {
-    config.collective_op_kind = RendezvousKey::kCrossReplica;
+    collective_op_kind = RendezvousKey::kCrossReplica;
     mlir::ModuleOp parent = op->template getParentOfType<mlir::ModuleOp>();
     mlir::IntegerAttr unique_id =
         parent->getAttrOfType<mlir::IntegerAttr>("hlo.unique_id");
-    config.op_id = static_cast<int64>(unique_id.getInt());
+    op_id = static_cast<int64_t>(unique_id.getInt());
   }
-  config.group_mode = GetCollectiveOpGroupMode(op.channel_id().hasValue(),
+}
+
+template <typename OpT>
+NcclCollectiveConfig GetNcclCollectiveConfigForMlir(
+    OpT op, std::optional<bool> use_global_device_ids) {
+  NcclCollectiveConfig config;
+  config.operand_count = op.getInputs().size();
+  config.operand_element_type.reserve(config.operand_count);
+  for (int i = 0; i < config.operand_count; i++) {
+    const Shape shape = GetShape(op.getInputs()[i]);
+    config.operand_element_type.push_back(shape.element_type());
+  }
+  config.replica_groups = ConvertReplicaGroups(op.getReplicaGroups()).value();
+  config.SetCollectiveOpKindAndID(op);
+  config.group_mode = GetCollectiveOpGroupMode(op.getChannelId().has_value(),
                                                use_global_device_ids)
-                          .ValueOrDie();
+                          .value();
   return config;
 }
 
@@ -110,9 +98,11 @@ class NcclCollectiveThunk : public Thunk {
   using Thunk::Thunk;
 
   struct Buffer {
-    int64 element_count;
+    int64_t element_count;
     BufferAllocation::Slice source_buffer;
     BufferAllocation::Slice destination_buffer;
+    mlir::Value source_value;
+    mlir::Value destination_value;
   };
 
   // Returns whether NCCL operations appear possible to perform; e.g. if we
@@ -123,17 +113,44 @@ class NcclCollectiveThunk : public Thunk {
   // error.
   static bool NcclIsEnabled();
 
+  // Logging support.
+  static std::string GetDeviceString(const NcclExecuteParams& params);
+
   Status ExecuteOnStream(const ExecuteParams& params) override;
 
  protected:
   virtual Status RunNcclCollective(const ExecuteParams& params,
                                    ncclComm_t comm) = 0;
   virtual const NcclCollectiveConfig& config() const = 0;
+
+ private:
+#if XLA_ENABLE_XCCL
+  bool first_call_to_execute_ = true;
+#endif  // XLA_ENABLE_XCCL
 };
 
 // Returns if the given data type is supported by NCCL.
 // Note: Keep this in sync with ToNcclDataType().
 bool IsTypeSupportedByNccl(PrimitiveType element_type);
+
+#if XLA_ENABLE_XCCL
+// TODO(hanbinyoon): Consider moving to nccl_utils.h when deprecating Thunks.
+StatusOr<NcclComm::Lock> LockNcclComm(
+    const NcclExecuteParams& params,
+    const std::vector<ReplicaGroup>& replica_groups,
+    CollectiveOpGroupMode group_mode, int64_t op_id);
+#endif  // XLA_ENABLE_XCCL
+
+struct DeviceBufferPair {
+  PrimitiveType element_type;
+  int64_t element_count;
+  se::DeviceMemoryBase source_buffer;
+  se::DeviceMemoryBase destination_buffer;
+};
+StatusOr<std::vector<DeviceBufferPair>> ConvertToDeviceBuffers(
+    const Thunk::ExecuteParams& params,
+    const std::vector<NcclCollectiveThunk::Buffer>& buffers,
+    const std::vector<PrimitiveType>& element_types);
 
 }  // namespace gpu
 }  // namespace xla

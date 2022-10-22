@@ -17,9 +17,8 @@
 
 # Keep in sync with tensorflow_estimator and configure.py.
 # LINT.IfChange
-LATEST_BAZEL_VERSION=3.7.2
+LATEST_BAZEL_VERSION=5.1.1
 # LINT.ThenChange(
-#   //tensorflow/opensource_only/configure.py,
 #   //tensorflow_estimator/google/kokoro/common.sh,
 #   //tensorflow/tools/ci_build/install/install_bazel.sh,
 #   //tensorflow/tools/ci_build/install/install_bazel_from_source.sh)
@@ -62,12 +61,17 @@ function install_bazelisk {
   date
   case "$(uname -s)" in
     Darwin) local name=bazelisk-darwin-amd64 ;;
-    Linux)  local name=bazelisk-linux-amd64  ;;
+    Linux)
+      case "$(uname -m)" in
+       x86_64) local name=bazelisk-linux-amd64 ;;
+       aarch64) local name=bazelisk-linux-arm64 ;;
+       *) die "Unknown machine type: $(uname -m)" ;;
+      esac ;;
     *) die "Unknown OS: $(uname -s)" ;;
   esac
   mkdir -p "$HOME/bin"
   wget --no-verbose -O "$HOME/bin/bazel" \
-      "https://github.com/bazelbuild/bazelisk/releases/download/v1.3.0/$name"
+      "https://github.com/bazelbuild/bazelisk/releases/download/v1.11.0/$name"
   chmod u+x "$HOME/bin/bazel"
   if [[ ! ":$PATH:" =~ :"$HOME"/bin/?: ]]; then
     PATH="$HOME/bin:$PATH"
@@ -116,43 +120,15 @@ function install_ubuntu_16_pip_deps {
     shift
   done
 
-  # LINT.IfChange(linux_pip_installations_orig)
-  # To have reproducible builds, these dependencies should be pinned always.
-  # Prefer pinning to the same version as in setup.py
   # First, upgrade pypi wheels
-  "${PIP_CMD}" install --user --upgrade 'setuptools<53' pip wheel
-  # NOTE: As numpy has releases that break semver guarantees and several other
-  # deps depend on numpy without an upper bound, we must install numpy before
-  # everything else.
-  # TODO(mihaimaruseac): Convert to requirements.txt
-  "${PIP_CMD}" install --user 'numpy ~= 1.19.2'
-  # Now, install the deps, as listed in setup.py
-  "${PIP_CMD}" install --user 'absl-py ~= 0.10'
-  "${PIP_CMD}" install --user 'astunparse ~= 1.6.3'
-  "${PIP_CMD}" install --user 'flatbuffers ~= 1.12.0'
-  "${PIP_CMD}" install --user 'google_pasta ~= 0.2'
-  "${PIP_CMD}" install --user 'h5py ~= 3.1.0'
-  "${PIP_CMD}" install --user 'keras_preprocessing ~= 1.1.2'
-  "${PIP_CMD}" install --user 'opt_einsum ~= 3.3.0'
-  "${PIP_CMD}" install --user 'protobuf >= 3.9.2'
-  "${PIP_CMD}" install --user 'six ~= 1.15.0'
-  "${PIP_CMD}" install --user 'termcolor ~= 1.1.0'
-  "${PIP_CMD}" install --user 'typing_extensions ~= 3.7.4'
-  "${PIP_CMD}" install --user 'wheel ~= 0.35'
-  "${PIP_CMD}" install --user 'wrapt ~= 1.12.1'
-  # We need to pin gast dependency exactly
-  "${PIP_CMD}" install --user 'gast == 0.4.0'
-  # Finally, install tensorboard and estimator
-  # Note that here we want the latest version that matches (b/156523241)
-  "${PIP_CMD}" install --user --upgrade 'tb-nightly ~= 2.4.0.a'
-  "${PIP_CMD}" install --user --upgrade 'tensorflow_estimator ~= 2.4.0'
-  # Test dependencies
-  "${PIP_CMD}" install --user 'grpcio ~= 1.34.0'
-  "${PIP_CMD}" install --user 'portpicker ~= 1.3.1'
-  "${PIP_CMD}" install --user 'scipy ~= 1.5.2'
+  "${PIP_CMD}" install --user --upgrade 'setuptools' pip wheel
+
+  # LINT.IfChange(linux_pip_installations_orig)
+  # Remove any historical keras package if they are installed.
+  "${PIP_CMD}" list
+  "${PIP_CMD}" uninstall -y keras
+  "${PIP_CMD}" install --user -r tensorflow/tools/ci_build/release/requirements_ubuntu.txt
   # LINT.ThenChange(:mac_pip_installations)
-  # Need to be addressed later. Unblocking 2.4 branchcut
-  "${PIP_CMD}" install --user 'PyYAML ~= 5.3.1'
 }
 
 # Gradually replace function install_ubuntu_16_pip_deps.
@@ -173,88 +149,128 @@ function install_ubuntu_16_python_pip_deps {
     shift
   done
 
-  # LINT.IfChange(linux_pip_installations)
-  # To have reproducible builds, these dependencies should be pinned always.
-  # Prefer pinning to the same version as in setup.py
   # First, upgrade pypi wheels
-  ${PIP_CMD} install --user --upgrade 'setuptools<53' pip wheel
-  # NOTE: As numpy has releases that break semver guarantees and several other
-  # deps depend on numpy without an upper bound, we must install numpy before
-  # everything else.
-  # TODO(mihaimaruseac): Convert to requirements.txt
-  ${PIP_CMD} install --user 'numpy ~= 1.19.2'
-  # Now, install the deps, as listed in setup.py
-  ${PIP_CMD} install --user 'absl-py ~= 0.10'
-  ${PIP_CMD} install --user 'astunparse ~= 1.6.3'
-  ${PIP_CMD} install --user 'flatbuffers ~= 1.12.0'
-  ${PIP_CMD} install --user 'google_pasta ~= 0.2'
-  ${PIP_CMD} install --user 'h5py ~= 3.1.0'
-  ${PIP_CMD} install --user 'keras_preprocessing ~= 1.1.2'
-  ${PIP_CMD} install --user 'opt_einsum ~= 3.3.0'
-  ${PIP_CMD} install --user 'protobuf >= 3.9.2'
-  ${PIP_CMD} install --user 'six ~= 1.15.0'
-  ${PIP_CMD} install --user 'termcolor ~= 1.1.0'
-  ${PIP_CMD} install --user 'typing_extensions ~= 3.7.4'
-  ${PIP_CMD} install --user 'wheel ~= 0.35'
-  ${PIP_CMD} install --user 'wrapt ~= 1.12.1'
-  # We need to pin gast dependency exactly
-  ${PIP_CMD} install --user 'gast == 0.4.0'
-  # Finally, install tensorboard and estimator
-  # Note that here we want the latest version that matches (b/156523241)
-  ${PIP_CMD} install --user --upgrade 'tb-nightly ~= 2.4.0.a'
-  ${PIP_CMD} install --user --upgrade 'tensorflow_estimator ~= 2.4.0'
-  # Test dependencies
-  ${PIP_CMD} install --user 'grpcio ~= 1.34.0'
-  ${PIP_CMD} install --user 'portpicker ~= 1.3.1'
-  ${PIP_CMD} install --user 'scipy ~= 1.5.2'
+  ${PIP_CMD} install --user --upgrade 'setuptools' pip wheel
+
+  # LINT.IfChange(linux_pip_installations)
+  # Remove any historical keras package if they are installed.
+  ${PIP_CMD} list
+  ${PIP_CMD} uninstall -y keras
+  ${PIP_CMD} install --user -r tensorflow/tools/ci_build/release/requirements_ubuntu.txt
   # LINT.ThenChange(:mac_pip_installations)
-  # Need to be addressed later. Unblocking 2.4 branchcut
-  ${PIP_CMD} install --user 'PyYAML ~= 5.3.1'
+}
+
+function install_ubuntu_pip_deps {
+  # Install requirements in the python environment
+  which python
+  which pip
+  PIP_CMD="python -m pip"
+  ${PIP_CMD} list
+  # auditwheel>=4 supports manylinux_2 and changes the output wheel filename
+  # when upgrading auditwheel modify upload_wheel_cpu_ubuntu and upload_wheel_gpu_ubuntu
+  # to match the filename generated.
+  ${PIP_CMD} install --upgrade pip wheel auditwheel~=3.3.1
+  ${PIP_CMD} install -r tensorflow/tools/ci_build/release/${REQUIREMENTS_FNAME}
+  ${PIP_CMD} list
+}
+
+function setup_venv_ubuntu () {
+  # Create virtual env and install dependencies
+  # First argument needs to be the python executable.
+  ${1} -m venv ~/.venv/tf
+  source ~/.venv/tf/bin/activate
+  REQUIREMENTS_FNAME="requirements_ubuntu.txt"
+  install_ubuntu_pip_deps
+}
+
+function remove_venv_ubuntu () {
+  # Deactivate virtual environment and clean up
+  deactivate
+  rm -rf ~/.venv/tf
+}
+
+function install_ubuntu_pip_deps_novenv () {
+  # Install on default python Env (No Virtual Env for pip packages)
+  PIP_CMD="${1} -m pip"
+  REQUIREMENTS_FNAME="requirements_ubuntu.txt"
+  ${PIP_CMD} install --user --upgrade 'setuptools' pip wheel pyparsing auditwheel~=3.3.1
+  ${PIP_CMD} install --user -r tensorflow/tools/ci_build/release/${REQUIREMENTS_FNAME}
+  ${PIP_CMD} list
+
+}
+
+function upload_wheel_cpu_ubuntu() {
+  # Upload the built packages to pypi.
+  for WHL_PATH in $(ls pip_pkg/tf_nightly_cpu-*dev*.whl); do
+
+    WHL_DIR=$(dirname "${WHL_PATH}")
+    WHL_BASE_NAME=$(basename "${WHL_PATH}")
+    AUDITED_WHL_NAME="${WHL_DIR}"/$(echo "${WHL_BASE_NAME//linux/manylinux2010}")
+    auditwheel repair --plat manylinux2010_x86_64 -w "${WHL_DIR}" "${WHL_PATH}"
+
+    # test the whl pip package
+    chmod +x tensorflow/tools/ci_build/builds/nightly_release_smoke_test.sh
+    ./tensorflow/tools/ci_build/builds/nightly_release_smoke_test.sh ${AUDITED_WHL_NAME}
+    RETVAL=$?
+
+    # Upload the PIP package if whl test passes.
+    if [ ${RETVAL} -eq 0 ]; then
+      echo "Basic PIP test PASSED, Uploading package: ${AUDITED_WHL_NAME}"
+      python -m pip install twine
+      python -m twine upload -r pypi-warehouse "${AUDITED_WHL_NAME}"
+    else
+      echo "Basic PIP test FAILED, will not upload ${AUDITED_WHL_NAME} package"
+      return 1
+    fi
+  done
+}
+
+function upload_wheel_gpu_ubuntu() {
+  # Upload the built packages to pypi.
+  for WHL_PATH in $(ls pip_pkg/tf_nightly*dev*.whl); do
+
+    WHL_DIR=$(dirname "${WHL_PATH}")
+    WHL_BASE_NAME=$(basename "${WHL_PATH}")
+    AUDITED_WHL_NAME="${WHL_DIR}"/$(echo "${WHL_BASE_NAME//linux/manylinux2010}")
+
+    # Copy and rename for gpu manylinux as we do not want auditwheel to package in libcudart.so
+    WHL_PATH=${AUDITED_WHL_NAME}
+    cp "${WHL_DIR}"/"${WHL_BASE_NAME}" "${WHL_PATH}"
+    echo "Copied manylinux2010 wheel file at: ${WHL_PATH}"
+
+    # test the whl pip package
+    chmod +x tensorflow/tools/ci_build/builds/nightly_release_smoke_test.sh
+    ./tensorflow/tools/ci_build/builds/nightly_release_smoke_test.sh ${AUDITED_WHL_NAME}
+    RETVAL=$?
+
+    # Upload the PIP package if whl test passes.
+    if [ ${RETVAL} -eq 0 ]; then
+      echo "Basic PIP test PASSED, Uploading package: ${AUDITED_WHL_NAME}"
+      python -m pip install twine
+      python -m twine upload -r pypi-warehouse "${AUDITED_WHL_NAME}"
+    else
+      echo "Basic PIP test FAILED, will not upload ${AUDITED_WHL_NAME} package"
+      return 1
+    fi
+  done
 }
 
 function install_macos_pip_deps {
 
   PIP_CMD="python -m pip"
 
-  # LINT.IfChange(mac_pip_installations)
-  # To have reproducible builds, these dependencies should be pinned always.
-  # Prefer pinning to the same version as in setup.py
   # First, upgrade pypi wheels
-  ${PIP_CMD} install --upgrade 'setuptools<53' pip wheel
-  # NOTE: As numpy has releases that break semver guarantees and several other
-  # deps depend on numpy without an upper bound, we must install numpy before
-  # everything else.
-  # TODO(mihaimaruseac): Convert to requirements.txt
-  ${PIP_CMD} install 'numpy ~= 1.19.2'
-  # Now, install the deps, as listed in setup.py
-  ${PIP_CMD} install 'absl-py ~= 0.10'
-  ${PIP_CMD} install 'astunparse ~= 1.6.3'
-  ${PIP_CMD} install 'flatbuffers ~= 1.12.0'
-  ${PIP_CMD} install 'google_pasta ~= 0.2'
-  ${PIP_CMD} install 'h5py ~= 3.1.0'
-  ${PIP_CMD} install 'keras_preprocessing ~= 1.1.2'
-  ${PIP_CMD} install 'opt_einsum ~= 3.3.0'
-  ${PIP_CMD} install 'protobuf >= 3.9.2'
-  ${PIP_CMD} install 'six ~= 1.15.0'
-  ${PIP_CMD} install 'termcolor ~= 1.1.0'
-  ${PIP_CMD} install 'typing_extensions ~= 3.7.4'
-  ${PIP_CMD} install 'wheel ~= 0.35'
-  ${PIP_CMD} install 'wrapt ~= 1.12.1'
-  # We need to pin gast dependency exactly
-  ${PIP_CMD} install 'gast == 0.4.0'
-  # Finally, install tensorboard and estimator
-  # Note that here we want the latest version that matches (b/156523241)
-  ${PIP_CMD} install --upgrade 'tb-nightly ~= 2.4.0.a'
-  ${PIP_CMD} install --upgrade 'tensorflow_estimator ~= 2.4.0'
-  # Test dependencies
-  ${PIP_CMD} install 'grpcio ~= 1.34.0'
-  ${PIP_CMD} install 'portpicker ~= 1.3.1'
-  ${PIP_CMD} install 'scipy ~= 1.5.2'
-  ${PIP_CMD} install --upgrade certifi
+  ${PIP_CMD} install --upgrade 'setuptools' pip wheel
 
-  # LINT.ThenChange(:linux_pip_installations_orig)
-  # LINT.ThenChange(:install_macos_pip_deps_no_venv)
-  # LINT.ThenChange(:linux_pip_installations)
+  # LINT.IfChange(mac_pip_installations)
+  # Remove any historical keras package if they are installed.
+  ${PIP_CMD} list
+  ${PIP_CMD} uninstall -y keras
+  ${PIP_CMD} install -r tensorflow/tools/ci_build/release/requirements_mac.txt
+  # LINT.ThenChange(
+  #   :linux_pip_installations_orig,
+  #   :install_macos_pip_deps_no_venv,
+  #   :linux_pip_installations)
 }
 
 # This hack is unfortunately necessary for MacOS builds that use pip_new.sh
@@ -263,42 +279,14 @@ function install_macos_pip_deps_no_venv {
 
   PIP_CMD="${1} -m pip"
 
-  # LINT.IfChange(mac_pip_installations)
-  # To have reproducible builds, these dependencies should be pinned always.
-  # Prefer pinning to the same version as in setup.py
   # First, upgrade pypi wheels
-  ${PIP_CMD} install --upgrade 'setuptools<53' pip wheel --user
-  # NOTE: As numpy has releases that break semver guarantees and several other
-  # deps depend on numpy without an upper bound, we must install numpy before
-  # everything else.
-  # TODO(mihaimaruseac): Convert to requirements.txt
-  ${PIP_CMD} install 'numpy ~= 1.19.2' --user
-  # Now, install the deps, as listed in setup.py
-  ${PIP_CMD} install 'absl-py ~= 0.10' --user
-  ${PIP_CMD} install 'astunparse ~= 1.6.3' --user
-  ${PIP_CMD} install 'flatbuffers ~= 1.12.0' --user
-  ${PIP_CMD} install 'google_pasta ~= 0.2' --user
-  ${PIP_CMD} install 'h5py ~= 3.1.0' --user
-  ${PIP_CMD} install 'keras_preprocessing ~= 1.1.2' --user
-  ${PIP_CMD} install 'opt_einsum ~= 3.3.0' --user
-  ${PIP_CMD} install 'protobuf >= 3.9.2' --user
-  ${PIP_CMD} install 'six ~= 1.15.0' --user
-  ${PIP_CMD} install 'termcolor ~= 1.1.0' --user
-  ${PIP_CMD} install 'typing_extensions ~= 3.7.4' --user
-  ${PIP_CMD} install 'wheel ~= 0.35' --user
-  ${PIP_CMD} install 'wrapt ~= 1.12.1' --user
-  # We need to pin gast dependency exactly
-  ${PIP_CMD} install 'gast == 0.4.0' --user
-  # Finally, install tensorboard and estimator
-  # Note that here we want the latest version that matches (b/156523241)
-  ${PIP_CMD} install --upgrade 'tb-nightly ~= 2.4.0.a' --user
-  ${PIP_CMD} install --upgrade 'tensorflow_estimator ~= 2.4.0' --user
-  # Test dependencies
-  ${PIP_CMD} install 'grpcio ~= 1.34.0' --user
-  ${PIP_CMD} install 'portpicker ~= 1.3.1' --user
-  ${PIP_CMD} install 'scipy ~= 1.5.2' --user
-  ${PIP_CMD} install --upgrade certifi --user
+  ${PIP_CMD} install --user --upgrade 'setuptools' pip wheel
 
+  # LINT.IfChange(mac_pip_installations)
+  # Remove any historical keras package if they are installed.
+  ${PIP_CMD} list
+  ${PIP_CMD} uninstall -y keras
+  ${PIP_CMD} install --user -r tensorflow/tools/ci_build/release/requirements_mac.txt
   # LINT.ThenChange(:install_macos_pip_deps)
 }
 
@@ -312,6 +300,26 @@ function setup_venv_macos () {
 
 function activate_venv_macos () {
   source tf_build_env/bin/activate
+}
+
+function setup_python_from_pyenv_macos {
+  if [[ -z "${1}" ]]; then
+    PY_VERSION=3.9.1
+  else
+    PY_VERSION=$1
+  fi
+
+  git clone --branch v2.2.2 https://github.com/pyenv/pyenv.git
+
+  PYENV_ROOT="$(pwd)/pyenv"
+  export PYENV_ROOT
+  export PATH="$PYENV_ROOT/bin:$PYENV_ROOT/shims:$PATH"
+
+  eval "$(pyenv init -)"
+
+  pyenv install -s "${PY_VERSION}"
+  pyenv local "${PY_VERSION}"
+  python --version
 }
 
 function maybe_skip_v1 {
@@ -358,7 +366,7 @@ function copy_to_new_project_name {
   NEW_PROJECT_NAME_DASH="${NEW_PROJECT_NAME//_/-}"
 
   # We need to change the name in the METADATA file, but we need to ensure that
-  # all other occurences of the name stay the same, otherwise things such as
+  # all other occurrences of the name stay the same, otherwise things such as
   # URLs and depedencies might be broken (for example, replacing without care
   # might transform a `tensorflow_estimator` dependency into
   # `tensorflow_gpu_estimator`, which of course does not exist -- except by
@@ -414,3 +422,43 @@ function test_xml_summary_exit {
   test_xml_summary
   exit "${RETVAL}"
 }
+
+# Note: The Docker-based Ubuntu TF-nightly jobs do not use this list. They use
+# //tensorflow/tools/tf_sig_build_dockerfiles/devel.usertools/wheel_verification.bats
+# instead. See go/tf-devinfra/docker.
+# CPU size
+MAC_CPU_MAX_WHL_SIZE=240M
+WIN_CPU_MAX_WHL_SIZE=170M
+# GPU size
+WIN_GPU_MAX_WHL_SIZE=360M
+
+function test_tf_whl_size() {
+  WHL_PATH=${1}
+  # First, list all wheels with their sizes:
+  echo "Found these wheels: "
+  find $WHL_PATH -type f -exec ls -lh {} \;
+  echo "===================="
+  # Check CPU whl size.
+  if [[ "$WHL_PATH" == *"_cpu"* ]]; then
+    # Check MAC CPU whl size.
+    if [[ "$WHL_PATH" == *"-macos"* ]] && [[ $(find $WHL_PATH -type f -size +${MAC_CPU_MAX_WHL_SIZE}) ]]; then
+        echo "Mac CPU whl size has exceeded ${MAC_CPU_MAX_WHL_SIZE}. To keep
+within pypi's CDN distribution limit, we must not exceed that threshold."
+      return 1
+    fi
+    # Check Windows CPU whl size.
+    if [[ "$WHL_PATH" == *"-win"* ]] && [[ $(find $WHL_PATH -type f -size +${WIN_CPU_MAX_WHL_SIZE}) ]]; then
+        echo "Windows CPU whl size has exceeded ${WIN_CPU_MAX_WHL_SIZE}. To keep
+within pypi's CDN distribution limit, we must not exceed that threshold."
+      return 1
+    fi
+  elif [[ "$WHL_PATH" == *"_gpu"* ]]; then
+    # Check Windows GPU whl size.
+    if [[ "$WHL_PATH" == *"-win"* ]] && [[ $(find $WHL_PATH -type f -size +${WIN_GPU_MAX_WHL_SIZE}) ]]; then
+        echo "Windows GPU whl size has exceeded ${WIN_GPU_MAX_WHL_SIZE}. To keep
+within pypi's CDN distribution limit, we must not exceed that threshold."
+      return 1
+    fi
+  fi
+}
+

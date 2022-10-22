@@ -42,15 +42,18 @@ namespace xla {
 // increased to a larger value.
 class TreeReductionRewriter : public HloModulePass {
  public:
-  explicit TreeReductionRewriter(int64 reduce_window_size = 32)
+  explicit TreeReductionRewriter(int64_t reduce_window_size = 32)
       : reduce_window_size_(reduce_window_size) {}
   ~TreeReductionRewriter() override = default;
   absl::string_view name() const override { return "tree_reduction_rewriter"; }
 
-  StatusOr<bool> Run(HloModule* module) override;
+  using HloPassInterface::Run;
+  StatusOr<bool> Run(
+      HloModule* module,
+      const absl::flat_hash_set<absl::string_view>& execution_threads) override;
 
  private:
-  int64 reduce_window_size_;
+  int64_t reduce_window_size_;
 };
 
 }  // end namespace xla

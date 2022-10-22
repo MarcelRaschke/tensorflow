@@ -10,6 +10,11 @@ annotated:
 
 <img src="images/android_apple_banana.png" alt="Screenshot of Android example" width="30%">
 
+Note: (1) To integrate an existing model, try
+[TensorFlow Lite Task Library](https://www.tensorflow.org/lite/inference_with_metadata/task_library/object_detector).
+(2) To customize a model, try
+[TensorFlow Lite Model Maker](https://www.tensorflow.org/lite/guide/model_maker).
+
 ## Get started
 
 To learn how to use object detection in a mobile app, explore the
@@ -25,7 +30,7 @@ accompanying labels.
 starter model with Metadata</a>
 
 For more information about Metadata and associated fields (eg: `labels.txt`) see
-<a href="https://www.tensorflow.org/lite/convert/metadata#read_the_metadata_from_models">Read
+<a href="../../models/convert/metadata#read_the_metadata_from_models">Read
 the metadata from models</a>
 
 If you want to train a custom detection model for your own task, see
@@ -276,7 +281,7 @@ Note: Object detection models accept input images of a specific size. This is li
 ## Performance benchmarks
 
 Performance benchmark numbers for our
-<a class="button button-primary" href="https://storage.googleapis.com/download.tensorflow.org/models/tflite/coco_ssd_mobilenet_v1_1.0_quant_2018_06_29.zip">starter
+<a class="button button-primary" href="https://tfhub.dev/tensorflow/lite-model/ssd_mobilenet_v1/1/metadata/1?lite-format=tflite">starter
 model</a> are generated with the tool
 [described here](https://www.tensorflow.org/lite/performance/benchmarks).
 
@@ -335,14 +340,14 @@ SSD models from the
 can also be converted to TensorFlow Lite using the instructions
 [here](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tf2.md).
 It is important to note that detection models cannot be converted directly using
-the [TensorFlow Lite Converter](https://www.tensorflow.org/lite/convert), since
+the [TensorFlow Lite Converter](../../models/convert), since
 they require an intermediate step of generating a mobile-friendly source model.
 The scripts linked above perform this step.
 
 Both the
 [TF1](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tensorflowlite.md)
 &
-[TF2](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tensorflowlite.md)
+[TF2](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tf2.md)
 exporting scripts have parameters that can enable a larger number of output
 objects or slower, more-accurate post processing. Please use `--help` with the
 scripts to see an exhaustive list of supported arguments.
@@ -374,7 +379,12 @@ You can use a technique known as transfer learning to re-train a model to
 recognize classes not in the original set. For example, you could re-train the
 model to detect multiple types of vegetable, despite there only being one
 vegetable in the original training data. To do this, you will need a set of
-training images for each of the new labels you wish to train. Please see our
+training images for each of the new labels you wish to train. The recommended
+way is to use
+[TensorFlow Lite Model Maker](https://www.tensorflow.org/lite/guide/model_maker)
+library which simplifies the process of training a TensorFlow Lite model using
+custom dataset, with a few lines of codes. It uses transfer learning to reduce
+the amount of required training data and time. You can also learn from
 [Few-shot detection Colab](https://github.com/tensorflow/models/blob/master/research/object_detection/colab_tutorials/eager_few_shot_od_training_tflite.ipynb)
 as an example of fine-tuning a pre-trained model with few examples.
 
@@ -385,4 +395,4 @@ training your own models with the TensorFlow Object Detection API:
 Once trained, they can be converted to a TFLite-friendly format with the
 instructions here:
 [TF1](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tensorflowlite.md),
-[TF2](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tensorflowlite.md)
+[TF2](https://github.com/tensorflow/models/blob/master/research/object_detection/g3doc/running_on_mobile_tf2.md)

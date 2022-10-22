@@ -3,7 +3,6 @@
 
 load(
     "//tensorflow:tensorflow.bzl",
-    "if_chromiumos",
     "tf_cc_test",
 )
 
@@ -34,7 +33,7 @@ package(
         "//visibility:public",
     ],
     features = ["-parse_headers"],
-    licenses = ["notice"],  # Apache 2.0
+    licenses = ["notice"],
 )
 
 # Export the BUILD file so automated tooling can check licenses
@@ -62,6 +61,7 @@ tf_gen_op_libs(
         "decode_proto_ops",
         "encode_proto_ops",
         "experimental_dataset_ops",
+        "filesystem_ops",
         "function_ops",
         "functional_ops",
         "image_ops",
@@ -78,10 +78,10 @@ tf_gen_op_libs(
         "no_op",
         "parsing_ops",
         "random_grad",
+        "random_index_shuffle_ops",
         "random_ops",
         "special_math_ops",
         "stateful_random_ops",
-        "remote_fused_graph_ops",
         "risc_ops",
         "rnn_ops",
         "scoped_allocator_ops",
@@ -97,6 +97,7 @@ tf_gen_op_libs(
         "stateless_random_ops_v2",
         "summary_ops",
         "training_ops",
+        "uniform_quant_ops",
     ],
     sub_directory = "",
     deps = [
@@ -184,6 +185,7 @@ tf_gen_op_libs(
         "tpu_functional_ops",
         "tpu_heartbeat_ops",
         "tpu_host_compute_ops",
+        "tpu_sharding_util_ops",
         "tpu_infeed_ops",
         "tpu_outfeed_ops",
         "tpu_ordinal_selector_ops",
@@ -213,6 +215,14 @@ tf_gen_op_libs(
     op_lib_names = [
         "cudnn_rnn_ops",
     ],
+    sub_directory = "",
+    deps = [
+        "//tensorflow/core:lib",
+    ],
+)
+
+tf_gen_op_libs(
+    op_lib_names = ["composite_tensor_ops"],
     sub_directory = "",
     deps = [
         "//tensorflow/core:lib",
@@ -260,6 +270,8 @@ cc_library(
         ":decode_proto_ops_op_lib",
         ":encode_proto_ops_op_lib",
         ":experimental_dataset_ops_op_lib",
+        ":composite_tensor_ops_op_lib",
+        ":filesystem_ops_op_lib",
         ":function_ops_op_lib",
         ":functional_ops_op_lib",
         ":image_ops_op_lib",
@@ -276,13 +288,13 @@ cc_library(
         ":no_op_op_lib",
         ":parsing_ops_op_lib",
         ":ragged_ops",
+        ":random_index_shuffle_ops_op_lib",
         ":random_ops_op_lib",
+        ":resource_variable_ops_op_lib",
         ":risc_ops_op_lib",
         ":rnn_ops_op_lib",
         ":special_math_ops_op_lib",
         ":stateful_random_ops_op_lib",
-        ":remote_fused_graph_ops_op_lib",
-        ":resource_variable_ops_op_lib",
         ":scoped_allocator_ops_op_lib",
         ":script_ops_op_lib",
         ":sdca_ops_op_lib",
@@ -297,11 +309,13 @@ cc_library(
         ":stateless_random_ops_v2_op_lib",
         ":string_ops_op_lib",
         ":training_ops_op_lib",
+        ":uniform_quant_ops_op_lib",
         ":word2vec_ops",
-    ] + if_chromiumos(
-        [],
+    ] + select({
         # Non-tpu platforms don't need tpu dependency.
-        [
+        "//tensorflow:chromiumos": [],
+        "//tensorflow:fuchsia": [],
+        "//conditions:default": [
             ":tpu_configuration_ops_op_lib",
             ":tpu_cross_replica_ops_op_lib",
             ":tpu_embedding_ops_op_lib",
@@ -309,12 +323,13 @@ cc_library(
             ":tpu_functional_ops_op_lib",
             ":tpu_heartbeat_ops_op_lib",
             ":tpu_host_compute_ops_op_lib",
+            ":tpu_sharding_util_ops_op_lib",
             ":tpu_infeed_ops_op_lib",
             ":tpu_outfeed_ops_op_lib",
             ":tpu_ordinal_selector_ops_op_lib",
             ":tpu_replication_ops_op_lib",
         ],
-    ) + if_mkl([
+    }) + if_mkl([
         ":mkl_array_ops_op_lib",
         ":mkl_nn_ops_op_lib",
     ]),
@@ -350,12 +365,12 @@ cc_library(
     name = "math_grad",
     srcs = [
         "math_grad.cc",
-        "random_grad.cc",
         "stateless_random_grad.cc",
     ],
     linkstatic = 1,  # Needed since alwayslink is broken in bazel b/27630669
     deps = [
         ":math_ops_op_lib",
+        ":random_grad_op_lib",
         "//tensorflow/core:framework",
         "//tensorflow/core:lib",
         "//tensorflow/core:protos_all_cc",
@@ -379,7 +394,7 @@ cc_library(
 
 filegroup(
     name = "portable_op_registrations_and_gradients",
-    srcs = ["//tensorflow/c/kernels:android_all_ops"] + glob(
+    srcs = ["//tensorflow/c/kernels:portable_all_ops"] + glob(
         [
             "**/*.cc",
             "**/*.h",
@@ -468,28 +483,6 @@ tf_cc_test(
 )
 
 tf_cc_test(
-    name = "ops_remote_fused_graph_ops_test",
-    size = "small",
-    srcs = ["remote_fused_graph_ops_test.cc"],
-    linkstatic = tf_kernel_tests_linkstatic(),
-    deps = [
-        ":ops",
-        "//tensorflow/core",
-        "//tensorflow/core:core_cpu",
-        "//tensorflow/core:core_cpu_internal",
-        "//tensorflow/core:framework",
-        "//tensorflow/core:framework_internal",
-        "//tensorflow/core:lib",
-        "//tensorflow/core:lib_internal",
-        "//tensorflow/core:protos_all_cc",
-        "//tensorflow/core:test",
-        "//tensorflow/core:test_main",
-        "//tensorflow/core:testlib",
-        "//tensorflow/core/kernels:remote_fused_graph_ops",
-    ],
-)
-
-tf_cc_test(
     name = "ops_tests",
     size = "small",
     srcs = [
@@ -515,7 +508,9 @@ tf_cc_test(
         "spectral_ops_test.cc",
         "state_ops_test.cc",
         "string_ops_test.cc",
+        "tpu_cross_replica_ops_test.cc",
         "training_ops_test.cc",
+        "uniform_quant_ops_test.cc",
     ],
     linkstatic = tf_kernel_tests_linkstatic(),
     deps = [

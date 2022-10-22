@@ -23,11 +23,11 @@ limitations under the License.
 #include "tensorflow/compiler/xla/literal.h"
 #include "tensorflow/compiler/xla/shape_util.h"
 #include "tensorflow/compiler/xla/status_macros.h"
+#include "tensorflow/compiler/xla/stream_executor/stream_executor.h"
 #include "tensorflow/compiler/xla/types.h"
 #include "tensorflow/compiler/xla/util.h"
 #include "tensorflow/core/lib/core/errors.h"
-#include "tensorflow/core/platform/logging.h"
-#include "tensorflow/core/platform/stream_executor_no_cuda.h"
+#include "tensorflow/tsl/platform/logging.h"
 
 namespace xla {
 
@@ -55,7 +55,7 @@ Status GenericTransferManager::WriteSingleTupleIndexTable(
   stream->ThenDoHostCallback([element_pointers{std::move(element_pointers)}]() {
     /* holds reference to element_pointers in closure */
   });
-  return Status::OK();
+  return OkStatus();
 }
 
 void GenericTransferManager::TransferLiteralFromDevice(
@@ -76,11 +76,15 @@ void GenericTransferManager::TransferLiteralFromDevice(
             stream->ThenMemcpy(
                 /*host_dst=*/literal.untyped_data(index),
                 /*gpu_src=*/device_buffer.buffer(index),
-                /*size=*/GetByteSizeRequirement(subshape));
+                // With bounded dynamic shapes, the shape of the device buffer
+                // (bounded allocation) can be bigger than the literal.
+                /*size=*/
+                GetByteSizeRequirement(
+                    ShapeUtil::GetSubshape(literal.shape(), index)));
           }
-          return Status::OK();
+          return OkStatus();
         }));
-    return Status::OK();
+    return OkStatus();
   }();
   if (!status.ok()) {
     done(status);
@@ -135,7 +139,7 @@ Status GenericTransferManager::TransferLiteralToDeviceAsync(
             return stream->BlockHostUntilDone();
           }
         }
-        return Status::OK();
+        return OkStatus();
       });
 }
 
@@ -156,8 +160,13 @@ Status GenericTransferManager::ResetDevices(
       "Device reset is not yet supported on this platform (b/30481585)");
 }
 
-int64 GenericTransferManager::GetByteSizeRequirement(const Shape& shape) const {
-  return ShapeUtil::ByteSizeOf(shape, pointer_size_);
+int64_t GenericTransferManager::GetByteSizeRequirement(
+    const Shape& shape) const {
+  if (shape.is_static() || shape.IsTuple()) {
+    return ShapeUtil::ByteSizeOf(shape, pointer_size_);
+  }
+  int64_t metadata_size = sizeof(int32_t) * shape.dimensions_size();
+  return ShapeUtil::ByteSizeOf(shape, pointer_size_) + metadata_size;
 }
 
 }  // namespace xla

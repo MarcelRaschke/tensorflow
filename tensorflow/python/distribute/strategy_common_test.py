@@ -14,10 +14,6 @@
 # ==============================================================================
 """Tests for common methods in strategy classes."""
 
-from __future__ import absolute_import
-from __future__ import division
-from __future__ import print_function
-
 from absl.testing import parameterized
 
 from tensorflow.python.data.ops import dataset_ops
@@ -28,11 +24,11 @@ from tensorflow.python.distribute import reduce_util
 from tensorflow.python.distribute import strategy_combinations
 from tensorflow.python.distribute import strategy_test_lib
 from tensorflow.python.distribute import test_util
-from tensorflow.python.distribute import tpu_strategy
 from tensorflow.python.distribute.collective_all_reduce_strategy import CollectiveAllReduceStrategy
 from tensorflow.python.eager import def_function
 from tensorflow.python.framework import constant_op
 from tensorflow.python.framework import dtypes
+from tensorflow.python.framework import indexed_slices
 from tensorflow.python.framework import ops
 from tensorflow.python.ops import array_ops
 from tensorflow.python.ops import math_ops
@@ -65,6 +61,29 @@ class StrategyTest(test.TestCase, parameterized.TestCase):
       return strategy.run(f)
 
     g()
+
+  def testMergeCallInitScope(self, strategy):
+    with strategy.scope():
+
+      @def_function.function
+      def fn():
+
+        def merge_fn(unused_strat):
+
+          y = constant_op.constant(11)
+          return y
+
+        def replica_fn():
+
+          with ops.init_scope():
+            y = ds_context.get_replica_context().merge_call(merge_fn)
+            z = y + 1
+            return z
+
+        return strategy.run(replica_fn)
+
+      result = strategy.experimental_local_results(fn())
+      self.assertAllClose(result, [12] * _get_num_replicas_per_client(strategy))
 
 
 @combinations.generate(
@@ -242,10 +261,12 @@ class ReduceTest(test.TestCase, parameterized.TestCase):
         strategy=[
             strategy_combinations.default_strategy,
             strategy_combinations.mirrored_strategy_with_gpu_and_cpu,
+            strategy_combinations.mirrored_strategy_with_two_gpus_no_merge_call,
             strategy_combinations.tpu_strategy,
             strategy_combinations.tpu_strategy_packed_var,
             strategy_combinations.multi_worker_mirrored_2x1_cpu,
             strategy_combinations.multi_worker_mirrored_2x2_gpu,
+            strategy_combinations.multi_worker_mirrored_2x2_gpu_no_merge_call,
         ],
         update_fn=['assign', 'assign_add', 'assign_sub'],
         tf_function=[True, False],
@@ -253,7 +274,7 @@ class ReduceTest(test.TestCase, parameterized.TestCase):
 class ReplicaCtxUpdateTest(test.TestCase, parameterized.TestCase):
 
   def testDenseUpdate(self, strategy, tf_function, update_fn):
-    if isinstance(strategy, tpu_strategy.TPUStrategy) and (not tf_function):
+    if strategy_test_lib.is_tpu_strategy(strategy) and (not tf_function):
       self.skipTest('Skip TPUStrategy + eager combination.')
     with strategy.scope():
       distributed_variable1 = variables.Variable(5.0)
@@ -288,6 +309,7 @@ class ReplicaCtxUpdateTest(test.TestCase, parameterized.TestCase):
             strategy_combinations.multi_worker_mirrored_2x1_cpu,
             strategy_combinations.multi_worker_mirrored_2x1_gpu,
             strategy_combinations.multi_worker_mirrored_2x2_gpu,
+            strategy_combinations.multi_worker_mirrored_2x2_gpu_no_merge_call,
             strategy_combinations.tpu_strategy,
         ] + strategy_combinations.strategies_minus_tpu,
         tf_function=[combinations.tf_function, combinations.no_tf_function],
@@ -295,7 +317,7 @@ class ReplicaCtxUpdateTest(test.TestCase, parameterized.TestCase):
 class ReplicaCtxAllReduceTest(test.TestCase, parameterized.TestCase):
 
   def testDense(self, strategy, tf_function):
-    if (isinstance(strategy, tpu_strategy.TPUStrategy) and
+    if (strategy_test_lib.is_tpu_strategy(strategy) and
         tf_function is combinations.no_tf_function):
       self.skipTest('Skip TPUStrategy + eager combination.')
 
@@ -321,7 +343,7 @@ class ReplicaCtxAllReduceTest(test.TestCase, parameterized.TestCase):
     def fn():
 
       def replica_fn():
-        value = ops.IndexedSlices(
+        value = indexed_slices.IndexedSlices(
             values=array_ops.identity([[1.0]]),
             indices=array_ops.identity([0]),
             dense_shape=array_ops.identity([5, 1]))
@@ -332,7 +354,7 @@ class ReplicaCtxAllReduceTest(test.TestCase, parameterized.TestCase):
       return strategy.experimental_local_results(strategy.run(replica_fn))
 
     got = fn()[0]
-    expect = ops.IndexedSlices(
+    expect = indexed_slices.IndexedSlices(
         values=array_ops.identity([[1.0 * strategy.num_replicas_in_sync]]),
         indices=array_ops.identity([0]),
         dense_shape=array_ops.identity([5, 1]))
@@ -348,12 +370,12 @@ class ReplicaCtxAllReduceTest(test.TestCase, parameterized.TestCase):
 
       def replica_fn():
         value = (array_ops.identity(1.0),
-                 ops.IndexedSlices(
+                 indexed_slices.IndexedSlices(
                      values=array_ops.identity([[1.0]]),
                      indices=array_ops.identity([0]),
                      dense_shape=array_ops.identity([5, 1])),
                  array_ops.identity(2.0),
-                 ops.IndexedSlices(
+                 indexed_slices.IndexedSlices(
                      values=array_ops.identity([[2.0]]),
                      indices=array_ops.identity([1]),
                      dense_shape=array_ops.identity([5, 1])))
@@ -365,13 +387,203 @@ class ReplicaCtxAllReduceTest(test.TestCase, parameterized.TestCase):
 
     got = fn()[0]
     expect = (1.0 * strategy.num_replicas_in_sync,
-              ops.IndexedSlices(
+              indexed_slices.IndexedSlices(
                   values=array_ops.identity(
                       [[1.0 * strategy.num_replicas_in_sync]]),
                   indices=array_ops.identity([0]),
                   dense_shape=array_ops.identity([5, 1])),
               2.0 * strategy.num_replicas_in_sync,
-              ops.IndexedSlices(
+              indexed_slices.IndexedSlices(
+                  values=array_ops.identity(
+                      [[2.0 * strategy.num_replicas_in_sync]]),
+                  indices=array_ops.identity([1]),
+                  dense_shape=array_ops.identity([5, 1])))
+
+    self.assertAllClose(
+        nest.map_structure(ops.convert_to_tensor, got),
+        nest.map_structure(ops.convert_to_tensor, expect))
+
+  def testSyncOnReadVariableInput(self, strategy, tf_function):
+    if (not strategy_test_lib.is_mirrored_strategy(strategy) and
+        not strategy_test_lib.is_multi_worker_mirrored_strategy(strategy) and
+        not strategy_test_lib.is_tpu_strategy(strategy)):
+      self.skipTest('Skip strategies not using SyncOnReadVariables.')
+    if (strategy_test_lib.is_tpu_strategy(strategy) and
+        tf_function is combinations.no_tf_function):
+      self.skipTest('Skip TPUStrategy + eager combination.')
+    if (strategy_test_lib.is_multi_worker_mirrored_strategy(strategy) and
+        tf_function is combinations.tf_function):
+      self.skipTest('Skip MWMS + graph combination until b/228512201 is fixed.')
+
+    with strategy.scope():
+      var = variables.Variable(
+          0.0,
+          synchronization=variables.VariableSynchronization.ON_READ,
+          aggregation=variables.VariableAggregation.ONLY_FIRST_REPLICA)
+
+    @tf_function
+    def replica_fn():
+      replica_context = ds_context.get_replica_context()
+      replica_id = replica_context.replica_id_in_sync_group
+      var.assign(math_ops.cast(replica_id, dtype=float) * 3.0)
+
+      return replica_context.all_reduce(reduce_util.ReduceOp.SUM, var)
+
+    if strategy_test_lib.is_multi_worker_mirrored_strategy(strategy):
+      client_local_replica_num = strategy.extended._num_devices_per_worker
+    else:
+      client_local_replica_num = strategy.num_replicas_in_sync
+
+    workers_num = strategy.num_replicas_in_sync
+    expected_sum = sum(range(workers_num)) * 3.0
+
+    # Expand the values on each replica if multiple devices are used; otherwise
+    # simple read the value of the Tensor.
+    result = strategy.run(replica_fn)
+    if hasattr(result, 'values'):
+      result = result.values
+    result = nest.flatten(result)
+
+    # Iterate through all replicas and verify the reduce sum result.
+    for i in range(client_local_replica_num):
+      self.assertEqual(result[i].numpy(), expected_sum)
+
+
+@combinations.generate(
+    combinations.combine(
+        strategy=[
+            strategy_combinations.multi_worker_mirrored_2x1_cpu,
+            strategy_combinations.multi_worker_mirrored_2x1_gpu,
+            strategy_combinations.multi_worker_mirrored_2x2_gpu,
+            strategy_combinations.multi_worker_mirrored_2x2_gpu_no_merge_call,
+            strategy_combinations.tpu_strategy,
+        ] + strategy_combinations.strategies_minus_tpu,
+        tf_function=[combinations.tf_function, combinations.no_tf_function],
+        mode=['eager']))
+class AllReduceTest(test.TestCase, parameterized.TestCase):
+
+  def testDense(self, strategy, tf_function):
+    if (strategy_test_lib.is_tpu_strategy(strategy) and
+        tf_function is combinations.no_tf_function):
+      self.skipTest('Skip TPUStrategy + eager combination.')
+
+    @tf_function
+    def fn():
+
+      def replica_fn():
+        value = array_ops.identity(1.0)
+        rep_ctx = ds_context.get_replica_context()
+        reduced = rep_ctx.all_reduce(reduce_util.ReduceOp.SUM, value)
+        return reduced
+
+      return strategy.experimental_local_results(strategy.run(replica_fn))
+
+    got = fn()[0]
+    self.assertEqual(got, 1.0 * strategy.num_replicas_in_sync)
+
+  def testSparse(self, strategy, tf_function):
+    if tf_function is combinations.no_tf_function:
+      self.skipTest('Skip IndexedSlices + eager combination.')
+
+    @tf_function
+    def fn():
+
+      def replica_fn():
+        value = indexed_slices.IndexedSlices(
+            values=array_ops.identity([[1.0]]),
+            indices=array_ops.identity([0]),
+            dense_shape=array_ops.identity([5, 1]))
+        rep_ctx = ds_context.get_replica_context()
+        reduced = rep_ctx.all_reduce(reduce_util.ReduceOp.MEAN, value)
+        return reduced
+
+      return strategy.experimental_local_results(strategy.run(replica_fn))
+
+    got = fn()[0]
+
+    if not strategy_test_lib.is_tpu_strategy(strategy):
+      self.assertIsInstance(got, indexed_slices.IndexedSlices)
+    expect = indexed_slices.IndexedSlices(
+        values=array_ops.identity([[1.0]]),
+        indices=array_ops.identity([0]),
+        dense_shape=array_ops.identity([5, 1]))
+    self.assertAllEqual(
+        ops.convert_to_tensor(got), ops.convert_to_tensor(expect))
+
+  def testSparseTuple(self, strategy, tf_function):
+    if tf_function is combinations.no_tf_function:
+      self.skipTest('Skip IndexedSlices + eager combination.')
+
+    @tf_function
+    def fn():
+
+      def replica_fn():
+        value1 = indexed_slices.IndexedSlices(
+            values=array_ops.identity([[1.0]]),
+            indices=array_ops.identity([0]),
+            dense_shape=array_ops.identity([5, 1]))
+        value2 = indexed_slices.IndexedSlices(
+            values=array_ops.identity([[2.0]]),
+            indices=array_ops.identity([0]),
+            dense_shape=array_ops.identity([5, 1]))
+        rep_ctx = ds_context.get_replica_context()
+        reduced = rep_ctx.all_reduce(reduce_util.ReduceOp.SUM, [value1, value2])
+        return reduced
+
+      return strategy.experimental_local_results(strategy.run(replica_fn))
+
+    got = fn()[0]
+
+    if not strategy_test_lib.is_tpu_strategy(strategy):
+      for g in got:
+        self.assertIsInstance(g, indexed_slices.IndexedSlices)
+    expect = [
+        indexed_slices.IndexedSlices(
+            values=array_ops.identity([[1.0 * strategy.num_replicas_in_sync]]),
+            indices=array_ops.identity([0]),
+            dense_shape=array_ops.identity([5, 1])),
+        indexed_slices.IndexedSlices(
+            values=array_ops.identity([[2.0 * strategy.num_replicas_in_sync]]),
+            indices=array_ops.identity([0]),
+            dense_shape=array_ops.identity([5, 1]))
+    ]
+    self.assertAllEqual(
+        nest.map_structure(ops.convert_to_tensor, got),
+        nest.map_structure(ops.convert_to_tensor, expect))
+
+  def testNestedInput(self, strategy, tf_function):
+    if tf_function is combinations.no_tf_function:
+      self.skipTest('Skip IndexedSlices + eager combination.')
+
+    @tf_function
+    def fn():
+
+      def replica_fn():
+        value = (array_ops.identity(1.0),
+                 indexed_slices.IndexedSlices(
+                     values=array_ops.identity([[1.0]]),
+                     indices=array_ops.identity([0]),
+                     dense_shape=array_ops.identity([5, 1])),
+                 array_ops.identity(2.0),
+                 indexed_slices.IndexedSlices(
+                     values=array_ops.identity([[2.0]]),
+                     indices=array_ops.identity([1]),
+                     dense_shape=array_ops.identity([5, 1])))
+        rep_ctx = ds_context.get_replica_context()
+        reduced = rep_ctx.all_reduce(reduce_util.ReduceOp.SUM, value)
+        return reduced
+
+      return strategy.experimental_local_results(strategy.run(replica_fn))
+
+    got = fn()[0]
+    expect = (1.0 * strategy.num_replicas_in_sync,
+              indexed_slices.IndexedSlices(
+                  values=array_ops.identity(
+                      [[1.0 * strategy.num_replicas_in_sync]]),
+                  indices=array_ops.identity([0]),
+                  dense_shape=array_ops.identity([5, 1])),
+              2.0 * strategy.num_replicas_in_sync,
+              indexed_slices.IndexedSlices(
                   values=array_ops.identity(
                       [[2.0 * strategy.num_replicas_in_sync]]),
                   indices=array_ops.identity([1]),
@@ -383,7 +595,7 @@ class ReplicaCtxAllReduceTest(test.TestCase, parameterized.TestCase):
 
 
 def _make_indexed_slices(values, indices, dense_shape):
-  tensor = ops.IndexedSlices(
+  tensor = indexed_slices.IndexedSlices(
       values=constant_op.constant(values),
       indices=constant_op.constant(indices),
       dense_shape=constant_op.constant(dense_shape))
@@ -396,12 +608,6 @@ def _get_num_replicas_per_client(strategy):
     return max(nest.flatten(resolver.num_accelerators())[0], 1)
   else:
     return strategy.num_replicas_in_sync
-
-
-def _is_tpu_strategy(strategy):
-  return isinstance(strategy,
-                    (tpu_strategy.TPUStrategy, tpu_strategy.TPUStrategyV1,
-                     tpu_strategy.TPUStrategyV2))
 
 
 @combinations.generate(
@@ -536,8 +742,8 @@ class StrategyClusterResolverTest(test.TestCase, parameterized.TestCase):
     # CollectiveAllReduceStrategy and TPUStrategy must have a cluster resolver.
     # `None` otherwise.
     resolver = strategy.cluster_resolver
-    if not isinstance(strategy, CollectiveAllReduceStrategy) and not isinstance(
-        strategy, tpu_strategy.TPUStrategy):
+    if (not isinstance(strategy, CollectiveAllReduceStrategy) and
+        not strategy_test_lib.is_tpu_strategy(strategy)):
       self.assertIsNone(resolver)
       return
 

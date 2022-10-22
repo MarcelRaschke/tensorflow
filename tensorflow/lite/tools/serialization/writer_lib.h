@@ -17,14 +17,14 @@ limitations under the License.
 #ifndef TENSORFLOW_LITE_TOOLS_SERIALIZATION_WRITER_LIB_H_
 #define TENSORFLOW_LITE_TOOLS_SERIALIZATION_WRITER_LIB_H_
 #include <iostream>
+#include <string>
 #include <unordered_map>
 
-#include "absl/container/flat_hash_map.h"
 #include "tensorflow/lite/builtin_op_data.h"
 #include "tensorflow/lite/c/common.h"
 #include "tensorflow/lite/context_util.h"
+#include "tensorflow/lite/core/interpreter.h"
 #include "tensorflow/lite/core/subgraph.h"
-#include "tensorflow/lite/interpreter.h"
 #include "tensorflow/lite/schema/reflection/schema_generated.h"
 #include "tensorflow/lite/tools/serialization/enum_mapping.h"
 #include "tensorflow/lite/version.h"
@@ -36,21 +36,49 @@ struct OpCode {
   std::string custom;
 };
 
+// Forward declaration.
+class SubgraphWriter;
+
 // Handles writing a full TFLite model (with 1 or more subgraphs) to a
 // serialized TF lite file format.
 // TODO(b/174708523): Support custom I/O or unused tensors later.
 class ModelWriter {
  public:
+  // CustomWriter allows the delegate to customize the write to the flatbuffer.
+  typedef flatbuffers::Offset<Operator> (*CustomWriter)(
+      flatbuffers::FlatBufferBuilder* fbb, Subgraph* subgraph, int node_index,
+      flatbuffers::Offset<flatbuffers::Vector<uint8_t>>* output_options,
+      CustomOptionsFormat* custom_options_format);
+
   // Construct a writer for the specified `interpreter`. Then, use
   // .Write() or .GetBuffer(...) to extract the data.
-  explicit ModelWriter(Interpreter* interpreter) : interpreter_(interpreter) {
-    buffers_.push_back(std::make_pair(nullptr, 0));
-  }
+  explicit ModelWriter(Interpreter* interpreter);
+
+  // Same as above, except takes subgraphs as input.
+  explicit ModelWriter(const std::vector<Subgraph*>& subgraphs);
+
+  // For initializing the ModelWriter internal data.
+  void Init(const std::vector<Subgraph*>& subgraphs);
 
   // Get a buffer and size of a serialized flatbuffer.
   TfLiteStatus GetBuffer(std::unique_ptr<uint8_t[]>* out, size_t* size);
   // Write the serialized flatbuffer to the prescribed `filename`.
   TfLiteStatus Write(const std::string& filename);
+
+  // Specifies unused tensors on the target subgraph.
+  void SetUnusedTensors(int subgraph_index,
+                        const std::set<int>& unused_tensors);
+
+  // Specifies custom inputs, outputs, and execution_plan to target subgraph.
+  TfLiteStatus SetCustomInputOutput(int subgraph_index,
+                                    const std::vector<int>& inputs,
+                                    const std::vector<int>& outputs,
+                                    const std::vector<int>& execution_plan);
+
+  // Registers a custom writer for a custom op. The customization allows the
+  // caller to change the custom data.
+  TfLiteStatus RegisterCustomWriter(const std::string& custom_name,
+                                    CustomWriter custom_writer);
 
  private:
   template <class T>
@@ -60,15 +88,16 @@ class ModelWriter {
   Offset<flatbuffers::Vector<Offset<Buffer>>> ExportBuffers(
       flatbuffers::FlatBufferBuilder* fbb);
 
-  // ModelWriter does not take ownership of this object.
-  Interpreter* const interpreter_;
+  // List of subgraph writers owned by this model writer.
+  // There is one subgraph writer for each subgraph in the model.
+  std::vector<SubgraphWriter> subgraph_writers_;
 
   // This data corresponds to the overall model (rather than individual
   // subgraphs), so we define common fields. Keep track of byte buffers
   std::vector<std::pair<const uint8_t*, size_t>> buffers_;
   // List of used opcodes
   std::vector<OpCode> opcodes_;
-  absl::flat_hash_map<int, int> builtin_op_to_opcode_;
+  std::unordered_map<int, int> builtin_op_to_opcode_;
 };
 
 // Handles writing TensorFlow Lite running subgraph to a serialized TF lite
@@ -120,7 +149,7 @@ class SubgraphWriter {
       Subgraph* subgraph,
       std::vector<std::pair<const uint8_t*, size_t>>* external_buffers,
       std::vector<OpCode>* external_opcodes,
-      absl::flat_hash_map<int, int>* external_builtin_op_to_opcode)
+      std::unordered_map<int, int>* external_builtin_op_to_opcode)
       : subgraph_(subgraph),
         inputs_(subgraph->inputs()),
         outputs_(subgraph->outputs()),
@@ -135,7 +164,8 @@ class SubgraphWriter {
   // Global stuff (like opcodes & buffers) is populated into buffers_, opcodes_,
   // etc. & populated in the Flatbuffer by ModelWriter.
   flatbuffers::Offset<SubGraph> PopulateAndGetOffset(
-      flatbuffers::FlatBufferBuilder* builder);
+      flatbuffers::FlatBufferBuilder* builder,
+      const std::string& subgraph_name);
 
   template <class T>
   using Offset = flatbuffers::Offset<T>;
@@ -202,13 +232,13 @@ class SubgraphWriter {
   std::vector<std::pair<const uint8_t*, size_t>>* buffers_;
   // List of used opcodes
   std::vector<OpCode>* opcodes_;
-  absl::flat_hash_map<int, int>* builtin_op_to_opcode_;
+  std::unordered_map<int, int>* builtin_op_to_opcode_;
 
   // These are used if SubgraphWriter is being used directly.
   std::vector<std::pair<const uint8_t*, size_t>> buffers_data_;
   // List of used opcodes
   std::vector<OpCode> opcodes_data_;
-  absl::flat_hash_map<int, int> builtin_op_to_opcode_data_;
+  std::unordered_map<int, int> builtin_op_to_opcode_data_;
 };
 
 }  // namespace tflite

@@ -1,4 +1,4 @@
-/* Copyright 2020 The TensorFlow Authors. All Rights Reserved.
+/* Copyright 2022 The TensorFlow Authors. All Rights Reserved.
 
 Licensed under the Apache License, Version 2.0 (the "License");
 you may not use this file except in compliance with the License.
@@ -14,12 +14,15 @@ limitations under the License.
 ==============================================================================*/
 #include "tensorflow/compiler/mlir/lite/python/saved_model_to_tfl_flatbuffer.h"
 
+#include <memory>
+#include <string>
 #include <utility>
 
 #include "absl/types/span.h"
 #include "llvm/ADT/None.h"
 #include "llvm/ADT/StringSet.h"
 #include "llvm/Support/ToolOutputFile.h"
+#include "mlir/Dialect/Func/IR/FuncOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinOps.h"  // from @llvm-project
 #include "mlir/IR/BuiltinTypes.h"  // from @llvm-project
 #include "mlir/IR/MLIRContext.h"  // from @llvm-project
@@ -27,6 +30,7 @@ limitations under the License.
 #include "mlir/Pass/Pass.h"  // from @llvm-project
 #include "mlir/Support/FileUtilities.h"  // from @llvm-project
 #include "mlir/Transforms/ViewOpGraph.h"  // from @llvm-project
+#include "tensorflow/cc/saved_model/loader.h"
 #include "tensorflow/compiler/mlir/lite/common/tfl_pass_config.h"
 #include "tensorflow/compiler/mlir/lite/python/tf_tfl_flatbuffer_helpers.h"
 #include "tensorflow/compiler/mlir/lite/tf_tfl_passes.h"
@@ -34,6 +38,7 @@ limitations under the License.
 #include "tensorflow/compiler/mlir/lite/transforms/passes.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/import_model.h"
 #include "tensorflow/compiler/mlir/tensorflow/translate/mlir_roundtrip_flags.h"
+#include "tensorflow/compiler/xla/stream_executor/lib/statusor.h"
 #include "tensorflow/core/framework/graph.pb.h"
 #include "tensorflow/core/framework/types.pb.h"
 #include "tensorflow/core/lib/core/errors.h"
@@ -42,18 +47,18 @@ limitations under the License.
 #include "tensorflow/lite/toco/model_flags.pb.h"
 #include "tensorflow/lite/toco/toco_flags.pb.h"
 #include "tensorflow/lite/toco/types.pb.h"
-#include "tensorflow/stream_executor/lib/statusor.h"
 
 namespace tensorflow {
 
-Status HandleInputOutputArraysWithModule(const toco::ModelFlags& model_flags,
-                                         mlir::OwningModuleRef* module) {
-  mlir::FuncOp entry_function = nullptr;
-  for (auto func : module->get().getOps<mlir::FuncOp>()) {
+Status HandleInputOutputArraysWithModule(
+    const toco::ModelFlags& model_flags,
+    mlir::OwningOpRef<mlir::ModuleOp>* module) {
+  mlir::func::FuncOp entry_function = nullptr;
+  for (auto func : module->get().getOps<mlir::func::FuncOp>()) {
     if (auto tf_attrs =
             func->getAttrOfType<mlir::DictionaryAttr>("tf.entry_function")) {
-      // TODO(jaesung): There could be multiple entry functions. Let's handle
-      // such cases if there are any needs for that.
+      // TODO(b/184697652): There could be multiple entry functions. Let's
+      // handle such cases if there are any needs for that.
       if (entry_function != nullptr) {
         return errors::InvalidArgument(
             "There should be only one tf.entry_function");
@@ -75,7 +80,8 @@ Status HandleInputOutputArraysWithModule(const toco::ModelFlags& model_flags,
     return errors::InvalidArgument("no inputs attribute found");
   }
   auto input_names = input_attr.cast<mlir::StringAttr>().getValue();
-  input_names.split(function_input_names, ",");
+  input_names.split(function_input_names, ",", /*MaxSplit=*/-1,
+                    /*KeepEmpty=*/false);
   const int function_input_names_size = function_input_names.size();
   if (function_input_names_size != model_flags.input_arrays().size()) {
     return errors::InvalidArgument(
@@ -100,7 +106,8 @@ Status HandleInputOutputArraysWithModule(const toco::ModelFlags& model_flags,
     return errors::InvalidArgument("no outputs attribute found");
   }
   auto output_names = output_attr.cast<mlir::StringAttr>().getValue();
-  output_names.split(function_output_names, ",");
+  output_names.split(function_output_names, ",", /*MaxSplit=*/-1,
+                     /*KeepEmpty=*/false);
   const int function_output_names_size = function_output_names.size();
   if (function_output_names_size != model_flags.output_arrays().size()) {
     return errors::InvalidArgument(
@@ -116,14 +123,14 @@ Status HandleInputOutputArraysWithModule(const toco::ModelFlags& model_flags,
                                      ") does not exist in the given graph");
     }
   }
-  return Status::OK();
+  return OkStatus();
 }
 
 Status ConvertSavedModelToTFLiteFlatBuffer(const toco::ModelFlags& model_flags,
                                            const toco::TocoFlags& toco_flags,
                                            string* result) {
   mlir::MLIRContext context;
-  mlir::TFL::QuantizationSpecs quant_specs;
+  mlir::quant::QuantizationSpecs quant_specs;
 
   // Parse input arrays.
   std::vector<string> node_names;
@@ -150,8 +157,8 @@ Status ConvertSavedModelToTFLiteFlatBuffer(const toco::ModelFlags& model_flags,
       saved_model_exported_names.begin(), saved_model_exported_names.end());
   absl::Span<std::string> exported_names(exported_names_in_vector);
 
-  if (exported_names.size() != 1) {
-    return errors::Unimplemented("Only support a single exported name.");
+  if (exported_names.empty()) {
+    return errors::Unimplemented("Need at least one exported name.");
   }
 
   tensorflow::GraphImportConfig specs;
@@ -159,11 +166,13 @@ Status ConvertSavedModelToTFLiteFlatBuffer(const toco::ModelFlags& model_flags,
 
   std::vector<std::string> custom_opdefs(toco_flags.custom_opdefs().begin(),
                                          toco_flags.custom_opdefs().end());
-  TF_ASSIGN_OR_RETURN(auto module,
-                      ImportSavedModel(model_flags.saved_model_dir(),
-                                       model_flags.saved_model_version(), tags,
-                                       absl::MakeSpan(custom_opdefs),
-                                       exported_names, specs, &context));
+  auto bundle = std::make_unique<tensorflow::SavedModelBundle>();
+  TF_ASSIGN_OR_RETURN(
+      auto module,
+      ImportSavedModel(
+          model_flags.saved_model_dir(), model_flags.saved_model_version(),
+          tags, absl::MakeSpan(custom_opdefs), exported_names, specs,
+          !toco_flags.enable_tflite_resource_variables(), &context, &bundle));
 
   if (!model_flags.input_arrays().empty() ||
       !model_flags.output_arrays().empty()) {
@@ -173,19 +182,27 @@ Status ConvertSavedModelToTFLiteFlatBuffer(const toco::ModelFlags& model_flags,
   mlir::TFL::PassConfig pass_config(quant_specs);
   bool emit_builtin_tflite_ops = !toco_flags.force_select_tf_ops();
   pass_config.emit_builtin_tflite_ops = emit_builtin_tflite_ops;
-  pass_config.lower_tensor_list_ops = true;
   pass_config.enable_tflite_variables =
       toco_flags.enable_tflite_resource_variables();
+  pass_config.unfold_batch_matmul = toco_flags.unfold_batchmatmul();
+  pass_config.lower_tensor_list_ops = toco_flags.lower_tensor_list_ops();
   // Disable the unfolding of the 16x16 TF::BatchMatMulOp to avoid the
   // conversion to an unsupported 16x16 TFL::FullyConnectedOp.
   if (toco_flags.inference_type() == toco::IODataType::QUANTIZED_INT16) {
     pass_config.unfold_batch_matmul = false;
   }
+  pass_config.unfold_large_splat_constant =
+      toco_flags.unfold_large_splat_constant();
+  pass_config.enable_dynamic_update_slice =
+      toco_flags.enable_dynamic_update_slice();
+  pass_config.preserve_assert_op = toco_flags.preserve_assert_op();
+  pass_config.guarantee_all_funcs_one_use =
+      toco_flags.guarantee_all_funcs_one_use();
 
   // TODO(b/153507667): Pass the session object when importing logic is removed.
   auto status = internal::ConvertMLIRToTFLiteFlatBuffer(
       model_flags, toco_flags, std::move(module), pass_config, tags, result,
-      /*session=*/llvm::None);
+      bundle ? bundle->GetSession() : nullptr);
   return status;
 }
 

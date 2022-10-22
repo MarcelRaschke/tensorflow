@@ -34,15 +34,14 @@ REGISTER_OP("_TPUCompileMlir")
     .Output("program: num_computations * string")
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       int num_computations;
-      TF_RETURN_IF_ERROR(
-          GetNodeAttr(c->attrs(), "num_computations", &num_computations));
+      TF_RETURN_IF_ERROR(c->GetAttr("num_computations", &num_computations));
       // Compilation status.
       c->set_output(0, c->Scalar());
       // Programs.
       for (int i = 0; i < num_computations; ++i) {
         c->set_output(i + 1, c->Vector(3));
       }
-      return Status::OK();
+      return OkStatus();
     })
     .Doc(
         R"(
@@ -65,7 +64,7 @@ REGISTER_OP("_TPUCompileMlirPlaceholderProgramKey")
     .Output("program: string")
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       c->set_output(0, c->Vector(3));
-      return Status::OK();
+      return OkStatus();
     })
     .SetIsStateful()
     .Doc(
@@ -94,8 +93,7 @@ REGISTER_OP("TPUCompile")
     .Output("may_modify_variables: num_computations * bool")
     .SetShapeFn([](shape_inference::InferenceContext* c) {
       int num_computations;
-      TF_RETURN_IF_ERROR(
-          GetNodeAttr(c->attrs(), "num_computations", &num_computations));
+      TF_RETURN_IF_ERROR(c->GetAttr("num_computations", &num_computations));
       // Compilation status.
       c->set_output(0, c->Scalar());
       // Programs.
@@ -106,7 +104,7 @@ REGISTER_OP("TPUCompile")
       for (int i = 0; i < num_computations; ++i) {
         c->set_output(num_computations + i + 1, c->Scalar());
       }
-      return Status::OK();
+      return OkStatus();
     });
 
 REGISTER_OP("TPUCompileSucceededAssert")

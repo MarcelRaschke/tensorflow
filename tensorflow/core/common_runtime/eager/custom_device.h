@@ -51,6 +51,11 @@ class CustomDevice {
   // one of which is on this custom device.
   virtual Status Pack(absl::Span<ImmediateExecutionTensorHandle*> handles,
                       ImmediateExecutionTensorHandle** result) = 0;
+
+  // Returns true signifying to pin to the current custom device.
+  // Returns false to pin to the physical device.
+  virtual StatusOr<bool> ShallPinToThisDevice(
+      const ImmediateExecutionOperation* op) = 0;
 };
 
 // Custom devices do many of the same things as physical Devices, but have a
@@ -84,7 +89,7 @@ class CustomDeviceTensorHandle : public ImmediateExecutionTensorHandle {
 
   tensorflow::DataType DataType() const override { return dtype_; }
   Status Shape(PartialTensorShape* shape) const override;
-  Status NumElements(int64* num_elements) const override;
+  Status NumElements(int64_t* num_elements) const override;
 
   const char* DeviceName(Status* status) const override {
     return device_->name().c_str();

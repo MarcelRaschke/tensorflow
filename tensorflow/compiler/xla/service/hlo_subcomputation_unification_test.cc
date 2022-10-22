@@ -74,7 +74,7 @@ TEST_F(HloSubcomputationUnificationTest, UnifyIdentities) {
       module->AddEmbeddedComputation(CreateR0S32IdentityComputation());
 
   auto constant = builder.AddInstruction(
-      HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32>(5)));
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32_t>(5)));
   auto x = builder.AddInstruction(
       HloInstruction::CreateCall(r0s32_, {constant}, callee1));
   auto y = builder.AddInstruction(
@@ -86,7 +86,7 @@ TEST_F(HloSubcomputationUnificationTest, UnifyIdentities) {
 
   EXPECT_EQ(3, module->computation_count());
   EXPECT_NE(x->to_apply(), y->to_apply());
-  EXPECT_TRUE(HloSubcomputationUnification().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloSubcomputationUnification().Run(module.get()).value());
   EXPECT_EQ(2, module->computation_count());
   EXPECT_EQ(x->to_apply(), y->to_apply());
 }
@@ -101,9 +101,9 @@ TEST_F(HloSubcomputationUnificationTest, UnifyAdditions) {
       module->AddEmbeddedComputation(CreateR0S32AdditionComputation());
 
   auto constant1 = builder.AddInstruction(
-      HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32>(5)));
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32_t>(5)));
   auto constant2 = builder.AddInstruction(
-      HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32>(3)));
+      HloInstruction::CreateConstant(LiteralUtil::CreateR0<int32_t>(3)));
   auto x = builder.AddInstruction(
       HloInstruction::CreateCall(r0s32_, {constant1, constant2}, callee1));
   auto y = builder.AddInstruction(
@@ -115,7 +115,7 @@ TEST_F(HloSubcomputationUnificationTest, UnifyAdditions) {
 
   EXPECT_EQ(3, module->computation_count());
   EXPECT_NE(x->to_apply(), y->to_apply());
-  EXPECT_TRUE(HloSubcomputationUnification().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloSubcomputationUnification().Run(module.get()).value());
   EXPECT_EQ(2, module->computation_count());
   EXPECT_EQ(x->to_apply(), y->to_apply());
 }
@@ -145,7 +145,7 @@ TEST_F(HloSubcomputationUnificationTest, DifferentParameterShapes) {
 
   EXPECT_EQ(3, module->computation_count());
   EXPECT_NE(x->to_apply(), y->to_apply());
-  EXPECT_FALSE(HloSubcomputationUnification().Run(module.get()).ValueOrDie());
+  EXPECT_FALSE(HloSubcomputationUnification().Run(module.get()).value());
   EXPECT_EQ(3, module->computation_count());
   EXPECT_NE(x->to_apply(), y->to_apply());
 }
@@ -169,7 +169,7 @@ TEST_F(HloSubcomputationUnificationTest, TwoIdenticalComputations) {
     }
   }
 
-  EXPECT_TRUE(HloSubcomputationUnification().Run(module.get()).ValueOrDie());
+  EXPECT_TRUE(HloSubcomputationUnification().Run(module.get()).value());
   EXPECT_EQ(1, module->computation_count());
   EXPECT_EQ(*module->computations().begin(), module->entry_computation());
 }

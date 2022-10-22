@@ -17,6 +17,8 @@ limitations under the License.
 
 #include "tensorflow/compiler/jit/xla_compile_on_demand_op.h"
 
+#include <utility>
+
 #include "absl/memory/memory.h"
 #include "tensorflow/compiler/jit/xla_device.h"
 #include "tensorflow/compiler/jit/xla_launch_util.h"
@@ -24,6 +26,7 @@ limitations under the License.
 #include "tensorflow/compiler/tf2xla/const_analysis.h"
 #include "tensorflow/compiler/tf2xla/tf2xla_util.h"
 #include "tensorflow/compiler/tf2xla/xla_compiler.h"
+#include "tensorflow/compiler/xla/service/gpu/gpu_executable_run_options.h"
 #include "tensorflow/core/framework/function.h"
 #include "tensorflow/core/lib/core/refcount.h"
 
@@ -33,7 +36,7 @@ namespace tensorflow {
 // kernel context `ctx`.
 static std::vector<int> GetResourceVariableIndices(OpKernelContext* ctx) {
   std::vector<int> out;
-  for (int64 i = 0; i < ctx->num_inputs(); i++) {
+  for (int64_t i = 0; i < ctx->num_inputs(); i++) {
     if (ctx->input(i).dtype() == DT_RESOURCE) {
       out.push_back(i);
     }
@@ -48,11 +51,11 @@ Status XlaCompileOnDemandOp::Run(OpKernelContext* ctx,
                                  const ResourceVarsSnapshot& variable_args) {
   xla::LocalClient* client = static_cast<xla::LocalClient*>(cache->client());
 
-  absl::optional<se::TfAllocatorAdapter> tf_allocator_adapter;
-  se::DeviceMemoryAllocator* allocator = GetAllocator(
-      &tf_allocator_adapter, ctx->device(),
-      ctx->op_device_context() ? ctx->op_device_context()->stream() : nullptr,
-      platform_info_);
+  se::Stream* stream =
+      ctx->op_device_context() ? ctx->op_device_context()->stream() : nullptr;
+  std::shared_ptr<se::DeviceMemoryAllocator> allocator_ptr =
+      GetAllocator(ctx->device(), stream, platform_info_);
+  se::DeviceMemoryAllocator* allocator = allocator_ptr.get();
   XlaComputationLaunchContext launch_context(
       client, allocator, client->default_device_ordinal(),
       /*allocate_xla_tensors=*/platform_info_.xla_device_metadata() != nullptr,
@@ -68,27 +71,32 @@ Status XlaCompileOnDemandOp::Run(OpKernelContext* ctx,
 
   const xla::HloInputOutputAliasConfig& input_output_alias =
       executable->executable()->module().input_output_alias_config();
-  xla::StatusOr<std::vector<xla::ExecutionInput>> execution_inputs =
+  StatusOr<std::vector<xla::ExecutionInput>> execution_inputs =
       launch_context.PopulateInputs(ctx, result, snapshot_ptrs,
                                     /*missing_ctx_input_prefix=*/0,
                                     input_output_alias);
   TF_RETURN_IF_ERROR(execution_inputs.status());
 
-  se::Stream* stream =
-      ctx->op_device_context() ? ctx->op_device_context()->stream() : nullptr;
-
   VLOG(2) << "Executing computation: " << name();
   xla::ExecutableRunOptions run_options;
+  xla::gpu::GpuExecutableRunOptions gpu_options;
+  xla::DeviceAssignment device_assignment;
+  if (result->collective_info) {
+    TF_RETURN_IF_ERROR(ResolveDeviceAssignment(ctx, *result->collective_info,
+                                               run_options, device_assignment,
+                                               gpu_options));
+  }
+
   run_options.set_stream(stream);
   run_options.set_allocator(allocator);
   run_options.set_intra_op_thread_pool(&ctx->eigen_cpu_device());
   run_options.set_rng_seed(GetXLARandomSeed());
 
-  xla::StatusOr<xla::ExecutionOutput> run_result =
-      executable->Run(execution_inputs.ConsumeValueOrDie(), run_options);
+  StatusOr<xla::ExecutionOutput> run_result =
+      executable->Run(std::move(execution_inputs).value(), run_options);
   TF_RETURN_IF_ERROR(run_result.status());
-  xla::ExecutionOutput execution_output = run_result.ConsumeValueOrDie();
-  xla::StatusOr<std::vector<VariableInfo>> variable_infos =
+  xla::ExecutionOutput execution_output = std::move(run_result).value();
+  StatusOr<std::vector<VariableInfo>> variable_infos =
       GatherVariableInfo(ctx, *result, 0);
   TF_RETURN_IF_ERROR(variable_infos.status());
   TF_RETURN_IF_ERROR(LockVariables(absl::MakeSpan(*variable_infos)));
@@ -96,7 +104,7 @@ Status XlaCompileOnDemandOp::Run(OpKernelContext* ctx,
       ctx, result, execution_output.ConsumeResult(),
       /*missing_ctx_input_prefix=*/0, absl::MakeSpan(*variable_infos),
       input_output_alias, snapshot_ptrs));
-  return Status::OK();
+  return OkStatus();
 }
 
 Status XlaCompileOnDemandOp::Compile(
@@ -122,16 +130,14 @@ Status XlaCompileOnDemandOp::Compile(
   TF_RETURN_IF_ERROR(rm->LookupOrCreate<XlaCompilationCache>(
       rm->default_container(), "xla_cache", cache,
       [&](XlaCompilationCache** write_into_cache) {
-        return BuildXlaCompilationCache(ctx->device(), platform_info_,
-                                        write_into_cache);
+        return BuildXlaCompilationCache(ctx->device(), ctx->function_library(),
+                                        platform_info_, write_into_cache);
       }));
 
-  absl::optional<se::TfAllocatorAdapter> tf_allocator_adapter;
   XlaCompiler::Options options = GenerateCompilerOptions(
       **cache, *ctx->function_library(), ctx->device(),
       ctx->op_device_context() ? ctx->op_device_context()->stream() : nullptr,
-      platform_info_,
-      /*has_ref_vars=*/true, &tf_allocator_adapter);
+      platform_info_, /*has_ref_vars=*/true);
   // No detailed logging from on demand op.
   options.detailed_logging = false;
   XlaCompiler::CompileOptions compile_options;
@@ -141,7 +147,7 @@ Status XlaCompileOnDemandOp::Compile(
   compile_options.always_return_tuple = false;
 
   std::vector<int> variables_indices = GetResourceVariableIndices(ctx);
-  xla::StatusOr<std::vector<XlaCompiler::Argument>> args;
+  StatusOr<std::vector<XlaCompiler::Argument>> args;
   {
     std::vector<VariableInfo> variable_infos;
     TF_RETURN_IF_ERROR(
