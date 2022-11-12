@@ -159,6 +159,7 @@ cc_library(
     copts = tflite_copts_warnings(),
     deps = [
         ":graph_info",
+        ":kernel_api",
         ":memory_planner",
         ":simple_memory_arena",
         ":util",
@@ -175,6 +176,7 @@ cc_library(
     copts = tflite_copts_warnings() + ["-DTF_LITE_TENSORFLOW_PROFILER"],
     deps = [
         ":graph_info",
+        ":kernel_api",
         ":memory_planner",
         ":simple_memory_arena_with_profiler",
         ":util",
@@ -193,6 +195,7 @@ cc_test(
         ":arena_planner_with_profiler",
         ":graph_info",
         "//tensorflow/core:tflite_portable_logging",
+        "//tensorflow/lite:builtin_ops",
         "//tensorflow/lite/c:common",
         "//tensorflow/lite/testing:util",
         "@com_google_googletest//:gtest_main",
@@ -784,6 +787,25 @@ cc_library(
     alwayslink = 1,
 )
 
+# Enables calling xnnpack impl directly from TFLite kernels.
+config_setting(
+    name = "tflite_kernel_use_xnnpack_false",
+    define_values = {"tflite_kernel_use_xnnpack": "false"},
+)
+
+cc_library(
+    name = "tflite_kernel_use_xnnpack_optional",
+    compatible_with = get_compatible_with_portable(),
+    defines = select({
+        ":tflite_kernel_use_xnnpack_false": [],
+        "//tensorflow:macos": [],
+        "//tensorflow:fuchsia": [],
+        "//conditions:default": [
+            "TFLITE_KERNEL_USE_XNNPACK",
+        ],
+    }),
+)
+
 # Enables applying XNNPACK delegate for float models in TFLite runtime.
 # WARNING: This build flag is experimental and subject to change.
 config_setting(
@@ -1271,7 +1293,10 @@ tflite_cc_shared_object(
 bzl_library(
     name = "build_def_bzl",
     srcs = ["build_def.bzl"],
-    visibility = ["//tensorflow/lite/core/shims:__subpackages__"],
+    visibility = [
+        "//learning/brain/models/app_benchmarks:__pkg__",
+        "//tensorflow/lite/core/shims:__subpackages__",
+    ],
     deps = [
         ":special_rules_bzl",
         "//tensorflow:tensorflow_bzl",

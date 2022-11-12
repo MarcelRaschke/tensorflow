@@ -88,8 +88,7 @@ std::unique_ptr<OperationPass<func::FuncOp>> CreatePrepareQuantizePass(
 
 // Creates an instance of the PrepareQuantizeDRQ pass, which will
 // perfrom similar transformations as TFL::PrepareQuantizeDynamicRangePass.
-std::unique_ptr<OperationPass<func::FuncOp>> CreatePrepareQuantizeDRQPass(
-    const QuantizationSpecs& quant_specs, OpSet op_set);
+std::unique_ptr<OperationPass<func::FuncOp>> CreatePrepareQuantizeDRQPass();
 
 // Creates an instance of the PostQuantize pass, which will remove unnecessary
 // ops from the final quantized graph.
@@ -117,6 +116,12 @@ CreateReplaceCastHacksWithTFXLAOpsPass();
 // will be removed.
 std::unique_ptr<OperationPass<ModuleOp>>
 CreateMergeInitializerFunctionOpsToMainPass();
+
+// Creates a pass that "unfreezes" ConstOps into variables. Each ConstOp's use
+// will be replaced by a VarHandleOp -> ReadVariableOp pattern. The newly
+// created variables will be initialized in the session initializer function via
+// AssignVariableOps.
+std::unique_ptr<OperationPass<ModuleOp>> CreateUnfreezeConstantsPass();
 
 }  // namespace quant
 }  // namespace mlir
